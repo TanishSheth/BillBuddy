@@ -1,0 +1,71 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#F6F3EC">
+<title>BillBuddy — Join Group</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body class="bb-bg text-ink min-h-screen flex items-center justify-center px-5 py-12">
+
+  <div class="auth-card w-full">
+    <div class="flex items-center gap-3 mb-8 justify-center">
+      <div class="stamp-mark">$</div>
+      <div>
+        <h1 class="font-mono font-bold text-lg tracking-tight leading-none">JOIN GROUP</h1>
+        <p class="text-[11px] uppercase tracking-widest text-ink/50 leading-none mt-1">You've been invited</p>
+      </div>
+    </div>
+
+    <div class="bb-card text-center">
+      <p id="statusMsg" class="font-mono text-sm text-ink/60 mb-4">Joining group…</p>
+      <a href="/login.html" class="bb-btn-secondary">Go to Sign In</a>
+    </div>
+  </div>
+
+  <script>
+    const TOKEN_KEY = "billbuddy_token";
+    const PENDING_INVITE_KEY = "billbuddy_pending_invite";
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+
+    const msg = document.getElementById("statusMsg");
+
+    if (!code) {
+      msg.textContent = "No invite code found in the link.";
+    } else {
+      localStorage.setItem(PENDING_INVITE_KEY, code);
+      const token = localStorage.getItem(TOKEN_KEY);
+      if (token) {
+        fetch("/api/groups/join", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ invite_code: code }),
+        })
+          .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+          .then(({ ok, data }) => {
+            if (!ok) throw new Error(data.detail || "Failed to join");
+            localStorage.removeItem(PENDING_INVITE_KEY);
+            localStorage.setItem("billbuddy_group_id", String(data.id));
+            msg.textContent = `Joined "${data.name}"! Redirecting…`;
+            msg.className = "font-mono text-sm balance-positive mb-4";
+            setTimeout(() => { window.location.href = "/group.html"; }, 1000);
+          })
+          .catch((err) => {
+            msg.textContent = err.message;
+            msg.className = "font-mono text-sm balance-negative mb-4";
+          });
+      } else {
+        msg.textContent = "Sign in or create an account to join this group.";
+      }
+    }
+  </script>
+</body>
+</html>

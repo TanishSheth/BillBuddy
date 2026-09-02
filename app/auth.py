@@ -1,0 +1,75 @@
+import os
+from datetime import datetime, timedelta, timezone
+
+import bcrypt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
+from sqlalchemy.orm import Session
+
+from .config import ACCESS_TOKEN_EXPIRE_DAYS, SECRET_KEY
+from .database import get_db
+from . import models
+
+ALGORITHM = "HS256"
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
+
+
+def create_access_token(account_id: int) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
+    payload = {"sub": str(account_id), "exp": expire}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_account(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> models.Account:
+    if not credentials or not credentials.credentials:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        account_id = int(payload.get("sub", 0))
+    except (JWTError, ValueError):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
+    account = db.query(models.Account).get(account_id)
+    if not account:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account not found")
+    return account
+
+
+def process_pending_invites(db: Session, account: models.Account) -> list[models.GroupMember]:
+    added: list[models.GroupMember] = []
+    invites = (
+        db.query(models.GroupInvite)
+        .filter_by(email=account.email.lower(), status="pending")
+        .all()
+    )
+    for invite in invites:
+        existing = (
+            db.query(models.GroupMember)
+            .filter_by(group_id=invite.group_id, account_id=account.id)
+            .first()
+        )
+        if not existing:
+            member = models.GroupMember(
+                group_id=invite.group_id,
+                account_id=account.id,
+                display_name=account.display_name,
+                role="member",
+            )
+            db.add(member)
+            added.append(member)
+        invite.status = "accepted"
+    if invites:
+        db.commit()
+    return added

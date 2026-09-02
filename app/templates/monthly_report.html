@@ -1,0 +1,111 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page {
+    size: A4;
+    margin: 2cm 1.6cm;
+    @bottom-center { content: "Page " counter(page) " of " counter(pages); font-size: 9px; color: #888; }
+  }
+  body { font-family: "DejaVu Sans", Arial, sans-serif; color: #1a1a1a; font-size: 11px; }
+  h1 { font-size: 22px; margin-bottom: 2px; }
+  .subtitle { color: #666; font-size: 11px; margin-bottom: 24px; }
+  h2 { font-size: 15px; border-bottom: 2px solid #2563eb; padding-bottom: 4px; margin-top: 28px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e5e7eb; }
+  th { background: #f3f4f6; font-size: 10px; text-transform: uppercase; letter-spacing: .03em; color: #444; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .positive { color: #15803d; font-weight: 600; }
+  .negative { color: #b91c1c; font-weight: 600; }
+  .settlement-row { background: #eff6ff; }
+  .arrow { color: #2563eb; font-weight: bold; }
+  .receipt-page { page-break-before: always; }
+  .receipt-header { background: #f3f4f6; padding: 10px 14px; border-radius: 6px; margin-bottom: 10px; }
+  .receipt-header .store { font-size: 14px; font-weight: 700; }
+  .receipt-meta { font-size: 10px; color: #555; margin-top: 2px; }
+  .receipt-img { max-width: 100%; max-height: 22cm; display: block; margin: 0 auto; border: 1px solid #ddd; }
+  .empty { color: #888; font-style: italic; }
+</style>
+</head>
+<body>
+  <h1>Monthly Expense Report — {{ month_label }}</h1>
+  <div class="subtitle">Generated {{ generated_at }}</div>
+
+  <h2>Settlement Matrix</h2>
+  {% if settlements %}
+  <table>
+    <thead><tr><th>From</th><th></th><th>To</th><th class="num">Amount</th></tr></thead>
+    <tbody>
+    {% for s in settlements %}
+      <tr class="settlement-row">
+        <td>{{ s.from_name }}</td>
+        <td class="arrow">&#8594; pays</td>
+        <td>{{ s.to_name }}</td>
+        <td class="num">${{ "%.2f"|format(s.amount) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Everyone is settled up — no payments needed.</p>
+  {% endif %}
+
+  <h2>Balance Summary</h2>
+  <table>
+    <thead>
+      <tr><th>Member</th><th class="num">Total Paid</th><th class="num">Total Share Owed</th><th class="num">Net Balance</th></tr>
+    </thead>
+    <tbody>
+    {% for b in balances %}
+      <tr>
+        <td>{{ b.name }}</td>
+        <td class="num">${{ "%.2f"|format(b.total_paid) }}</td>
+        <td class="num">${{ "%.2f"|format(b.total_share_owed) }}</td>
+        <td class="num {{ 'positive' if b.net_balance >= 0 else 'negative' }}">
+          {{ "+" if b.net_balance >= 0 else "" }}${{ "%.2f"|format(b.net_balance) }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Itemized Expenses</h2>
+  {% if expenses %}
+  <table>
+    <thead>
+      <tr><th>Date</th><th>Store</th><th>Payer</th><th>Participants</th><th class="num">Total</th></tr>
+    </thead>
+    <tbody>
+    {% for e in expenses %}
+      <tr>
+        <td>{{ e.bill_date }}</td>
+        <td>{{ e.store_name }}</td>
+        <td>{{ e.payer_name }}</td>
+        <td>{{ e.participant_names|join(", ") }}</td>
+        <td class="num">${{ "%.2f"|format(e.total_amount) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No expenses recorded this month.</p>
+  {% endif %}
+
+  {% for e in expenses %}
+    {% if e.image_data_uri %}
+    <div class="receipt-page">
+      <div class="receipt-header">
+        <div class="store">{{ e.store_name }}</div>
+        <div class="receipt-meta">
+          {{ e.bill_date }} &nbsp;&middot;&nbsp; Paid by {{ e.payer_name }}
+          &nbsp;&middot;&nbsp; Split: {{ e.participant_names|join(", ") }}
+          &nbsp;&middot;&nbsp; Total: ${{ "%.2f"|format(e.total_amount) }}
+        </div>
+      </div>
+      <img class="receipt-img" src="{{ e.image_data_uri }}" alt="Receipt for {{ e.store_name }}">
+    </div>
+    {% endif %}
+  {% endfor %}
+</body>
+</html>
