@@ -3,8 +3,11 @@ __pycache__/
 *.py[cod]
 .env
 *.db
-uploads/
-reports/
+uploads/*
+!uploads/.gitignore
+reports/*
+!reports/.gitignore
+api/*
+!api/.gitignore
 .DS_Store
 *.log
-api/
