@@ -181,14 +181,14 @@ app = FastAPI(title="ShareSquad — Multi-User Expense Splitter")
 
 
 @app.middleware("http")
-async def dev_disable_static_cache(request: Request, call_next):
-    """In local dev, avoid 304 cached JS/CSS so UI changes show without hard-refresh."""
+async def disable_static_cache(request: Request, call_next):
+    """Avoid stale HTML/JS/CSS after deploys (browsers otherwise keep old UI)."""
     response = await call_next(request)
-    if os.environ.get("BILLBUDDY_ENV") == "development" or os.environ.get("SHARESQUAD_ENV") == "development":
-        path = request.url.path
-        if path == "/" or path.endswith((".html", ".js", ".css")):
-            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-            response.headers["Pragma"] = "no-cache"
+    path = request.url.path
+    if path == "/" or path.endswith((".html", ".js", ".css")):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 
