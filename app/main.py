@@ -180,6 +180,53 @@ def _ensure_schema():
             except Exception as err:
                 logger.warning("Could not add %s.%s: %s", table, column, err)
 
+        # Original pending_uploads.group_id was NOT NULL (group receipts only).
+        # Personal scans store account_id and leave group_id empty.
+        try:
+            if table_exists("pending_uploads"):
+                if dialect == "postgresql":
+                    row = conn.execute(
+                        text(
+                            "SELECT is_nullable FROM information_schema.columns "
+                            "WHERE table_schema = current_schema() "
+                            "AND table_name = 'pending_uploads' AND column_name = 'group_id'"
+                        )
+                    ).fetchone()
+                    if row and row[0] == "NO":
+                        conn.execute(text("ALTER TABLE pending_uploads ALTER COLUMN group_id DROP NOT NULL"))
+                        logger.info("Made pending_uploads.group_id nullable")
+                elif dialect == "sqlite":
+                    info = conn.execute(text("PRAGMA table_info(pending_uploads)")).fetchall()
+                    group_col = next((r for r in info if r[1] == "group_id"), None)
+                    if group_col is not None and int(group_col[3] or 0) == 1:
+                        conn.execute(text("PRAGMA foreign_keys=OFF"))
+                        conn.execute(
+                            text(
+                                "CREATE TABLE pending_uploads_new ("
+                                "id VARCHAR(64) NOT NULL PRIMARY KEY, "
+                                "group_id INTEGER, "
+                                "account_id INTEGER, "
+                                "file_path VARCHAR NOT NULL, "
+                                "created_at DATETIME, "
+                                "FOREIGN KEY(group_id) REFERENCES groups (id) ON DELETE CASCADE, "
+                                "FOREIGN KEY(account_id) REFERENCES accounts (id) ON DELETE CASCADE"
+                                ")"
+                            )
+                        )
+                        conn.execute(
+                            text(
+                                "INSERT INTO pending_uploads_new "
+                                "(id, group_id, account_id, file_path, created_at) "
+                                "SELECT id, group_id, account_id, file_path, created_at "
+                                "FROM pending_uploads"
+                            )
+                        )
+                        conn.execute(text("DROP TABLE pending_uploads"))
+                        conn.execute(text("ALTER TABLE pending_uploads_new RENAME TO pending_uploads"))
+                        logger.info("Rebuilt pending_uploads so group_id can be empty")
+        except Exception as err:
+            logger.warning("Could not make pending_uploads.group_id nullable: %s", err)
+
 
 _ensure_schema()
 
@@ -1379,13 +1426,14 @@ def create_personal_expense(
             .filter_by(id=payload.upload_id, account_id=account.id)
             .first()
         )
-        if pending and os.path.exists(pending.file_path):
-            ext = os.path.splitext(pending.file_path)[1]
-            final_filename = f"{uuid.uuid4().hex}{ext}"
-            personal_uploads = _personal_uploads_dir(account.id)
-            final_path = os.path.join(personal_uploads, final_filename)
-            shutil.move(pending.file_path, final_path)
-            db.delete(pending)
+        if not pending or not os.path.exists(pending.file_path):
+            raise HTTPException(400, "Upload not found or already used. Re-upload the receipt.")
+        ext = os.path.splitext(pending.file_path)[1]
+        final_filename = f"{uuid.uuid4().hex}{ext}"
+        personal_uploads = _personal_uploads_dir(account.id)
+        final_path = os.path.join(personal_uploads, final_filename)
+        shutil.move(pending.file_path, final_path)
+        db.delete(pending)
 
     expense = models.PersonalExpense(
         account_id=account.id,
@@ -1470,12 +1518,19 @@ async def upload_personal_receipt(
 
     pending = models.PendingUpload(id=upload_id, account_id=account.id, file_path=tmp_path)
     db.add(pending)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to save personal receipt upload")
+        raise HTTPException(500, "Could not save the receipt. Try again in a moment.")
 
     mime = file.content_type or "image/jpeg"
     vlm_config = resolve_vlm_config(db, account.id)
     extraction, source, message = extract_receipt_data(contents, mime, vlm_config)
-    if source == "ocr" and not message:
+    if source == "vlm":
+        message = message or "Read from the receipt photo. Please double-check the fields."
+    elif source == "ocr" and not message:
         message = "Read from the receipt photo. Please double-check the fields."
 
     return schemas.ExtractionResponse(

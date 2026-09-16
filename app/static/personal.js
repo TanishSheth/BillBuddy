@@ -143,10 +143,12 @@ function openExpenseModal(expense = null) {
     $("#billDate").value = expense.bill_date;
     $("#totalAmount").value = expense.total_amount;
     $("#expenseCategory").value = expense.category || "General";
-    $("#expenseCurrency").value = expense.currency || "USD";
+    ShareSquad.fillCurrencySelect($("#expenseCurrency"), expense.currency || "USD");
     $("#expenseNotes").value = expense.notes || "";
     $("#uploadId").value = "";
     $("#dropzone").classList.add("hidden");
+    $("#previewImg").classList.add("hidden");
+    $("#previewImg").removeAttribute("src");
   } else {
     $("#modalTitle").textContent = "Add Personal Expense";
     $("#expenseId").value = "";
@@ -154,10 +156,14 @@ function openExpenseModal(expense = null) {
     $("#billDate").value = new Date().toISOString().split("T")[0];
     $("#totalAmount").value = "";
     $("#expenseCategory").value = "Food & Dining";
-    $("#expenseCurrency").value = currentSummary?.currency || "USD";
+    ShareSquad.fillCurrencySelect($("#expenseCurrency"), currentSummary?.currency || "USD");
     $("#expenseNotes").value = "";
     $("#uploadId").value = "";
     $("#dropzone").classList.remove("hidden");
+    $("#previewImg").classList.add("hidden");
+    $("#previewImg").removeAttribute("src");
+    const fileInput = $("#receiptFileInput");
+    if (fileInput) fileInput.value = "";
   }
 }
 
@@ -170,10 +176,16 @@ async function handleReceiptUpload(file) {
   const status = $("#uploadStatus");
   status.classList.remove("hidden");
 
+  const preview = $("#previewImg");
+  if (preview.src && preview.src.startsWith("blob:")) URL.revokeObjectURL(preview.src);
+  preview.src = URL.createObjectURL(file);
+  preview.classList.remove("hidden");
+
   const formData = new FormData();
   formData.append("file", file);
 
   try {
+    ShareSquad.showToast("Uploading receipt and reading it…", "info");
     const data = await ShareSquad.api("/personal/receipts/upload", {
       method: "POST",
       body: formData,
@@ -182,14 +194,22 @@ async function handleReceiptUpload(file) {
     if (data.extraction) {
       if (data.extraction.store_name) $("#storeName").value = data.extraction.store_name;
       if (data.extraction.bill_date) $("#billDate").value = data.extraction.bill_date;
-      if (data.extraction.total_amount) $("#totalAmount").value = data.extraction.total_amount;
+      if (data.extraction.total_amount != null && data.extraction.total_amount !== "") {
+        $("#totalAmount").value = data.extraction.total_amount;
+      }
       if (data.extraction.category) $("#expenseCategory").value = data.extraction.category;
+      ShareSquad.fillCurrencySelect(
+        $("#expenseCurrency"),
+        data.extraction.currency || currentSummary?.currency || "USD"
+      );
     }
-    ShareSquad.showToast(data.message || "Receipt scanned. Please verify the fields.", "success");
+    ShareSquad.showToast(data.message || "Receipt scanned. Please verify and save.", "success");
   } catch (err) {
     ShareSquad.showToast(err.message, "error");
   } finally {
     status.classList.add("hidden");
+    const fileInput = $("#receiptFileInput");
+    if (fileInput) fileInput.value = "";
   }
 }
 

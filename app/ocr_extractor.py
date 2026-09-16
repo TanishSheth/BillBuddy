@@ -287,6 +287,58 @@ def _find_store_name(lines: list[str]) -> tuple[str | None, bool]:
     return None, False
 
 
+def _find_currency(text: str) -> str | None:
+    if "₹" in text or "Rs." in text or "Rs " in text or "INR" in text.upper() or "RUPEE" in text.upper():
+        return "INR"
+    upper = text.upper()
+    codes = (
+        ("CAD", "CAD"),
+        ("C$", "CAD"),
+        ("AUD", "AUD"),
+        ("A$", "AUD"),
+        ("GBP", "GBP"),
+        ("EUR", "EUR"),
+        ("AED", "AED"),
+        ("SGD", "SGD"),
+        ("CHF", "CHF"),
+        ("JPY", "JPY"),
+        ("CNY", "CNY"),
+        ("USD", "USD"),
+    )
+    for needle, code in codes:
+        if needle in upper or needle in text:
+            return code
+    if "£" in text:
+        return "GBP"
+    if "€" in text:
+        return "EUR"
+    if "¥" in text:
+        return "JPY"
+    if "$" in text:
+        return "USD"
+    return None
+
+
+_CATEGORY_HINTS = (
+    ("Food & Dining", ("restaurant", "cafe", "coffee", "pizza", "burger", "diner", "bar")),
+    ("Groceries", ("grocery", "supermarket", "market", "trader joe", "whole foods", "walmart", "costco")),
+    ("Transit", ("uber", "lyft", "metro", "transit", "parking", "gas station", "shell", "exxon")),
+    ("Travel", ("airline", "airways", "hotel", "airbnb", "booking.com", "expedia")),
+    ("Healthcare", ("pharmacy", "clinic", "hospital", "dental", "cvs", "walgreens")),
+    ("Utilities", ("electric", "internet", "wifi", "verizon", "at&t", "comcast")),
+    ("Entertainment", ("netflix", "spotify", "cinema", "theater", "amc")),
+    ("Shopping", ("amazon", "target", "best buy", "ikea", "apple store")),
+)
+
+
+def _guess_category(text: str, store_name: str | None) -> str:
+    haystack = f"{store_name or ''} {text}".lower()
+    for category, needles in _CATEGORY_HINTS:
+        if any(n in haystack for n in needles):
+            return category
+    return "General"
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -305,11 +357,14 @@ def extract_receipt_data_ocr(image_bytes: bytes) -> tuple[ReceiptExtraction, boo
     store_name, store_confident = _find_store_name(lines)
     bill_date, date_confident = _find_date(text)
     total_amount, total_confident = _find_total(lines)
+    currency = _find_currency(text)
 
     extraction = ReceiptExtraction(
         store_name=store_name or "Unknown store",
         bill_date=bill_date or datetime.now().strftime("%Y-%m-%d"),
         total_amount=total_amount or 0.0,
+        currency=currency or "USD",
+        category=_guess_category(text, store_name),
     )
     all_confident = store_confident and date_confident and total_confident and bool(text)
     return extraction, all_confident

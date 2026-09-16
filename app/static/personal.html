@@ -85,7 +85,7 @@
       <div class="bb-card p-4 flex flex-col justify-between">
         <div>
           <div class="text-[10px] font-mono uppercase tracking-wider text-muted">Receipt Scanner</div>
-          <div class="text-xs text-ink/70 mt-1 font-mono">Auto-extract merchant, total & date using AI</div>
+          <div class="text-xs text-ink/70 mt-1 font-mono">Read merchant, total, date, and currency from a photo</div>
         </div>
         <button id="scanReceiptBtn" class="bb-btn-secondary !py-1 text-[11px] mt-2 justify-start">
           <i data-lucide="camera" class="w-3.5 h-3.5 text-brand"></i> Scan Receipt
@@ -150,15 +150,16 @@
 
       <!-- Receipt Dropzone -->
       <div id="dropzone" class="dropzone mb-4">
-        <input type="file" id="receiptFileInput" accept="image/*" class="hidden" />
-        <i data-lucide="upload-cloud" class="w-8 h-8 text-brand/60 mb-2"></i>
-        <p class="text-xs font-mono text-ink/70">Drag & drop receipt image or <span class="text-brand font-bold">browse</span></p>
-        <p class="text-[10px] text-ink/40 font-mono mt-1">AI will automatically read merchant, amount, & date</p>
+        <input type="file" id="receiptFileInput" accept="image/*" capture="environment" class="hidden" />
+        <i data-lucide="receipt" class="w-8 h-8 text-brand/60 mb-2"></i>
+        <p class="text-xs font-mono text-ink/70 font-bold">Drop receipt photo here</p>
+        <p class="text-[10px] text-ink/40 font-mono mt-1">or click to browse / take photo — merchant, total, date, and currency are read automatically</p>
       </div>
+      <img id="previewImg" class="hidden mb-4 w-full rounded border border-ink/10 receipt-preview" alt="Receipt preview" />
 
       <div id="uploadStatus" class="hidden text-xs font-mono mb-3 p-2 rounded bg-brand/5 text-brand flex items-center gap-2">
         <div class="animate-spin w-3 h-3 border-2 border-brand border-t-transparent rounded-full"></div>
-        <span>Scanning receipt with AI…</span>
+        <span>Uploading receipt and reading it…</span>
       </div>
 
       <form id="expenseForm" class="space-y-4">
