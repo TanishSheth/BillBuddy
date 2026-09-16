@@ -1,124 +1,81 @@
-﻿# BillBuddy — Multi-User Expense Splitter
+﻿# ShareSquad
 
-A web app for splitting expenses with **login**, **groups**, **invite links**, **receipt scanning**, and **monthly PDF reports**.
+ShareSquad is a multi-user expense splitter and personal spending tracker. People can share a group (trips, apartments, friends), scan receipts, split bills in mixed currencies, settle up, and keep a separate personal ledger.
 
-Runs separately from the original `Expense Splitter` (port 8000). This version uses port **8001** locally.
+This folder is the web app. It is not the older desktop/local splitter. Locally it runs on **port 8001**. Production uses Docker, Postgres, and Caddy on Oracle Always Free.
 
-## Quick start (local)
+Live site: **https://sharesquad.tanishsheth.com**  
+Source: **https://github.com/TanishSheth/BillBuddy** (repo name is still BillBuddy; the product name is ShareSquad)
+
+How to run it, deploy it, and update it without losing data: **[OPERATIONS.md](OPERATIONS.md)**.
+
+## What you can do
+
+| Area | What it does |
+|------|----------------|
+| Accounts | Register, sign in, JWT session in the browser |
+| Shared groups | Create a group with a base currency, invite by email or link, open/leave/delete |
+| Receipts | Photo upload → local OCR first; API (Gemini and others) only if OCR is unsure **and** a key is set |
+| Splits | Equal, percent, exact, or shares; payer and participants per expense |
+| Money | Each expense can be USD, INR, CAD, EUR, and more; settle the month in another currency |
+| Balances | Who owes whom, simplified payments, live refresh in a group |
+| Reports | Monthly PDF with receipts (download; email if SMTP is configured) |
+| Personal tracker | Your own monthly expenses, same receipt scan, category totals, PDF export |
+| Settings | Preferred currency, compact list, your own vision API key, optional per-group override |
+
+## Receipt reading (important)
+
+Having an API key does **not** send every photo to the API.
+
+1. Tesseract OCR always runs first on the server (free, no key).
+2. If merchant, date, and total all look solid, that result is used and the API is skipped.
+3. If any of those is weak **and** a key is available, the photo is sent to the vision model.
+4. The warning toast is based on **missing fields on the form**, not on “the API had an error.” If merchant/date/total are filled, you get a success toast even when Gemini was skipped or failed internally.
+
+Add a key in **Settings → Use my own API key** (Google, OpenAI, Anthropic, Mistral, or Groq). Optional group override. Optional server fallback: `SERVER_VLM_API_KEY` in `.env`.
+
+## Quick start (your PC)
 
 ```powershell
 cd "Expense Splitter Web"
 python -m venv venv
 .\venv\Scripts\pip install -r requirements.txt
 copy .env.example .env
-# Edit .env — set SECRET_KEY and SMTP_* (optional)
+# Set SECRET_KEY in .env. SMTP and API keys are optional.
 .\run.ps1
 ```
 
 Open **http://localhost:8001**
 
-## Features
+Local data is **SQLite** on disk. Cloud data is **Postgres**. They are not the same database.
 
-| Feature | Description |
-|---------|-------------|
-| Groups | Isolated expense groups per household, trip, etc. |
-| Receipt scan | Upload a photo → AI auto-fills the form (you review before saving) |
-| Per-user API keys | Each user picks provider, model, and key in **Settings** |
-| Group settings | Override VLM settings per group |
-| Balances & settlements | Who owes whom, simplified payment plan |
-| PDF reports | Monthly archive with receipts; emailed to all members |
-| Invites | Email invite or shareable link |
+## Production in one sentence
 
-## Receipt scanning & API keys
-
-**Users bring their own API keys** — configured in **Settings → General**:
-
-1. Turn on **Use my own API key**
-2. Choose provider (Google, OpenAI, Anthropic, Mistral, Groq)
-3. Choose model
-4. Paste API key → Save
-
-Optional **group override** in **Settings → Group Settings**.
-
-The server `.env` does **not** need any AI API key unless you want a shared fallback (`SERVER_VLM_API_KEY`).
-
-## Server `.env` (what the host configures)
-
-| Variable | Local | AWS |
-|----------|-------|-----|
-| `SECRET_KEY` | Required | Required |
-| `BASE_URL` | `http://localhost:8001` | `https://yourdomain.com` |
-| `SMTP_*` | Optional | Recommended |
-| `POSTGRES_PASSWORD` | Not needed | Required |
-| `SERVER_VLM_API_KEY` | Optional fallback | Optional fallback |
-
-See `.env.example` for the full list.
-
-## Email
-
-With SMTP configured, the server sends:
-- **Invite emails** when you invite someone by email
-- **Monthly PDF reports** to every group member (opt-out in Settings)
-
-Without SMTP: share the **invite link** manually; download reports from the app.
-
-## Deploy on AWS
-
-See **[DEPLOY.md](DEPLOY.md)** for full guides:
-
-- **EC2 free tier** ($0 for 12 months, 1 GB — good for a one-month trial)
-- **Lightsail** (~$10/mo, 2 GB — recommended for reliable PDF reports)
-
-Quick deploy on a server:
-
-```bash
-git clone https://github.com/YOUR_USERNAME/billbuddy.git
-cd billbuddy
-cp .env.example .env   # edit SECRET_KEY, BASE_URL, POSTGRES_PASSWORD, SMTP_*
-sudo docker compose up -d --build
-```
-
-EC2 free tier helper (adds swap for PDFs on 1 GB RAM):
-
-```bash
-chmod +x deploy/ec2-free-tier-setup.sh
-REPO_URL=https://github.com/YOUR_USERNAME/billbuddy.git ./deploy/ec2-free-tier-setup.sh
-```
-
-## Project structure
-
-```
-Expense Splitter Web/
-├── app/
-│   ├── main.py           # API routes
-│   ├── models.py         # Database models
-│   ├── vlm.py            # Multi-provider receipt extraction
-│   ├── settings_service.py
-│   ├── emailer.py        # Invites + report emails
-│   └── static/           # Frontend (HTML/JS/CSS)
-├── deploy/               # AWS setup scripts
-├── docker-compose.yml    # Production (app + Postgres)
-├── Dockerfile
-├── .env.example
-├── run.ps1               # Local dev server
-└── DEPLOY.md
-```
-
-## API
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| POST | `/api/auth/register` | Create account |
-| POST | `/api/auth/login` | Get JWT |
-| GET | `/api/settings` | User preferences |
-| PUT | `/api/settings` | Save preferences |
-| GET | `/api/groups/{id}/settings` | Per-group preferences |
-| POST | `/api/groups/{id}/receipts/extract` | Scan receipt image |
-| * | `/api/groups/{id}/expenses` | Expenses |
-| * | `/api/groups/{id}/periods` | Balances, reports |
-
-All group routes require `Authorization: Bearer <token>`.
+Oracle VM runs `app` + Postgres + Caddy. Domain DNS is on Cloudflare (**DNS only / grey cloud** for ShareSquad so Let’s Encrypt works). Updates: push to GitHub `main`, then on the VM `git fetch` + `git reset --hard origin/main` + rebuild **only the app** — never `docker compose down -v`.
 
 ## Stack
 
-FastAPI · SQLite (local) / PostgreSQL (AWS) · vanilla JS · Tailwind · WeasyPrint · multi-provider VLM
+FastAPI · vanilla JS · Tailwind · SQLite (local) / PostgreSQL (cloud) · Caddy · Tesseract OCR · optional vision APIs · WeasyPrint PDFs
+
+Internal Docker/Postgres names are still `billbuddy` on purpose (volumes and DB user). Do not rename them or existing data will look “gone.”
+
+## Project layout
+
+```
+Expense Splitter Web/
+├── app/                  # API + static UI
+│   ├── main.py           # routes, startup schema updates
+│   ├── models.py
+│   ├── ocr_extractor.py  # local receipt OCR
+│   ├── vlm.py            # OCR then optional API
+│   └── static/           # HTML / JS / CSS
+├── deploy/
+│   ├── Caddyfile
+│   └── update.sh         # production pull + rebuild
+├── docker-compose.yml
+├── Dockerfile
+├── .env.example
+├── run.ps1
+├── README.md
+└── OPERATIONS.md
+```
