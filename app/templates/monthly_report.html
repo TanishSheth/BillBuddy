@@ -1,70 +1,125 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
   @page {
     size: A4;
-    margin: 2cm 1.6cm;
-    @bottom-center { content: "Page " counter(page) " of " counter(pages); font-size: 9px; color: #888; }
+    margin: 1.8cm 1.5cm;
+    @bottom-center { content: "Page " counter(page) " of " counter(pages); font-size: 8px; color: #888; font-family: sans-serif; }
   }
-  body { font-family: "DejaVu Sans", Arial, sans-serif; color: #1a1a1a; font-size: 11px; }
-  h1 { font-size: 22px; margin-bottom: 2px; }
-  .subtitle { color: #666; font-size: 11px; margin-bottom: 24px; }
-  h2 { font-size: 15px; border-bottom: 2px solid #2563eb; padding-bottom: 4px; margin-top: 28px; }
-  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e5e7eb; }
-  th { background: #f3f4f6; font-size: 10px; text-transform: uppercase; letter-spacing: .03em; color: #444; }
+  body { font-family: "DejaVu Sans", -apple-system, BlinkMacSystemFont, Arial, sans-serif; color: #1e293b; font-size: 10px; line-height: 1.4; }
+  .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0f766e; padding-bottom: 12px; margin-bottom: 18px; }
+  .logo-img { height: 44px; width: auto; vertical-align: middle; }
+  .brand-title { font-size: 20px; font-weight: 800; color: #0f766e; margin: 0; letter-spacing: -0.5px; }
+  .brand-sub { font-size: 9px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }
+  .meta-box { text-align: right; font-size: 9px; color: #64748b; }
+  h2 { font-size: 13px; color: #0f766e; border-bottom: 1px solid #cbd5e1; padding-bottom: 3px; margin-top: 20px; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; margin-bottom: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-size: 9.5px; }
+  th { background: #f8fafc; font-weight: 700; color: #475569; text-transform: uppercase; font-size: 8.5px; letter-spacing: 0.5px; }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .positive { color: #15803d; font-weight: 600; }
-  .negative { color: #b91c1c; font-weight: 600; }
-  .settlement-row { background: #eff6ff; }
-  .arrow { color: #2563eb; font-weight: bold; }
+  .positive { color: #15803d; font-weight: 700; }
+  .negative { color: #b91c1c; font-weight: 700; }
+  .settlement-card { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; }
+  .conversion-badge { background: #eff6ff; border: 1px solid #bfdbfe; color: #1d4ed8; padding: 6px 10px; border-radius: 4px; font-size: 9px; margin-bottom: 10px; }
+  .tag { background: #f1f5f9; color: #475569; padding: 2px 6px; border-radius: 4px; font-size: 8px; font-weight: 600; }
   .receipt-page { page-break-before: always; }
-  .receipt-header { background: #f3f4f6; padding: 10px 14px; border-radius: 6px; margin-bottom: 10px; }
-  .receipt-header .store { font-size: 14px; font-weight: 700; }
-  .receipt-meta { font-size: 10px; color: #555; margin-top: 2px; }
-  .receipt-img { max-width: 100%; max-height: 22cm; display: block; margin: 0 auto; border: 1px solid #ddd; }
-  .empty { color: #888; font-style: italic; }
+  .receipt-header { background: #f8fafc; border: 1px solid #e2e8f0; padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; }
+  .receipt-img { max-width: 100%; max-height: 20cm; display: block; margin: 0 auto; border: 1px solid #cbd5e1; border-radius: 4px; }
+  .empty { color: #94a3b8; font-style: italic; padding: 8px 0; }
 </style>
 </head>
 <body>
-  <h1>Monthly Expense Report — {{ month_label }}</h1>
-  <div class="subtitle">Generated {{ generated_at }}</div>
+  <div class="header">
+    <table style="width: 100%; border: none; margin: 0;">
+      <tr style="border: none;">
+        <td style="border: none; padding: 0;">
+          {% if logo_data_uri %}
+          <img src="{{ logo_data_uri }}" class="logo-img" alt="ShareSquad">
+          {% else %}
+          <div class="brand-title">ShareSquad</div>
+          {% endif %}
+          <div class="brand-sub">{{ group_name }} &bull; Monthly Expense Settlement</div>
+        </td>
+        <td style="border: none; padding: 0; text-align: right; vertical-align: top;">
+          <div class="meta-box">
+            <strong>Period:</strong> {{ month_label }}<br>
+            <strong>Generated:</strong> {{ generated_at }}<br>
+            <strong>Base Currency:</strong> {{ base_currency }}
+          </div>
+        </td>
+      </tr>
+    </table>
+  </div>
 
-  <h2>Settlement Matrix</h2>
+  {% if target_currency and target_currency != base_currency %}
+  <div class="conversion-badge">
+    <strong>Currency Auto-Conversion Applied:</strong> Converted from <strong>{{ base_currency }}</strong> to <strong>{{ target_currency }}</strong> at locked rate of <strong>1 {{ base_currency }} = {{ "%.4f"|format(fx_rate) }} {{ target_currency }}</strong>.
+  </div>
+  {% endif %}
+
+  <h2>Final Settlement Matrix (Min-Transaction Plan)</h2>
   {% if settlements %}
   <table>
-    <thead><tr><th>From</th><th></th><th>To</th><th class="num">Amount</th></tr></thead>
+    <thead>
+      <tr>
+        <th>From Member</th>
+        <th></th>
+        <th>To Member</th>
+        <th class="num">Amount ({{ base_currency }})</th>
+        {% if target_currency and target_currency != base_currency %}
+        <th class="num">Converted ({{ target_currency }})</th>
+        {% endif %}
+      </tr>
+    </thead>
     <tbody>
     {% for s in settlements %}
-      <tr class="settlement-row">
-        <td>{{ s.from_name }}</td>
-        <td class="arrow">&#8594; pays</td>
-        <td>{{ s.to_name }}</td>
-        <td class="num">${{ "%.2f"|format(s.amount) }}</td>
+      <tr style="background: #f0fdf4;">
+        <td><strong>{{ s.from_name }}</strong></td>
+        <td style="color: #0f766e; font-weight: bold;">&rarr; pays</td>
+        <td><strong>{{ s.to_name }}</strong></td>
+        <td class="num">{{ base_currency }} {{ "%.2f"|format(s.amount) }}</td>
+        {% if target_currency and target_currency != base_currency %}
+        <td class="num" style="color: #0f766e; font-weight: bold;">
+          {{ target_currency }} {{ "%.2f"|format(s.converted_amount if s.converted_amount is not none else s.amount * fx_rate) }}
+        </td>
+        {% endif %}
       </tr>
     {% endfor %}
     </tbody>
   </table>
   {% else %}
-  <p class="empty">Everyone is settled up — no payments needed.</p>
+  <p class="empty">All group members are fully balanced — no settlements required.</p>
   {% endif %}
 
-  <h2>Balance Summary</h2>
+  <h2>Member Balance Summary</h2>
   <table>
     <thead>
-      <tr><th>Member</th><th class="num">Total Paid</th><th class="num">Total Share Owed</th><th class="num">Net Balance</th></tr>
+      <tr>
+        <th>Member</th>
+        <th class="num">Total Paid</th>
+        <th class="num">Total Share Owed</th>
+        <th class="num">Net Balance ({{ base_currency }})</th>
+        {% if target_currency and target_currency != base_currency %}
+        <th class="num">Net in {{ target_currency }}</th>
+        {% endif %}
+      </tr>
     </thead>
     <tbody>
     {% for b in balances %}
       <tr>
-        <td>{{ b.name }}</td>
-        <td class="num">${{ "%.2f"|format(b.total_paid) }}</td>
-        <td class="num">${{ "%.2f"|format(b.total_share_owed) }}</td>
+        <td><strong>{{ b.name }}</strong></td>
+        <td class="num">{{ base_currency }} {{ "%.2f"|format(b.total_paid) }}</td>
+        <td class="num">{{ base_currency }} {{ "%.2f"|format(b.total_share_owed) }}</td>
         <td class="num {{ 'positive' if b.net_balance >= 0 else 'negative' }}">
-          {{ "+" if b.net_balance >= 0 else "" }}${{ "%.2f"|format(b.net_balance) }}
+          {{ "+" if b.net_balance >= 0 else "" }}{{ base_currency }} {{ "%.2f"|format(b.net_balance) }}
         </td>
+        {% if target_currency and target_currency != base_currency %}
+        <td class="num {{ 'positive' if b.net_balance >= 0 else 'negative' }}">
+          {{ "+" if b.net_balance >= 0 else "" }}{{ target_currency }} {{ "%.2f"|format(b.converted_net_balance if b.converted_net_balance is not none else b.net_balance * fx_rate) }}
+        </td>
+        {% endif %}
       </tr>
     {% endfor %}
     </tbody>
@@ -74,33 +129,39 @@
   {% if expenses %}
   <table>
     <thead>
-      <tr><th>Date</th><th>Store</th><th>Payer</th><th>Participants</th><th class="num">Total</th></tr>
+      <tr>
+        <th>Date</th>
+        <th>Store / Merchant</th>
+        <th>Category</th>
+        <th>Paid By</th>
+        <th>Split Among</th>
+        <th class="num">Amount</th>
+      </tr>
     </thead>
     <tbody>
     {% for e in expenses %}
       <tr>
         <td>{{ e.bill_date }}</td>
-        <td>{{ e.store_name }}</td>
+        <td><strong>{{ e.store_name }}</strong></td>
+        <td><span class="tag">{{ e.category }}</span></td>
         <td>{{ e.payer_name }}</td>
         <td>{{ e.participant_names|join(", ") }}</td>
-        <td class="num">${{ "%.2f"|format(e.total_amount) }}</td>
+        <td class="num">{{ e.currency }} {{ "%.2f"|format(e.total_amount) }}</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
   {% else %}
-  <p class="empty">No expenses recorded this month.</p>
+  <p class="empty">No expenses were logged during this period.</p>
   {% endif %}
 
   {% for e in expenses %}
     {% if e.image_data_uri %}
     <div class="receipt-page">
       <div class="receipt-header">
-        <div class="store">{{ e.store_name }}</div>
-        <div class="receipt-meta">
-          {{ e.bill_date }} &nbsp;&middot;&nbsp; Paid by {{ e.payer_name }}
-          &nbsp;&middot;&nbsp; Split: {{ e.participant_names|join(", ") }}
-          &nbsp;&middot;&nbsp; Total: ${{ "%.2f"|format(e.total_amount) }}
+        <strong style="font-size: 12px; color: #0f766e;">{{ e.store_name }}</strong> &nbsp;&bull;&nbsp; {{ e.bill_date }}
+        <div style="font-size: 8.5px; color: #64748b; margin-top: 2px;">
+          Category: <strong>{{ e.category }}</strong> &nbsp;|&nbsp; Paid by: <strong>{{ e.payer_name }}</strong> &nbsp;|&nbsp; Amount: <strong>{{ e.currency }} {{ "%.2f"|format(e.total_amount) }}</strong>
         </div>
       </div>
       <img class="receipt-img" src="{{ e.image_data_uri }}" alt="Receipt for {{ e.store_name }}">

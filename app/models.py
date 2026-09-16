@@ -1,6 +1,6 @@
 import secrets
 from sqlalchemy import (
-    Column, Integer, String, Numeric, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, func
+    Column, Integer, String, Numeric, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, Text, func
 )
 from sqlalchemy.orm import relationship
 from .database import Base
@@ -23,6 +23,7 @@ class Account(Base):
     groups_created = relationship("Group", back_populates="creator")
     settings = relationship("AccountSettings", back_populates="account", uselist=False)
     password_reset_tokens = relationship("PasswordResetToken", back_populates="account")
+    personal_expenses = relationship("PersonalExpense", back_populates="account", cascade="all, delete-orphan")
 
 
 class PasswordResetToken(Base):
@@ -49,6 +50,7 @@ class AccountSettings(Base):
     vlm_api_key_encrypted = Column(String(500), nullable=True)
     email_monthly_reports = Column(Boolean, default=True)
     compact_list_view = Column("compact_ledger_view", Boolean, default=False)
+    preferred_currency = Column(String(10), default="USD")
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     account = relationship("Account", back_populates="settings")
@@ -59,6 +61,7 @@ class Group(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(150), nullable=False)
+    currency = Column(String(10), default="USD", nullable=False)
     invite_code = Column(String(64), unique=True, nullable=False, default=generate_invite_code)
     created_by_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
     created_at = Column(DateTime, server_default=func.now())
@@ -119,7 +122,8 @@ class PendingUpload(Base):
     __tablename__ = "pending_uploads"
 
     id = Column(String(64), primary_key=True)
-    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
     file_path = Column(String, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
 
@@ -136,6 +140,8 @@ class MonthlyPeriod(Base):
     status = Column(String(20), default="ACTIVE")
     pdf_filename = Column(String, nullable=True)
     pdf_path = Column(String, nullable=True)
+    target_currency = Column(String(10), nullable=True)
+    settlement_fx_rate = Column(Numeric(12, 6), nullable=True)
     settled_at = Column(DateTime, nullable=True)
 
     group = relationship("Group", back_populates="periods")
@@ -150,6 +156,10 @@ class Expense(Base):
     store_name = Column(String(150), nullable=False)
     bill_date = Column(Date, nullable=False)
     total_amount = Column(Numeric(10, 2), nullable=False)
+    currency = Column(String(10), default="USD")
+    category = Column(String(50), default="General")
+    split_type = Column(String(20), default="EQUAL")  # EQUAL, PERCENTAGE, EXACT, SHARES
+    fx_rate_to_group = Column(Numeric(12, 6), default=1.0)
     payer_member_id = Column(Integer, ForeignKey("group_members.id", ondelete="CASCADE"))
     image_path = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
@@ -166,6 +176,24 @@ class ExpenseSplit(Base):
     expense_id = Column(Integer, ForeignKey("expenses.id", ondelete="CASCADE"))
     member_id = Column(Integer, ForeignKey("group_members.id", ondelete="CASCADE"))
     share_amount = Column(Numeric(10, 2), nullable=False)
+    split_value = Column(Numeric(10, 2), nullable=True)  # Stores %, exact, or share ratio entered
 
     expense = relationship("Expense", back_populates="splits")
     member = relationship("GroupMember", back_populates="splits")
+
+
+class PersonalExpense(Base):
+    __tablename__ = "personal_expenses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    store_name = Column(String(150), nullable=False)
+    bill_date = Column(Date, nullable=False)
+    total_amount = Column(Numeric(10, 2), nullable=False)
+    currency = Column(String(10), default="USD", nullable=False)
+    category = Column(String(50), default="General", nullable=False)
+    notes = Column(Text, nullable=True)
+    image_path = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    account = relationship("Account", back_populates="personal_expenses")

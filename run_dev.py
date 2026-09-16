@@ -1,4 +1,4 @@
-﻿"""
+"""
 Development server: watches app/ only and restarts on Python changes.
 Runs on port 8001 so the original Expense Splitter can stay on 8000.
 """
@@ -18,6 +18,7 @@ PORT = 8001
 def start_server() -> subprocess.Popen:
     env = os.environ.copy()
     env["BILLBUDDY_ENV"] = "development"
+    env["SHARESQUAD_ENV"] = "development"
     return subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app", f"--host={HOST}", f"--port={PORT}"],
         cwd=ROOT,
@@ -37,7 +38,7 @@ def stop_server(proc: subprocess.Popen) -> None:
 
 
 def main() -> None:
-    print(f"BillBuddy running at http://localhost:{PORT} (LAN: http://0.0.0.0:{PORT})")
+    print(f"ShareSquad running at http://localhost:{PORT} (LAN: http://0.0.0.0:{PORT})")
     print(f"Watching {APP_DIR} for Python changes. Press Ctrl+C to stop.")
     proc = start_server()
     try:

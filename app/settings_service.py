@@ -134,20 +134,21 @@ class ResolvedVlmConfig:
 
 
 def resolve_vlm_config(
-    db: Session, account_id: int, group_id: int
+    db: Session, account_id: int, group_id: int | None = None
 ) -> ResolvedVlmConfig:
     account_row = get_account_settings(db, account_id)
-    group_row = get_group_member_settings(db, account_id, group_id)
+    if group_id:
+        group_row = get_group_member_settings(db, account_id, group_id)
 
-    if group_row.override_global_vlm:
-        api_key = decrypt_secret(group_row.vlm_api_key_encrypted)
-        if api_key:
-            return ResolvedVlmConfig(
-                group_row.vlm_provider or DEFAULT_PROVIDER,
-                group_row.vlm_model or DEFAULT_MODEL,
-                api_key,
-                "group",
-            )
+        if group_row.override_global_vlm:
+            api_key = decrypt_secret(group_row.vlm_api_key_encrypted)
+            if api_key:
+                return ResolvedVlmConfig(
+                    group_row.vlm_provider or DEFAULT_PROVIDER,
+                    group_row.vlm_model or DEFAULT_MODEL,
+                    api_key,
+                    "group",
+                )
 
     if account_row.use_own_vlm:
         api_key = decrypt_secret(account_row.vlm_api_key_encrypted)

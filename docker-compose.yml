@@ -1,10 +1,13 @@
-﻿# Production stack for AWS Lightsail / EC2 — app + Postgres on port 80
+﻿# BillBuddy — Postgres + app.
+# HTTP only (default):  docker compose up -d
+# HTTPS: set DOMAIN + APP_HOST_PORT in .env, then:
+#   sudo docker compose --profile https up -d
 services:
   app:
     build: .
     restart: unless-stopped
     ports:
-      - "80:8000"
+      - "${APP_HOST_PORT:-80}:8000"
     env_file:
       - .env
     environment:
@@ -32,6 +35,24 @@ services:
       timeout: 5s
       retries: 5
 
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    profiles: ["https"]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+
 volumes:
   billbuddy-data:
   pg-data:
+  caddy-data:
+  caddy-config:

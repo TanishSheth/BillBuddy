@@ -4,8 +4,13 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
 from sqlalchemy.orm import Session
+
+try:
+    from jose import JWTError, jwt
+except ImportError:
+    import jwt
+    JWTError = jwt.PyJWTError
 
 from .config import ACCESS_TOKEN_EXPIRE_DAYS, SECRET_KEY
 from .database import get_db
@@ -39,7 +44,7 @@ def get_current_account(
     try:
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
         account_id = int(payload.get("sub", 0))
-    except (JWTError, ValueError):
+    except (JWTError, ValueError, Exception):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
     account = db.query(models.Account).get(account_id)
     if not account:

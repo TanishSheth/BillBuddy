@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page {
+    size: A4;
+    margin: 1.8cm 1.5cm;
+    @bottom-center { content: "Page " counter(page) " of " counter(pages); font-size: 8px; color: #888; font-family: sans-serif; }
+  }
+  body { font-family: "DejaVu Sans", -apple-system, BlinkMacSystemFont, Arial, sans-serif; color: #1e293b; font-size: 10px; line-height: 1.4; }
+  .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0f766e; padding-bottom: 12px; margin-bottom: 18px; }
+  .logo-img { height: 44px; width: auto; vertical-align: middle; }
+  .brand-title { font-size: 20px; font-weight: 800; color: #0f766e; margin: 0; letter-spacing: -0.5px; }
+  .brand-sub { font-size: 9px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }
+  .meta-box { text-align: right; font-size: 9px; color: #64748b; }
+  h2 { font-size: 13px; color: #0f766e; border-bottom: 1px solid #cbd5e1; padding-bottom: 3px; margin-top: 20px; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; margin-bottom: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-size: 9.5px; }
+  th { background: #f8fafc; font-weight: 700; color: #475569; text-transform: uppercase; font-size: 8.5px; letter-spacing: 0.5px; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tag { background: #f1f5f9; color: #475569; padding: 2px 6px; border-radius: 4px; font-size: 8px; font-weight: 600; }
+  .total-card { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 12px 16px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+  .receipt-page { page-break-before: always; }
+  .receipt-header { background: #f8fafc; border: 1px solid #e2e8f0; padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; }
+  .receipt-img { max-width: 100%; max-height: 20cm; display: block; margin: 0 auto; border: 1px solid #cbd5e1; border-radius: 4px; }
+  .empty { color: #94a3b8; font-style: italic; padding: 8px 0; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <table style="width: 100%; border: none; margin: 0;">
+      <tr style="border: none;">
+        <td style="border: none; padding: 0;">
+          {% if logo_data_uri %}
+          <img src="{{ logo_data_uri }}" class="logo-img" alt="ShareSquad">
+          {% else %}
+          <div class="brand-title">ShareSquad</div>
+          {% endif %}
+          <div class="brand-sub">Personal Monthly Expense Tracker</div>
+        </td>
+        <td style="border: none; padding: 0; text-align: right; vertical-align: top;">
+          <div class="meta-box">
+            <strong>User:</strong> {{ user_name }}<br>
+            <strong>Period:</strong> {{ month_label }}<br>
+            <strong>Generated:</strong> {{ generated_at }}
+          </div>
+        </td>
+      </tr>
+    </table>
+  </div>
+
+  <table style="width: 100%; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; margin-bottom: 16px;">
+    <tr>
+      <td style="padding: 12px 16px; font-size: 14px; font-weight: 700; color: #166534;">
+        Total Spending ({{ currency }}): {{ total_spent_label }}
+      </td>
+      <td style="padding: 12px 16px; text-align: right; font-size: 11px; color: #166534;">
+        {{ expenses|length }} Transactions
+      </td>
+    </tr>
+  </table>
+
+  <h2>Spending by Category</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Category</th>
+        <th class="num">Amount Spent</th>
+        <th class="num">% of Total</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in category_totals %}
+      <tr>
+        <td><strong>{{ row.name }}</strong></td>
+        <td class="num">{{ row.amount_label }}</td>
+        <td class="num">{{ "%.1f"|format(row.pct) }}%</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Itemized Personal Expenses</h2>
+  {% if expenses %}
+  <table>
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Merchant / Store</th>
+        <th>Category</th>
+        <th>Notes</th>
+        <th class="num">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for e in expenses %}
+      <tr>
+        <td>{{ e.bill_date }}</td>
+        <td><strong>{{ e.store_name }}</strong></td>
+        <td><span class="tag">{{ e.category }}</span></td>
+        <td>{{ e.notes or "—" }}</td>
+        <td class="num">{{ e.amount_label }}{% if e.currency and e.currency != currency %} <span style="color:#64748b">({{ e.converted_label }})</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No personal expenses logged this month.</p>
+  {% endif %}
+
+  {% for e in expenses %}
+    {% if e.image_data_uri %}
+    <div class="receipt-page">
+      <div class="receipt-header">
+        <strong style="font-size: 12px; color: #0f766e;">{{ e.store_name }}</strong> &nbsp;&bull;&nbsp; {{ e.bill_date }}
+        <div style="font-size: 8.5px; color: #64748b; margin-top: 2px;">
+          Category: <strong>{{ e.category }}</strong> &nbsp;|&nbsp; Amount: <strong>{{ e.amount_label }}</strong>
+          {% if e.notes %} &nbsp;|&nbsp; Notes: {{ e.notes }}{% endif %}
+        </div>
+      </div>
+      <img class="receipt-img" src="{{ e.image_data_uri }}" alt="Receipt for {{ e.store_name }}">
+    </div>
+    {% endif %}
+  {% endfor %}
+</body>
+</html>

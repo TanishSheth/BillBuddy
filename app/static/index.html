@@ -1,71 +1,101 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#F6F3EC">
-<title>BillBuddy &mdash; My Groups</title>
+<title>ShareSquad — My Groups & Tracker</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
 <link rel="stylesheet" href="/styles.css">
 </head>
-<body class="bb-bg text-ink min-h-screen">
+<body class="bb-bg text-ink min-h-screen flex flex-col">
 
   <header class="page-header border-b-2 border-ink/10 sticky top-0 z-30 bb-bg/95 backdrop-blur">
-    <div class="max-w-5xl mx-auto px-4 sm:px-5 py-3 sm:py-4 flex items-center justify-between gap-2 sm:gap-3">
-      <div class="flex items-center gap-2 sm:gap-3 min-w-0">
-        <div class="stamp-mark">$</div>
-        <div class="min-w-0">
-          <h1 class="page-title font-mono font-bold text-lg tracking-tight leading-none">BillBuddy</h1>
-          <p class="text-[11px] uppercase tracking-widest text-ink/50 leading-none mt-1">My Groups</p>
-        </div>
+    <div class="max-w-5xl mx-auto px-4 sm:px-5 py-2.5 sm:py-3 flex items-center justify-between gap-2 sm:gap-3">
+      <div class="flex items-center gap-3 min-w-0">
+        <a href="/" class="flex items-center gap-2.5">
+          <img src="/logo.png" alt="ShareSquad" class="app-logo" onerror="this.style.display='none'">
+          <div class="min-w-0">
+            <h1 class="page-title font-mono font-bold text-lg tracking-tight leading-none text-brand">ShareSquad</h1>
+            <p class="text-[10px] uppercase tracking-widest text-ink/50 leading-none mt-1 font-mono">Expense Splitter</p>
+          </div>
+        </a>
       </div>
+
+      <!-- Navigation Tabs -->
+      <nav class="flex items-center bg-ink/5 p-1 rounded-lg">
+        <a href="/" class="nav-tab active">
+          <i data-lucide="users" class="w-3.5 h-3.5"></i> <span>Shared Groups</span>
+        </a>
+        <a href="/personal.html" class="nav-tab">
+          <i data-lucide="wallet" class="w-3.5 h-3.5"></i> <span>Personal Tracker</span>
+        </a>
+      </nav>
+
       <div class="header-actions flex items-center gap-1.5 sm:gap-2 shrink-0">
-        <span id="userGreeting" class="hidden md:inline font-mono text-xs text-ink/50 max-w-[120px] truncate"></span>
-        <button id="newGroupBtn" type="button" class="bb-btn-primary !py-2 !px-3 text-[11px]">
+        <span id="userGreeting" class="hidden md:inline font-mono text-xs text-ink/60 font-semibold max-w-[120px] truncate"></span>
+        <button id="newGroupBtn" type="button" class="bb-btn-primary !py-1.5 !px-3 text-[11px]">
           <i data-lucide="plus" class="w-3.5 h-3.5"></i> <span class="btn-label">New Group</span>
         </button>
-        <button id="settingsBtn" type="button" class="bb-btn-secondary !py-2 !px-2 text-[10px]" title="Settings">
-          <i data-lucide="settings" class="w-3 h-3"></i>
+        <button id="settingsBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px]" title="Settings">
+          <i data-lucide="settings" class="w-3.5 h-3.5"></i>
         </button>
-        <button id="logoutBtn" type="button" class="bb-btn-secondary !py-1 !px-2 text-[10px]" title="Sign out">
-          <i data-lucide="log-out" class="w-3 h-3"></i>
+        <button id="logoutBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] hover:text-stamp hover:border-stamp/40" title="Sign out">
+          <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
         </button>
       </div>
     </div>
   </header>
 
-  <main class="page-main max-w-5xl mx-auto px-4 sm:px-5 py-6 sm:py-8">
+  <main class="page-main max-w-5xl mx-auto px-4 sm:px-5 py-6 sm:py-8 flex-1 w-full">
+    <div class="flex items-center justify-between mb-6">
+      <div>
+        <h2 class="font-mono font-bold text-xl text-ink">Shared Expense Groups</h2>
+        <p class="text-xs text-ink/60 mt-0.5">Split bills, track balances, and calculate settlements with your groups.</p>
+      </div>
+    </div>
+
     <div id="groupsGrid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+    
     <div id="emptyGroups" class="hidden bb-card max-w-md mx-auto text-center py-10">
-      <i data-lucide="users" class="w-10 h-10 mx-auto mb-3 text-ink/30"></i>
+      <div class="stamp-mark mx-auto mb-3">$</div>
       <h2 class="font-mono uppercase text-xs tracking-widest text-ink/50 mb-2">No groups yet</h2>
-      <p class="text-sm text-ink/60 mb-4">Create a group for household or trip expenses, or join one with an invite link.</p>
+      <p class="text-sm text-ink/60 mb-4">Create a group for trips, roommates, or projects, or join one using an invite code.</p>
       <button id="createFirstGroupBtn" class="bb-btn-primary">
-        <i data-lucide="plus" class="w-4 h-4"></i> Create a Group
+        <i data-lucide="plus" class="w-4 h-4"></i> Create First Group
       </button>
     </div>
   </main>
 
   <div id="createGroupModal" class="modal-overlay hidden">
     <div class="bb-card modal-card">
-      <h2 class="font-mono uppercase text-xs tracking-widest text-ink/50 mb-4">Create a Group</h2>
+      <div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3">
+        <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Create a New Group</h2>
+        <button type="button" id="closeCreateModalBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button>
+      </div>
       <form id="createGroupForm" class="space-y-4">
         <div>
-          <label class="bb-label">Group name</label>
-          <input id="createGroupName" class="bb-input" placeholder="e.g. House Expenses" required autofocus />
+          <label class="bb-label">Group Name</label>
+          <input id="createGroupName" class="bb-input" placeholder="e.g. US Road Trip, Apt 4B" required autofocus />
+        </div>
+        <div>
+          <label class="bb-label">Default Currency</label>
+          <select id="createGroupCurrency" class="bb-input" data-currency-select></select>
+          <p class="text-[10px] text-ink/40 mt-1">Default for new expenses. You can still log INR, EUR, and other currencies inside the group when traveling.</p>
         </div>
         <p id="createGroupMsg" class="text-xs font-mono"></p>
-        <div class="flex gap-2 justify-end">
+        <div class="flex gap-2 justify-end pt-2">
           <button type="button" id="cancelCreateGroupBtn" class="bb-btn-secondary">Cancel</button>
-          <button type="submit" class="bb-btn-primary">Create</button>
+          <button type="submit" class="bb-btn-primary">Create Group</button>
         </div>
       </form>
     </div>
   </div>
 
+  <script src="/api.js"></script>
   <script src="/dashboard.js"></script>
   <script>lucide.createIcons();</script>
 </body>

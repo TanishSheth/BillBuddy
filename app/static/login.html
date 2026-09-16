@@ -1,27 +1,27 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#F6F3EC">
-<title>BillBuddy — Sign In</title>
+<title>ShareSquad — Sign In</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body class="bb-bg text-ink min-h-screen flex items-center justify-center px-5 py-12">
 
   <div class="auth-card w-full">
-    <div class="flex items-center gap-3 mb-8 justify-center">
-      <div class="stamp-mark">$</div>
+    <div class="flex flex-col items-center gap-2 mb-8 text-center">
+      <img src="/logo.png" alt="ShareSquad" class="h-20 w-auto object-contain drop-shadow-sm mb-1" onerror="this.style.display='none'">
       <div>
-        <h1 class="font-mono font-bold text-lg tracking-tight leading-none">BillBuddy</h1>
-        <p class="text-[11px] uppercase tracking-widest text-ink/50 leading-none mt-1">Shared Expense Splitter</p>
+        <h1 class="font-mono font-bold text-2xl tracking-tight leading-none text-brand">ShareSquad</h1>
+        <p class="text-[11px] uppercase tracking-widest text-ink/50 leading-none mt-1">Smart Expense Splitter & Personal Tracker</p>
       </div>
     </div>
 
-    <div class="bb-card">
+    <div class="bb-card shadow-sm">
       <h2 id="formTitle" class="font-mono uppercase text-xs tracking-widest text-ink/50 mb-4">Sign In</h2>
 
       <form id="authForm" class="space-y-4 font-mono text-sm">
@@ -53,16 +53,15 @@
     </div>
   </div>
 
+  <script src="/api.js"></script>
   <script>
-    const TOKEN_KEY = "billbuddy_token";
-    const PENDING_INVITE_KEY = "billbuddy_pending_invite";
+    const PENDING_INVITE_KEY = "sharesquad_pending_invite";
 
-    if (localStorage.getItem(TOKEN_KEY)) {
+    if (ShareSquad.getToken()) {
       window.location.href = "/";
     }
 
     let mode = "signin"; // signin | register | forgot
-    const $ = (s) => document.querySelector(s);
 
     function setMode(next) {
       mode = next;
@@ -108,9 +107,7 @@
           });
           const data = await res.json();
           if (!res.ok) {
-            const detail = data.detail;
-            const errMsg = typeof detail === "string" ? detail : "Request failed";
-            throw new Error(errMsg);
+            throw new Error(data.detail || "Request failed");
           }
 
           let successText = data.message || "Check your email for a reset link.";
@@ -154,7 +151,7 @@
           throw new Error(errMsg);
         }
 
-        localStorage.setItem(TOKEN_KEY, data.access_token);
+        ShareSquad.setToken(data.access_token);
 
         let redirect = "/";
         const inviteCode = localStorage.getItem(PENDING_INVITE_KEY);
@@ -170,7 +167,7 @@
           });
           if (joinRes.ok) {
             const group = await joinRes.json();
-            localStorage.setItem("billbuddy_group_id", String(group.id));
+            ShareSquad.setStoredGroupId(group.id);
             redirect = "/group.html";
           }
         }

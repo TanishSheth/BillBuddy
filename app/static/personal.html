@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#F6F3EC">
+<title>ShareSquad — Personal Expense Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body class="bb-bg text-ink min-h-screen flex flex-col">
+
+  <header class="page-header border-b-2 border-ink/10 sticky top-0 z-30 bb-bg/95 backdrop-blur">
+    <div class="max-w-5xl mx-auto px-4 sm:px-5 py-2.5 sm:py-3 flex items-center justify-between gap-2 sm:gap-3">
+      <div class="flex items-center gap-3 min-w-0">
+        <a href="/" class="flex items-center gap-2.5">
+          <img src="/logo.png" alt="ShareSquad" class="app-logo" onerror="this.style.display='none'">
+          <div class="min-w-0">
+            <h1 class="page-title font-mono font-bold text-lg tracking-tight leading-none text-brand">ShareSquad</h1>
+            <p class="text-[10px] uppercase tracking-widest text-ink/50 leading-none mt-1 font-mono">Personal Ledger</p>
+          </div>
+        </a>
+      </div>
+
+      <!-- Navigation Tabs -->
+      <nav class="flex items-center bg-ink/5 p-1 rounded-lg">
+        <a href="/" class="nav-tab">
+          <i data-lucide="users" class="w-3.5 h-3.5"></i> <span>Shared Groups</span>
+        </a>
+        <a href="/personal.html" class="nav-tab active">
+          <i data-lucide="wallet" class="w-3.5 h-3.5"></i> <span>Personal Tracker</span>
+        </a>
+      </nav>
+
+      <div class="header-actions flex items-center gap-1.5 sm:gap-2 shrink-0">
+        <button id="addExpenseBtn" type="button" class="bb-btn-primary !py-1.5 !px-3 text-[11px]">
+          <i data-lucide="plus" class="w-3.5 h-3.5"></i> <span class="btn-label">Add Expense</span>
+        </button>
+        <button id="settingsBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px]" title="Settings">
+          <i data-lucide="settings" class="w-3.5 h-3.5"></i>
+        </button>
+        <button id="logoutBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] hover:text-stamp hover:border-stamp/40" title="Sign out">
+          <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="page-main max-w-5xl mx-auto px-4 sm:px-5 py-6 sm:py-8 flex-1 w-full space-y-6">
+    
+    <!-- Controls bar -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div>
+        <h2 class="font-mono font-bold text-xl text-ink">Personal Monthly Expenses</h2>
+        <p class="text-xs text-ink/60 mt-0.5">Track your individual spending by month with smart receipt scanning & categories.</p>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <div class="flex items-center gap-1 bg-white border border-line rounded-lg px-2 py-1">
+          <label class="text-[10px] uppercase font-mono text-muted font-bold mr-1">Month:</label>
+          <input type="month" id="monthPicker" class="font-mono text-xs outline-none bg-transparent cursor-pointer" />
+        </div>
+        <button id="exportPdfBtn" class="bb-btn-secondary !py-1.5 !px-3 text-[11px]" title="Export Monthly PDF">
+          <i data-lucide="file-text" class="w-3.5 h-3.5 text-brand"></i> <span class="hidden sm:inline">Export PDF</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Summary Metrics -->
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div class="bb-card p-4">
+        <div class="text-[10px] font-mono uppercase tracking-wider text-muted">Total Monthly Spend</div>
+        <div id="totalSpendDisplay" class="font-mono font-bold text-2xl text-brand mt-1">$0.00</div>
+        <div id="expenseCountDisplay" class="text-[11px] text-ink/50 mt-1 font-mono">0 transactions</div>
+        <div id="totalSpendHint" class="text-[10px] text-ink/40 mt-1 font-mono"></div>
+      </div>
+      <div class="bb-card p-4">
+        <div class="text-[10px] font-mono uppercase tracking-wider text-muted">Top Category</div>
+        <div id="topCategoryDisplay" class="font-mono font-bold text-lg text-ink mt-1">—</div>
+        <div id="topCategoryAmount" class="text-[11px] text-ink/50 mt-1 font-mono">$0.00</div>
+      </div>
+      <div class="bb-card p-4 flex flex-col justify-between">
+        <div>
+          <div class="text-[10px] font-mono uppercase tracking-wider text-muted">Receipt Scanner</div>
+          <div class="text-xs text-ink/70 mt-1 font-mono">Auto-extract merchant, total & date using AI</div>
+        </div>
+        <button id="scanReceiptBtn" class="bb-btn-secondary !py-1 text-[11px] mt-2 justify-start">
+          <i data-lucide="camera" class="w-3.5 h-3.5 text-brand"></i> Scan Receipt
+        </button>
+      </div>
+    </div>
+
+    <!-- Category Breakdown Card -->
+    <div class="bb-card">
+      <h3 class="font-mono uppercase text-xs tracking-widest text-muted font-bold mb-4">Category Spending Breakdown</h3>
+      <div id="categoryBars" class="space-y-3"></div>
+      <div id="emptyCategory" class="text-xs text-muted font-mono italic py-2 hidden">No expenses logged for this month yet.</div>
+    </div>
+
+    <!-- Expenses Table -->
+    <div class="bb-card">
+      <div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3">
+        <h3 class="font-mono uppercase text-xs tracking-widest text-muted font-bold">Itemized Transactions</h3>
+        <select id="categoryFilter" class="text-xs font-mono border border-line rounded px-2 py-1 bg-transparent">
+          <option value="All">All Categories</option>
+          <option value="Food & Dining">Food & Dining</option>
+          <option value="Groceries">Groceries</option>
+          <option value="Travel">Travel</option>
+          <option value="Transit">Transit</option>
+          <option value="Housing">Housing</option>
+          <option value="Utilities">Utilities</option>
+          <option value="Entertainment">Entertainment</option>
+          <option value="Shopping">Shopping</option>
+          <option value="Healthcare">Healthcare</option>
+          <option value="General">General / Other</option>
+        </select>
+      </div>
+
+      <div class="bb-table-wrap">
+        <table class="w-full text-left font-mono text-xs">
+          <thead>
+            <tr class="border-b border-ink/10 text-muted uppercase text-[10px]">
+              <th class="py-2 px-2">Date</th>
+              <th class="py-2 px-2">Merchant / Store</th>
+              <th class="py-2 px-2">Category</th>
+              <th class="py-2 px-2">Notes</th>
+              <th class="py-2 px-2 text-right">Amount</th>
+              <th class="py-2 px-2 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="expensesTableBody"></tbody>
+        </table>
+      </div>
+      <div id="emptyExpenses" class="text-center py-8 text-xs text-muted font-mono hidden">
+        No expenses recorded in this month. Click "Add Expense" to start!
+      </div>
+    </div>
+  </main>
+
+  <!-- Add / Edit Personal Expense Modal -->
+  <div id="expenseModal" class="modal-overlay hidden">
+    <div class="bb-card modal-card">
+      <div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-2">
+        <h2 id="modalTitle" class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Add Personal Expense</h2>
+        <button type="button" id="closeExpenseModalBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button>
+      </div>
+
+      <!-- Receipt Dropzone -->
+      <div id="dropzone" class="dropzone mb-4">
+        <input type="file" id="receiptFileInput" accept="image/*" class="hidden" />
+        <i data-lucide="upload-cloud" class="w-8 h-8 text-brand/60 mb-2"></i>
+        <p class="text-xs font-mono text-ink/70">Drag & drop receipt image or <span class="text-brand font-bold">browse</span></p>
+        <p class="text-[10px] text-ink/40 font-mono mt-1">AI will automatically read merchant, amount, & date</p>
+      </div>
+
+      <div id="uploadStatus" class="hidden text-xs font-mono mb-3 p-2 rounded bg-brand/5 text-brand flex items-center gap-2">
+        <div class="animate-spin w-3 h-3 border-2 border-brand border-t-transparent rounded-full"></div>
+        <span>Scanning receipt with AI…</span>
+      </div>
+
+      <form id="expenseForm" class="space-y-4">
+        <input type="hidden" id="expenseId" />
+        <input type="hidden" id="uploadId" />
+
+        <div>
+          <label class="bb-label">Merchant / Store</label>
+          <input id="storeName" class="bb-input" placeholder="e.g. Target, Uber, Trader Joe's" required />
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="bb-label">Date</label>
+            <input type="date" id="billDate" class="bb-input" required />
+          </div>
+          <div>
+            <label class="bb-label">Amount</label>
+            <input type="number" id="totalAmount" step="0.01" min="0.01" class="bb-input" placeholder="0.00" required />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="bb-label">Category</label>
+            <select id="expenseCategory" class="bb-input">
+              <option value="Food & Dining">Food & Dining</option>
+              <option value="Groceries">Groceries</option>
+              <option value="Travel">Travel</option>
+              <option value="Transit">Transit</option>
+              <option value="Housing">Housing</option>
+              <option value="Utilities">Utilities</option>
+              <option value="Entertainment">Entertainment</option>
+              <option value="Shopping">Shopping</option>
+              <option value="Healthcare">Healthcare</option>
+              <option value="General">General / Other</option>
+            </select>
+          </div>
+          <div>
+            <label class="bb-label">Currency</label>
+            <select id="expenseCurrency" class="bb-input" data-currency-select></select>
+          </div>
+        </div>
+
+        <div>
+          <label class="bb-label">Notes (Optional)</label>
+          <input id="expenseNotes" class="bb-input" placeholder="e.g. Lunch with team, monthly wifi" />
+        </div>
+
+        <p id="formMsg" class="text-xs font-mono"></p>
+
+        <div class="flex gap-2 justify-end pt-2">
+          <button type="button" id="cancelExpenseBtn" class="bb-btn-secondary">Cancel</button>
+          <button type="submit" id="saveExpenseBtn" class="bb-btn-primary">Save Expense</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/api.js"></script>
+  <script src="/personal.js"></script>
+  <script>lucide.createIcons();</script>
+</body>
+</html>

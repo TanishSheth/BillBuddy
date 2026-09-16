@@ -1,10 +1,10 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#F6F3EC">
-<title>BillBuddy — Join Group</title>
+<title>ShareSquad — Join Group</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
@@ -13,11 +13,11 @@
 <body class="bb-bg text-ink min-h-screen flex items-center justify-center px-5 py-12">
 
   <div class="auth-card w-full">
-    <div class="flex items-center gap-3 mb-8 justify-center">
-      <div class="stamp-mark">$</div>
+    <div class="flex flex-col items-center gap-2 mb-8 text-center">
+      <img src="/logo.png" alt="ShareSquad" class="h-16 w-auto object-contain drop-shadow-sm mb-1" onerror="this.style.display='none'">
       <div>
-        <h1 class="font-mono font-bold text-lg tracking-tight leading-none">JOIN GROUP</h1>
-        <p class="text-[11px] uppercase tracking-widest text-ink/50 leading-none mt-1">You've been invited</p>
+        <h1 class="font-mono font-bold text-xl tracking-tight leading-none text-brand">JOIN GROUP</h1>
+        <p class="text-[11px] uppercase tracking-widest text-ink/50 leading-none mt-1">You've been invited to ShareSquad</p>
       </div>
     </div>
 
@@ -27,9 +27,9 @@
     </div>
   </div>
 
+  <script src="/api.js"></script>
   <script>
-    const TOKEN_KEY = "billbuddy_token";
-    const PENDING_INVITE_KEY = "billbuddy_pending_invite";
+    const PENDING_INVITE_KEY = "sharesquad_pending_invite";
     const params = new URLSearchParams(window.location.search);
     const code = params.get("code");
 
@@ -39,7 +39,7 @@
       msg.textContent = "No invite code found in the link.";
     } else {
       localStorage.setItem(PENDING_INVITE_KEY, code);
-      const token = localStorage.getItem(TOKEN_KEY);
+      const token = ShareSquad.getToken();
       if (token) {
         fetch("/api/groups/join", {
           method: "POST",
@@ -53,7 +53,7 @@
           .then(({ ok, data }) => {
             if (!ok) throw new Error(data.detail || "Failed to join");
             localStorage.removeItem(PENDING_INVITE_KEY);
-            localStorage.setItem("billbuddy_group_id", String(data.id));
+            ShareSquad.setStoredGroupId(data.id);
             msg.textContent = `Joined "${data.name}"! Redirecting…`;
             msg.className = "font-mono text-sm balance-positive mb-4";
             setTimeout(() => { window.location.href = "/group.html"; }, 1000);

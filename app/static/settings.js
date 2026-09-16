@@ -1,140 +1,219 @@
-﻿const TOKEN_KEY = "billbuddy_token";
-const GROUP_KEY = "billbuddy_group_id";
+// ShareSquad Settings Controller
 
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+const state = {
+  catalog: [],
+  accountSettings: null,
+  groups: [],
+  selectedGroupId: null,
+  groupSettings: null,
+};
 
-let providers = [];
-let groups = [];
-let selectedGroupId = null;
+function switchSettingsTab(tabName) {
+  $$("[data-settings-tab]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.settingsTab === tabName);
+  });
+  $$(".settings-panel").forEach((panel) => {
+    panel.classList.toggle("hidden", panel.id !== `tab-${tabName}`);
+  });
+}
 
-async function api(path, opts = {}) {
-  const headers = { ...(opts.headers || {}) };
-  const token = localStorage.getItem(TOKEN_KEY);
-  if (token) headers.Authorization = `Bearer ${token}`;
-  if (opts.body && !(opts.body instanceof FormData)) {
-    headers["Content-Type"] = "application/json";
-  }
-  const res = await fetch(`/api${path}`, { ...opts, headers });
-  if (res.status === 401) {
-    window.location.href = "/login.html";
+function renderProviderSelect(selectEl, selectedId) {
+  selectEl.innerHTML = state.catalog
+    .map((p) => `<option value="${p.id}" ${p.id === selectedId ? "selected" : ""}>${ShareSquad.escapeHtml(p.label)}</option>`)
+    .join("");
+}
+
+function renderModelSelect(selectEl, providerId, selectedModelId) {
+  const provider = state.catalog.find((p) => p.id === providerId) || state.catalog[0];
+  if (!provider) {
+    selectEl.innerHTML = "";
     return;
   }
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    const detail = err.detail;
-    const msg = typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map((d) => d.msg).join(", ") : "Request failed";
-    throw new Error(msg);
-  }
-  return res.json();
-}
-
-function fillProviderSelect(selectEl, providerId, modelId) {
-  selectEl.innerHTML = providers
-    .map((p) => `<option value="${p.id}" ${p.id === providerId ? "selected" : ""}>${p.label}</option>`)
+  selectEl.innerHTML = provider.models
+    .map((m) => `<option value="${m.id}" ${m.id === selectedModelId ? "selected" : ""}>${ShareSquad.escapeHtml(m.label)}</option>`)
     .join("");
-  const modelEl = selectEl.id === "generalProvider" ? $("#generalModel") : $("#groupModel");
-  fillModelSelect(modelEl, providerId, modelId);
-}
-
-function fillModelSelect(modelEl, providerId, modelId) {
-  const provider = providers.find((p) => p.id === providerId);
-  if (!provider || !modelEl) return;
-  const selected = modelId || provider.models[0]?.id;
-  modelEl.innerHTML = provider.models
-    .map((m) => `<option value="${m.id}" ${m.id === selected ? "selected" : ""}>${m.label}</option>`)
-    .join("");
-}
-
-function switchTab(tab) {
-  $$("[data-settings-tab]").forEach((b) => b.classList.toggle("active", b.dataset.settingsTab === tab));
-  $("#tab-general").classList.toggle("hidden", tab !== "general");
-  $("#tab-group").classList.toggle("hidden", tab !== "group");
-}
-
-function updateGeneralVlmVisibility() {
-  const on = $("#useOwnVlm").checked;
-  $("#generalVlmFields").classList.toggle("opacity-50", !on);
-  $("#generalProvider").disabled = !on;
-  $("#generalModel").disabled = !on;
-  $("#generalApiKey").disabled = !on;
-}
-
-function updateGroupVlmVisibility() {
-  const on = $("#overrideGlobalVlm").checked;
-  $("#groupVlmFields").classList.toggle("hidden", !on);
 }
 
 async function loadGeneralSettings() {
-  const s = await api("/settings");
-  $("#useOwnVlm").checked = s.use_own_vlm;
-  $("#emailMonthlyReports").checked = s.email_monthly_reports;
-  $("#compactListView").checked = s.compact_list_view;
-  fillProviderSelect($("#generalProvider"), s.vlm_provider, s.vlm_model);
-  $("#generalKeyStatus").textContent = s.has_api_key
-    ? "A key is saved. Leave blank to keep it, or paste a new one to replace."
-    : "No key saved yet.";
-  $("#generalApiKey").value = "";
-  updateGeneralVlmVisibility();
+  const settings = await ShareSquad.api("/settings/account");
+  state.accountSettings = settings;
+
+  $("#useOwnVlm").checked = settings.use_own_vlm;
+  $("#emailMonthlyReports").checked = settings.email_monthly_reports;
+  $("#compactListView").checked = settings.compact_list_view;
+  if ($("#preferredCurrency")) $("#preferredCurrency").value = settings.preferred_currency || "USD";
+
+  const providerSel = $("#generalProvider");
+  const modelSel = $("#generalModel");
+  renderProviderSelect(providerSel, settings.vlm_provider);
+  renderModelSelect(modelSel, settings.vlm_provider, settings.vlm_model);
+
+  const statusEl = $("#generalKeyStatus");
+  statusEl.textContent = settings.has_api_key ? "✓ An API key is currently saved on server." : "No API key configured.";
+
+  toggleGeneralVlmFields();
 }
 
-async function loadGroupSettings() {
-  if (!selectedGroupId) return;
-  const s = await api(`/groups/${selectedGroupId}/settings`);
-  $("#overrideGlobalVlm").checked = s.override_global_vlm;
-  $("#equalSplitDefault").checked = s.equal_split_default;
-  fillProviderSelect($("#groupProvider"), s.vlm_provider, s.vlm_model);
-  $("#groupKeyStatus").textContent = s.has_api_key
-    ? "A key is saved for this group. Leave blank to keep it."
-    : "No group-specific key saved.";
-  $("#groupApiKey").value = "";
-  updateGroupVlmVisibility();
+function toggleGeneralVlmFields() {
+  const on = $("#useOwnVlm").checked;
+  const fields = $("#generalVlmFields");
+  if (fields) {
+    fields.style.opacity = on ? "1" : "0.5";
+    fields.style.pointerEvents = on ? "auto" : "none";
+  }
 }
 
-async function saveGeneralSettings(clearKey = false) {
+async function saveGeneralSettings() {
   const msg = $("#generalMsg");
   msg.textContent = "Saving…";
   msg.className = "text-xs font-mono text-ink/50";
+
+  const body = {
+    use_own_vlm: $("#useOwnVlm").checked,
+    vlm_provider: $("#generalProvider").value,
+    vlm_model: $("#generalModel").value,
+    email_monthly_reports: $("#emailMonthlyReports").checked,
+    compact_list_view: $("#compactListView").checked,
+    preferred_currency: $("#preferredCurrency") ? $("#preferredCurrency").value : "USD",
+  };
+
+  const keyVal = $("#generalApiKey").value.trim();
+  if (keyVal) body.vlm_api_key = keyVal;
+
   try {
-    const body = {
-      use_own_vlm: $("#useOwnVlm").checked,
-      vlm_provider: $("#generalProvider").value,
-      vlm_model: $("#generalModel").value,
-      email_monthly_reports: $("#emailMonthlyReports").checked,
-      compact_list_view: $("#compactListView").checked,
-    };
-    const key = $("#generalApiKey").value.trim();
-    if (key) body.vlm_api_key = key;
-    if (clearKey) body.clear_api_key = true;
-    await api("/settings", { method: "PUT", body: JSON.stringify(body) });
-    msg.textContent = "General settings saved.";
+    const updated = await ShareSquad.api("/settings/account", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    state.accountSettings = updated;
+    $("#generalApiKey").value = "";
+    $("#generalKeyStatus").textContent = updated.has_api_key ? "✓ Key saved." : "No key saved.";
+    msg.textContent = "General settings saved!";
     msg.className = "text-xs font-mono balance-positive";
-    await loadGeneralSettings();
+    ShareSquad.showToast("Settings saved", "success");
   } catch (err) {
     msg.textContent = err.message;
     msg.className = "text-xs font-mono balance-negative";
   }
 }
 
-async function saveGroupSettings(clearKey = false) {
-  if (!selectedGroupId) return;
+async function clearGeneralKey() {
+  if (!confirm("Remove your custom API key?")) return;
+  const msg = $("#generalMsg");
+  try {
+    const updated = await ShareSquad.api("/settings/account", {
+      method: "PUT",
+      body: JSON.stringify({ clear_api_key: true }),
+    });
+    state.accountSettings = updated;
+    $("#generalApiKey").value = "";
+    $("#generalKeyStatus").textContent = "No key saved.";
+    msg.textContent = "API key cleared.";
+    msg.className = "text-xs font-mono balance-positive";
+  } catch (err) {
+    msg.textContent = err.message;
+    msg.className = "text-xs font-mono balance-negative";
+  }
+}
+
+async function loadGroupsList() {
+  const groups = await ShareSquad.api("/groups");
+  state.groups = groups;
+
+  const select = $("#groupSelect");
+  if (!groups.length) {
+    select.innerHTML = '<option value="">No groups</option>';
+    return;
+  }
+
+  const storedGid = ShareSquad.getStoredGroupId();
+  const defaultGid = storedGid && groups.some((g) => g.id === Number(storedGid))
+    ? Number(storedGid)
+    : groups[0].id;
+
+  select.innerHTML = groups
+    .map((g) => `<option value="${g.id}" ${g.id === defaultGid ? "selected" : ""}>${ShareSquad.escapeHtml(g.name)}</option>`)
+    .join("");
+
+  state.selectedGroupId = defaultGid;
+  await loadGroupSettings(defaultGid);
+}
+
+async function loadGroupSettings(groupId) {
+  if (!groupId) return;
+  try {
+    const settings = await ShareSquad.api(`/settings/groups/${groupId}`);
+    state.groupSettings = settings;
+
+    $("#overrideGlobalVlm").checked = settings.override_global_vlm;
+    $("#equalSplitDefault").checked = settings.equal_split_default;
+
+    const providerSel = $("#groupProvider");
+    const modelSel = $("#groupModel");
+    renderProviderSelect(providerSel, settings.vlm_provider);
+    renderModelSelect(modelSel, settings.vlm_provider, settings.vlm_model);
+
+    $("#groupKeyStatus").textContent = settings.has_api_key ? "✓ Group API key configured." : "Using global or server key.";
+    toggleGroupVlmFields();
+  } catch (err) {
+    console.error("Failed to load group settings:", err);
+  }
+}
+
+function toggleGroupVlmFields() {
+  const on = $("#overrideGlobalVlm").checked;
+  $("#groupVlmFields").classList.toggle("hidden", !on);
+}
+
+async function saveGroupSettings() {
+  const gid = state.selectedGroupId;
+  if (!gid) return;
   const msg = $("#groupMsg");
   msg.textContent = "Saving…";
   msg.className = "text-xs font-mono text-ink/50";
+
+  const body = {
+    override_global_vlm: $("#overrideGlobalVlm").checked,
+    equal_split_default: $("#equalSplitDefault").checked,
+    vlm_provider: $("#groupProvider").value,
+    vlm_model: $("#groupModel").value,
+  };
+
+  const keyVal = $("#groupApiKey").value.trim();
+  if (keyVal) body.vlm_api_key = keyVal;
+
   try {
-    const body = {
-      override_global_vlm: $("#overrideGlobalVlm").checked,
-      vlm_provider: $("#groupProvider").value,
-      vlm_model: $("#groupModel").value,
-      equal_split_default: $("#equalSplitDefault").checked,
-    };
-    const key = $("#groupApiKey").value.trim();
-    if (key) body.vlm_api_key = key;
-    if (clearKey) body.clear_api_key = true;
-    await api(`/groups/${selectedGroupId}/settings`, { method: "PUT", body: JSON.stringify(body) });
-    msg.textContent = "Group settings saved.";
+    const updated = await ShareSquad.api(`/settings/groups/${gid}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+    state.groupSettings = updated;
+    $("#groupApiKey").value = "";
+    $("#groupKeyStatus").textContent = updated.has_api_key ? "✓ Key saved." : "Using global/server key.";
+    msg.textContent = "Group settings saved!";
     msg.className = "text-xs font-mono balance-positive";
-    await loadGroupSettings();
+    ShareSquad.showToast("Group settings saved", "success");
+  } catch (err) {
+    msg.textContent = err.message;
+    msg.className = "text-xs font-mono balance-negative";
+  }
+}
+
+async function clearGroupKey() {
+  const gid = state.selectedGroupId;
+  if (!gid) return;
+  if (!confirm("Clear this group's custom API key?")) return;
+  const msg = $("#groupMsg");
+  try {
+    const updated = await ShareSquad.api(`/settings/groups/${gid}`, {
+      method: "PUT",
+      body: JSON.stringify({ clear_api_key: true }),
+    });
+    state.groupSettings = updated;
+    $("#groupApiKey").value = "";
+    $("#groupKeyStatus").textContent = "Using global/server key.";
+    msg.textContent = "Group key cleared.";
+    msg.className = "text-xs font-mono balance-positive";
   } catch (err) {
     msg.textContent = err.message;
     msg.className = "text-xs font-mono balance-negative";
@@ -142,65 +221,41 @@ async function saveGroupSettings(clearKey = false) {
 }
 
 (async function init() {
-  if (!localStorage.getItem(TOKEN_KEY)) {
+  if (!ShareSquad.getToken()) {
     window.location.href = "/login.html";
     return;
   }
 
-  const params = new URLSearchParams(window.location.search);
-  const groupParam = params.get("group") || localStorage.getItem(GROUP_KEY);
-  const tabParam = params.get("tab");
-
-  providers = await api("/settings/vlm-providers");
-  const me = await api("/auth/me");
-  groups = me.groups || [];
-
-  const groupSelect = $("#groupSelect");
-  if (!groups.length) {
-    groupSelect.innerHTML = '<option value="">No groups — join or create one first</option>';
-    $("#saveGroupBtn").disabled = true;
-  } else {
-    groupSelect.innerHTML = groups.map((g) => `<option value="${g.id}">${g.name}</option>`).join("");
-    selectedGroupId = Number(groupParam) || groups[0].id;
-    groupSelect.value = String(selectedGroupId);
-  }
-
-  const back = $("#backLink");
-  if (groupParam) {
-    back.href = "/group.html";
-  }
+  ShareSquad.fillAllCurrencySelects();
 
   $$("[data-settings-tab]").forEach((btn) => {
-    btn.addEventListener("click", () => switchTab(btn.dataset.settingsTab));
+    btn.addEventListener("click", () => switchSettingsTab(btn.dataset.settingsTab));
   });
 
-  $("#generalProvider").addEventListener("change", () => {
-    fillModelSelect($("#generalModel"), $("#generalProvider").value, null);
-  });
-  $("#groupProvider").addEventListener("change", () => {
-    fillModelSelect($("#groupModel"), $("#groupProvider").value, null);
-  });
-  $("#useOwnVlm").addEventListener("change", updateGeneralVlmVisibility);
-  $("#overrideGlobalVlm").addEventListener("change", updateGroupVlmVisibility);
-  $("#saveGeneralBtn").addEventListener("click", () => saveGeneralSettings(false));
-  $("#clearGeneralKeyBtn").addEventListener("click", () => {
-    if (confirm("Remove your saved API key?")) saveGeneralSettings(true);
-  });
-  $("#saveGroupBtn").addEventListener("click", () => saveGroupSettings(false));
-  $("#clearGroupKeyBtn").addEventListener("click", () => {
-    if (confirm("Remove the API key saved for this group?")) saveGroupSettings(true);
-  });
-  groupSelect.addEventListener("change", async () => {
-    selectedGroupId = Number(groupSelect.value);
-    await loadGroupSettings();
-  });
-
-  await loadGeneralSettings();
-  if (selectedGroupId) await loadGroupSettings();
-
-  if (tabParam === "group" || groupParam) {
-    switchTab("group");
+  try {
+    state.catalog = await ShareSquad.api("/vlm/providers");
+  } catch (err) {
+    console.error("Failed to load VLM catalog:", err);
   }
 
-  lucide.createIcons();
+  $("#useOwnVlm").addEventListener("change", toggleGeneralVlmFields);
+  $("#generalProvider").addEventListener("change", (e) => {
+    renderModelSelect($("#generalModel"), e.target.value);
+  });
+  $("#saveGeneralBtn").addEventListener("click", saveGeneralSettings);
+  $("#clearGeneralKeyBtn").addEventListener("click", clearGeneralKey);
+
+  $("#groupSelect").addEventListener("change", async (e) => {
+    state.selectedGroupId = Number(e.target.value);
+    await loadGroupSettings(state.selectedGroupId);
+  });
+  $("#overrideGlobalVlm").addEventListener("change", toggleGroupVlmFields);
+  $("#groupProvider").addEventListener("change", (e) => {
+    renderModelSelect($("#groupModel"), e.target.value);
+  });
+  $("#saveGroupBtn").addEventListener("click", saveGroupSettings);
+  $("#clearGroupKeyBtn").addEventListener("click", clearGroupKey);
+
+  await loadGeneralSettings();
+  await loadGroupsList();
 })();

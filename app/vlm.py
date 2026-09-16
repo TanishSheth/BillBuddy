@@ -39,11 +39,31 @@ def extract_receipt_data(
     mime_type: str,
     config: ResolvedVlmConfig,
 ) -> tuple[ReceiptExtraction, str, str | None]:
+    """
+    Two-tier extraction:
+      1. Always try local OCR + regex first — free, offline, instant.
+      2. Only escalate to a paid VLM call if OCR came back low-confidence
+         on any field AND the user/host has an API key configured.
+    This means receipt scanning works even with zero API key set up, and
+    when a key *is* configured it's only spent on the receipts that
+    actually need the extra accuracy.
+    """
+    from .ocr_extractor import extract_receipt_data_ocr
+
+    ocr_result, ocr_confident = extract_receipt_data_ocr(image_bytes)
+
+    if ocr_confident:
+        return ocr_result, "ocr", None
+
     if not config.api_key:
+        # No key configured — hand back the OCR guess rather than a blank
+        # stub. It may be partially wrong; the user can correct it in the
+        # form before saving.
         return (
-            _stub(),
-            "stub",
-            "No API key configured. Add yours in Settings, or ask the host to set SERVER_VLM_API_KEY.",
+            ocr_result,
+            "ocr",
+            "Some fields could not be read confidently by local OCR. "
+            "Please double check them, or add an API key in Settings for higher-accuracy extraction.",
         )
 
     try:
@@ -67,12 +87,17 @@ def extract_receipt_data(
                 "https://api.groq.com/openai/v1/chat/completions",
             )
         else:
-            return _stub(), "error", f"Unsupported provider: {config.provider}"
+            return ocr_result, "ocr", f"Unsupported provider: {config.provider}. Falling back to local OCR guess."
 
         return ReceiptExtraction(**data), "vlm", None
     except Exception as exc:
         logger.exception("VLM extraction failed (%s/%s): %s", config.provider, config.model, exc)
-        return _stub(), "error", str(exc)
+        # Don't throw the receipt away — fall back to whatever OCR found.
+        return (
+            ocr_result,
+            "ocr",
+            f"VLM extraction failed ({exc}); showing local OCR guess instead. Please double check the fields.",
+        )
 
 
 def _parse_json_response(text: str) -> dict:

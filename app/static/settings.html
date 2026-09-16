@@ -1,12 +1,12 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#F6F3EC">
-<title>BillBuddy — Settings</title>
+<title>ShareSquad — Settings</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
 <link rel="stylesheet" href="/styles.css">
@@ -14,20 +14,23 @@
 <body class="bb-bg text-ink min-h-screen">
 
   <header class="page-header border-b-2 border-ink/10 sticky top-0 z-30 bb-bg/95 backdrop-blur">
-    <div class="max-w-3xl mx-auto px-4 sm:px-5 py-3 sm:py-4 flex items-center justify-between gap-3">
+    <div class="max-w-3xl mx-auto px-4 sm:px-5 py-2.5 sm:py-3 flex items-center justify-between gap-3">
       <div class="flex items-center gap-2 sm:gap-3 min-w-0">
-        <a href="/" id="backLink" class="bb-btn-secondary !py-2 !px-2 text-[10px] shrink-0" title="Back">
-          <i data-lucide="arrow-left" class="w-3 h-3"></i>
+        <a href="/" id="backLink" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] shrink-0" title="Back">
+          <i data-lucide="arrow-left" class="w-3.5 h-3.5"></i>
+        </a>
+        <a href="/" class="flex items-center gap-2">
+          <img src="/logo.png" alt="ShareSquad" class="app-logo" onerror="this.style.display='none'">
         </a>
         <div class="min-w-0">
-          <h1 class="font-mono font-bold text-lg tracking-tight leading-none">Settings</h1>
-          <p class="text-[11px] uppercase tracking-widest text-ink/50 leading-none mt-1">Preferences</p>
+          <h1 class="page-title font-mono font-bold text-base sm:text-lg tracking-tight leading-none text-brand">Settings</h1>
+          <p class="text-[10px] uppercase tracking-widest text-ink/50 leading-none mt-1 font-mono">ShareSquad Preferences</p>
         </div>
       </div>
     </div>
     <nav class="max-w-3xl mx-auto px-4 sm:px-5 pb-2">
       <div class="tab-nav flex gap-1 overflow-x-auto pb-1">
-        <button type="button" data-settings-tab="general" class="tab-btn active">General</button>
+        <button type="button" data-settings-tab="general" class="tab-btn active">General Preferences</button>
         <button type="button" data-settings-tab="group" class="tab-btn">Group Settings</button>
       </div>
     </nav>
@@ -39,14 +42,14 @@
     <section id="tab-general" class="settings-panel space-y-4">
       <div class="bb-card space-y-5">
         <div>
-          <h2 class="font-mono uppercase text-xs tracking-widest text-ink/50 mb-1">Receipt scanning (VLM)</h2>
-          <p class="text-xs text-ink/50">Your API key is only used to read receipt images and auto-fill the form. You review and submit the expense yourself. Keys are stored encrypted on the server.</p>
+          <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-1">Receipt scanning</h2>
+          <p class="text-xs text-ink/60">Your API key is only used to extract merchant name, date, and amount from receipts. Keys are encrypted securely on the server.</p>
         </div>
 
         <label class="settings-toggle">
           <span>
-            <span class="settings-toggle-label">Use my own API key</span>
-            <span class="settings-toggle-hint">When off, the server default key is used (if configured)</span>
+            <span class="settings-toggle-label">Use my own AI API key</span>
+            <span class="settings-toggle-hint">When off, the default server AI key is used</span>
           </span>
           <input type="checkbox" id="useOwnVlm" />
           <span class="settings-switch"></span>
@@ -54,15 +57,15 @@
 
         <div id="generalVlmFields" class="space-y-4">
           <div>
-            <label class="bb-label">Provider</label>
+            <label class="bb-label">AI Provider</label>
             <select id="generalProvider" class="bb-input"></select>
           </div>
           <div>
-            <label class="bb-label">Model</label>
+            <label class="bb-label">AI Model</label>
             <select id="generalModel" class="bb-input"></select>
           </div>
           <div>
-            <label class="bb-label">API key</label>
+            <label class="bb-label">Custom API Key</label>
             <input id="generalApiKey" type="password" class="bb-input" placeholder="Paste your API key" autocomplete="off" />
             <p id="generalKeyStatus" class="text-[10px] text-ink/40 mt-1 font-mono"></p>
           </div>
@@ -70,12 +73,17 @@
       </div>
 
       <div class="bb-card space-y-4">
-        <h2 class="font-mono uppercase text-xs tracking-widest text-ink/50">Notifications & display</h2>
+        <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Preferences &amp; Reports</h2>
+
+        <div>
+          <label class="bb-label">Default Personal Currency</label>
+          <select id="preferredCurrency" class="bb-input" data-currency-select></select>
+        </div>
 
         <label class="settings-toggle">
           <span>
             <span class="settings-toggle-label">Email monthly reports</span>
-            <span class="settings-toggle-hint">Receive the PDF report by email at month-end</span>
+            <span class="settings-toggle-hint">Receive monthly PDF reports and settlement notices by email</span>
           </span>
           <input type="checkbox" id="emailMonthlyReports" />
           <span class="settings-switch"></span>
@@ -83,8 +91,8 @@
 
         <label class="settings-toggle">
           <span>
-            <span class="settings-toggle-label">Compact list view</span>
-            <span class="settings-toggle-hint">Denser layout on the expenses tab</span>
+            <span class="settings-toggle-label">Compact expense list</span>
+            <span class="settings-toggle-hint">Denser table layout on expenses</span>
           </span>
           <input type="checkbox" id="compactListView" />
           <span class="settings-switch"></span>
@@ -102,15 +110,15 @@
     <section id="tab-group" class="settings-panel hidden space-y-4">
       <div class="bb-card space-y-4">
         <div>
-          <label class="bb-label">Group</label>
+          <label class="bb-label">Selected Group</label>
           <select id="groupSelect" class="bb-input"></select>
-          <p class="text-[10px] text-ink/40 mt-1 font-mono">Settings below apply only to you in the selected group.</p>
+          <p class="text-[10px] text-ink/40 mt-1 font-mono">Settings below apply specifically to your preferences in this group.</p>
         </div>
 
         <label class="settings-toggle">
           <span>
-            <span class="settings-toggle-label">Override global VLM settings</span>
-            <span class="settings-toggle-hint">Use a different provider, model, or API key for this group</span>
+            <span class="settings-toggle-label">Override receipt scanning for this group</span>
+            <span class="settings-toggle-hint">Use a different provider or model for this specific group</span>
           </span>
           <input type="checkbox" id="overrideGlobalVlm" />
           <span class="settings-switch"></span>
@@ -118,11 +126,11 @@
 
         <div id="groupVlmFields" class="space-y-4 hidden">
           <div>
-            <label class="bb-label">Provider</label>
+            <label class="bb-label">AI Provider</label>
             <select id="groupProvider" class="bb-input"></select>
           </div>
           <div>
-            <label class="bb-label">Model</label>
+            <label class="bb-label">AI Model</label>
             <select id="groupModel" class="bb-input"></select>
           </div>
           <div>
@@ -134,8 +142,8 @@
 
         <label class="settings-toggle">
           <span>
-            <span class="settings-toggle-label">Select all members for split by default</span>
-            <span class="settings-toggle-hint">When adding an expense, everyone starts selected</span>
+            <span class="settings-toggle-label">Split with all members by default</span>
+            <span class="settings-toggle-hint">When adding an expense, select all members automatically</span>
           </span>
           <input type="checkbox" id="equalSplitDefault" />
           <span class="settings-switch"></span>
@@ -151,6 +159,7 @@
 
   </main>
 
+  <script src="/api.js"></script>
   <script src="/settings.js"></script>
   <script>lucide.createIcons();</script>
 </body>
