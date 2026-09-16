@@ -19,6 +19,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import models, schemas
 from .config import (
+    APP_VERSION,
     BASE_URL,
     DISABLE_SCHEDULER,
     IS_DEVELOPMENT,
@@ -123,10 +124,57 @@ Base.metadata.create_all(bind=engine)
 
 
 def _ensure_schema():
-    """Add columns introduced after the first production database was created."""
+    """Add columns introduced after the first production database was created.
+
+    Each change runs in its own transaction so one failure cannot roll back
+    the others (Postgres aborts the whole transaction after the first error).
+    """
     from sqlalchemy import text
 
     dialect = engine.dialect.name
+
+    def _query(sql: str, params: Optional[dict] = None):
+        with engine.connect() as conn:
+            return conn.execute(text(sql), params or {}).fetchall()
+
+    def _ddl(sql: str) -> None:
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+
+    def table_exists(table: str) -> bool:
+        try:
+            if dialect == "sqlite":
+                rows = _query(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=:t",
+                    {"t": table},
+                )
+            else:
+                rows = _query(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = current_schema() AND table_name = :t",
+                    {"t": table},
+                )
+            return bool(rows)
+        except Exception as err:
+            logger.warning("Could not inspect table %s: %s", table, err)
+            return False
+
+    def has_column(table: str, column: str) -> bool:
+        try:
+            if dialect == "sqlite":
+                rows = _query(f"PRAGMA table_info({table})")
+                return column in [r[1] for r in rows]
+            rows = _query(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = :table AND column_name = :column",
+                {"table": table, "column": column},
+            )
+            return bool(rows)
+        except Exception as err:
+            logger.warning("Could not inspect %s.%s: %s", table, column, err)
+            return False
+
     statements = [
         ("groups", "currency", "VARCHAR(10) DEFAULT 'USD'"),
         ("expenses", "currency", "VARCHAR(10) DEFAULT 'USD'"),
@@ -140,65 +188,31 @@ def _ensure_schema():
         ("pending_uploads", "account_id", "INTEGER"),
     ]
 
-    with engine.begin() as conn:
-        def table_exists(table: str) -> bool:
-            if dialect == "sqlite":
-                row = conn.execute(
-                    text("SELECT name FROM sqlite_master WHERE type='table' AND name=:t"),
-                    {"t": table},
-                ).fetchone()
-                return bool(row)
-            row = conn.execute(
-                text(
-                    "SELECT 1 FROM information_schema.tables "
-                    "WHERE table_schema = current_schema() AND table_name = :t"
-                ),
-                {"t": table},
-            ).fetchone()
-            return bool(row)
-
-        def has_column(table: str, column: str) -> bool:
-            if dialect == "sqlite":
-                rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
-                return column in [r[1] for r in rows]
-            rows = conn.execute(
-                text(
-                    "SELECT 1 FROM information_schema.columns "
-                    "WHERE table_schema = current_schema() "
-                    "AND table_name = :table AND column_name = :column"
-                ),
-                {"table": table, "column": column},
-            ).fetchall()
-            return bool(rows)
-
-        for table, column, spec in statements:
-            try:
-                if not table_exists(table) or has_column(table, column):
-                    continue
-                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {spec}"))
-                logger.info("Added missing column %s.%s", table, column)
-            except Exception as err:
-                logger.warning("Could not add %s.%s: %s", table, column, err)
-
-        # Original pending_uploads.group_id was NOT NULL (group receipts only).
-        # Personal scans store account_id and leave group_id empty.
+    for table, column, spec in statements:
         try:
-            if table_exists("pending_uploads"):
-                if dialect == "postgresql":
-                    row = conn.execute(
-                        text(
-                            "SELECT is_nullable FROM information_schema.columns "
-                            "WHERE table_schema = current_schema() "
-                            "AND table_name = 'pending_uploads' AND column_name = 'group_id'"
-                        )
-                    ).fetchone()
-                    if row and row[0] == "NO":
-                        conn.execute(text("ALTER TABLE pending_uploads ALTER COLUMN group_id DROP NOT NULL"))
-                        logger.info("Made pending_uploads.group_id nullable")
-                elif dialect == "sqlite":
-                    info = conn.execute(text("PRAGMA table_info(pending_uploads)")).fetchall()
-                    group_col = next((r for r in info if r[1] == "group_id"), None)
-                    if group_col is not None and int(group_col[3] or 0) == 1:
+            if not table_exists(table) or has_column(table, column):
+                continue
+            _ddl(f"ALTER TABLE {table} ADD COLUMN {column} {spec}")
+            logger.info("Added missing column %s.%s", table, column)
+        except Exception as err:
+            logger.warning("Could not add %s.%s: %s", table, column, err)
+
+    try:
+        if table_exists("pending_uploads"):
+            if dialect == "postgresql":
+                row = _query(
+                    "SELECT is_nullable FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = 'pending_uploads' AND column_name = 'group_id'"
+                )
+                if row and row[0][0] == "NO":
+                    _ddl("ALTER TABLE pending_uploads ALTER COLUMN group_id DROP NOT NULL")
+                    logger.info("Made pending_uploads.group_id nullable")
+            elif dialect == "sqlite":
+                info = _query("PRAGMA table_info(pending_uploads)")
+                group_col = next((r for r in info if r[1] == "group_id"), None)
+                if group_col is not None and int(group_col[3] or 0) == 1:
+                    with engine.begin() as conn:
                         conn.execute(text("PRAGMA foreign_keys=OFF"))
                         conn.execute(
                             text(
@@ -223,9 +237,9 @@ def _ensure_schema():
                         )
                         conn.execute(text("DROP TABLE pending_uploads"))
                         conn.execute(text("ALTER TABLE pending_uploads_new RENAME TO pending_uploads"))
-                        logger.info("Rebuilt pending_uploads so group_id can be empty")
-        except Exception as err:
-            logger.warning("Could not make pending_uploads.group_id nullable: %s", err)
+                    logger.info("Rebuilt pending_uploads so group_id can be empty")
+    except Exception as err:
+        logger.warning("Could not make pending_uploads.group_id nullable: %s", err)
 
 
 _ensure_schema()
@@ -250,6 +264,7 @@ def health():
     return {
         "ok": True,
         "app": "ShareSquad",
+        "version": APP_VERSION,
         "environment": "development" if IS_DEVELOPMENT else "production",
         "pdf_reports": pdf_reports_available(),
     }
@@ -662,31 +677,35 @@ def create_group(
     db: Session = Depends(get_db),
 ):
     curr = _normalize_currency(payload.currency, "USD")
-    group = models.Group(
-        name=payload.name.strip(),
-        currency=curr,
-        created_by_id=account.id,
-    )
-    db.add(group)
-    try:
-        db.flush()
-        member = models.GroupMember(
-            group_id=group.id,
-            account_id=account.id,
-            display_name=account.display_name,
-            role="owner",
+    last_error = None
+    for attempt in range(2):
+        group = models.Group(
+            name=payload.name.strip(),
+            currency=curr,
+            created_by_id=account.id,
         )
-        db.add(member)
-        db.commit()
-        db.refresh(group)
-    except Exception:
-        db.rollback()
-        logger.exception("Failed to create group")
-        raise HTTPException(
-            status_code=500,
-            detail="Could not create the group. Try again in a moment.",
-        )
-    return group
+        db.add(group)
+        try:
+            db.flush()
+            member = models.GroupMember(
+                group_id=group.id,
+                account_id=account.id,
+                display_name=account.display_name,
+                role="owner",
+            )
+            db.add(member)
+            db.commit()
+            db.refresh(group)
+            return group
+        except Exception as err:
+            last_error = err
+            db.rollback()
+            logger.exception("Failed to create group (attempt %s)", attempt + 1)
+            _ensure_schema()
+    raise HTTPException(
+        status_code=500,
+        detail="Could not create the group. Try again in a moment.",
+    ) from last_error
 
 
 @app.get("/api/groups/{group_id}/sync", response_model=schemas.GroupSyncOut)
@@ -1365,6 +1384,32 @@ def download_group_report(
 # ---------------------------------------------------------------------------
 # Personal Expenses Endpoints
 # ---------------------------------------------------------------------------
+def _claim_personal_upload(db: Session, account_id: int, upload_id: str) -> str:
+    pending = (
+        db.query(models.PendingUpload)
+        .filter_by(id=upload_id, account_id=account_id)
+        .first()
+    )
+    src = pending.file_path if pending and os.path.exists(pending.file_path) else None
+    if not src:
+        prefix = f"personal_{account_id}_{upload_id}"
+        try:
+            for name in os.listdir(TMP_UPLOADS_DIR):
+                if name.startswith(prefix):
+                    src = os.path.join(TMP_UPLOADS_DIR, name)
+                    break
+        except FileNotFoundError:
+            src = None
+    if pending:
+        db.delete(pending)
+    if not src or not os.path.exists(src):
+        raise HTTPException(400, "Upload not found or already used. Re-upload the receipt.")
+    ext = os.path.splitext(src)[1]
+    dest = os.path.join(_personal_uploads_dir(account_id), f"{uuid.uuid4().hex}{ext}")
+    shutil.move(src, dest)
+    return dest
+
+
 @app.get("/api/personal/summary", response_model=schemas.PersonalMonthlySummaryOut)
 def get_personal_summary(
     period_key: Optional[str] = None,
@@ -1421,19 +1466,7 @@ def create_personal_expense(
 ):
     final_path = None
     if payload.upload_id:
-        pending = (
-            db.query(models.PendingUpload)
-            .filter_by(id=payload.upload_id, account_id=account.id)
-            .first()
-        )
-        if not pending or not os.path.exists(pending.file_path):
-            raise HTTPException(400, "Upload not found or already used. Re-upload the receipt.")
-        ext = os.path.splitext(pending.file_path)[1]
-        final_filename = f"{uuid.uuid4().hex}{ext}"
-        personal_uploads = _personal_uploads_dir(account.id)
-        final_path = os.path.join(personal_uploads, final_filename)
-        shutil.move(pending.file_path, final_path)
-        db.delete(pending)
+        final_path = _claim_personal_upload(db, account.id, payload.upload_id)
 
     expense = models.PersonalExpense(
         account_id=account.id,
@@ -1522,8 +1555,8 @@ async def upload_personal_receipt(
         db.commit()
     except Exception:
         db.rollback()
-        logger.exception("Failed to save personal receipt upload")
-        raise HTTPException(500, "Could not save the receipt. Try again in a moment.")
+        logger.exception("Could not record personal upload in the database; keeping the temp file")
+        _ensure_schema()
 
     mime = file.content_type or "image/jpeg"
     vlm_config = resolve_vlm_config(db, account.id)
