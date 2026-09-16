@@ -301,6 +301,32 @@ def _personal_uploads_dir(account_id: int) -> str:
     return path
 
 
+def _public_scan_message(source: str, message: Optional[str]) -> str:
+    safe = "Read from the receipt photo. Please double-check merchant, date, and total before saving."
+    fallback = "Could not auto-read every field. Please check merchant, date, and total before saving."
+    if not message:
+        return safe
+    lowered = message.lower()
+    if any(
+        token in lowered
+        for token in (
+            "pydantic",
+            "validation error",
+            "type_unspecified",
+            "traceback",
+            "response_schema",
+            "anyof",
+            "http://",
+            "https://",
+            "exception",
+        )
+    ):
+        return fallback
+    if len(message) > 180:
+        return fallback
+    return message
+
+
 def require_group_member(
     group_id: int, account: models.Account, db: Session
 ) -> models.GroupMember:
@@ -976,10 +1002,7 @@ async def upload_receipt(
     mime = file.content_type or "image/jpeg"
     vlm_config = resolve_vlm_config(db, account.id, group_id)
     extraction, source, message = extract_receipt_data(contents, mime, vlm_config)
-    if source == "vlm":
-        message = message or f"Read from the receipt photo. Please double-check the fields."
-    elif source == "ocr" and not message:
-        message = "Read from the receipt photo. Please double-check the fields."
+    message = _public_scan_message(source, message)
 
     return schemas.ExtractionResponse(
         upload_id=upload_id,
@@ -1561,10 +1584,7 @@ async def upload_personal_receipt(
     mime = file.content_type or "image/jpeg"
     vlm_config = resolve_vlm_config(db, account.id)
     extraction, source, message = extract_receipt_data(contents, mime, vlm_config)
-    if source == "vlm":
-        message = message or "Read from the receipt photo. Please double-check the fields."
-    elif source == "ocr" and not message:
-        message = "Read from the receipt photo. Please double-check the fields."
+    message = _public_scan_message(source, message)
 
     return schemas.ExtractionResponse(
         upload_id=upload_id,

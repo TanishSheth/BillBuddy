@@ -4,34 +4,54 @@ Receipt data extraction via user-selected vision-language models.
 import base64
 import json
 import logging
+import re
 from datetime import date
 
 import httpx
+from pydantic import BaseModel, Field
 
 from .schemas import ReceiptExtraction
 from .settings_service import ResolvedVlmConfig
 
 logger = logging.getLogger(__name__)
 
-EXTRACTION_PROMPT = (
-    "You are a receipt-parsing assistant. Look at the receipt image and "
-    "extract exactly: store_name (merchant name as printed), bill_date "
-    "(the transaction/purchase date, formatted strictly as YYYY-MM-DD), "
-    "and total_amount (the final total charged, as a plain number with 2 "
-    "decimal places, no currency symbols). If a field is unreadable, make "
-    "your best reasonable guess rather than leaving it blank. "
-    "Respond with JSON only: {\"store_name\": \"...\", \"bill_date\": \"YYYY-MM-DD\", \"total_amount\": 0.00}"
+USER_VLM_FALLBACK = (
+    "Could not auto-read every field. Please check merchant, date, and total before saving."
 )
 
-JSON_SCHEMA_HINT = {
-    "type": "object",
-    "properties": {
-        "store_name": {"type": "string"},
-        "bill_date": {"type": "string"},
-        "total_amount": {"type": "number"},
-    },
-    "required": ["store_name", "bill_date", "total_amount"],
-}
+EXTRACTION_PROMPT = (
+    "You are a receipt-parsing assistant. Look at the receipt image and "
+    "extract: store_name (merchant name as printed), bill_date "
+    "(transaction date as YYYY-MM-DD), total_amount (the amount the customer "
+    "paid / grand total due — never savings, discounts, tax-only, or subtotal), "
+    "currency (ISO code like USD or INR), and category (short label like "
+    "Groceries or Food & Dining). "
+    "Respond with JSON only."
+)
+
+
+class _VlmReceiptSchema(BaseModel):
+    """Gemini rejects Optional/anyOf fields; keep every property a concrete type."""
+    store_name: str
+    bill_date: str
+    total_amount: float
+    currency: str = Field(default="USD")
+    category: str = Field(default="General")
+
+
+def _to_extraction(data: dict) -> ReceiptExtraction:
+    amount = data.get("total_amount")
+    if isinstance(amount, str):
+        cleaned = re.sub(r"[^\d.]", "", amount.replace(",", ""))
+        amount = float(cleaned) if cleaned else 0.0
+    bill = str(data.get("bill_date") or date.today().isoformat())[:10]
+    return ReceiptExtraction(
+        store_name=str(data.get("store_name") or "Unknown store").strip() or "Unknown store",
+        bill_date=bill,
+        total_amount=float(amount or 0.0),
+        currency=str(data.get("currency") or "USD").strip().upper()[:10] or "USD",
+        category=str(data.get("category") or "General").strip() or "General",
+    )
 
 
 def extract_receipt_data(
@@ -44,9 +64,6 @@ def extract_receipt_data(
       1. Always try local OCR + regex first — free, offline, instant.
       2. Only escalate to a paid VLM call if OCR came back low-confidence
          on any field AND the user/host has an API key configured.
-    This means receipt scanning works even with zero API key set up, and
-    when a key *is* configured it's only spent on the receipts that
-    actually need the extra accuracy.
     """
     from .ocr_extractor import extract_receipt_data_ocr
 
@@ -56,14 +73,10 @@ def extract_receipt_data(
         return ocr_result, "ocr", None
 
     if not config.api_key:
-        # No key configured — hand back the OCR guess rather than a blank
-        # stub. It may be partially wrong; the user can correct it in the
-        # form before saving.
         return (
             ocr_result,
             "ocr",
-            "Some fields could not be read confidently by local OCR. "
-            "Please double check them, or add an API key in Settings for higher-accuracy extraction.",
+            "Some fields could not be read clearly. Please double-check them before saving.",
         )
 
     try:
@@ -87,17 +100,12 @@ def extract_receipt_data(
                 "https://api.groq.com/openai/v1/chat/completions",
             )
         else:
-            return ocr_result, "ocr", f"Unsupported provider: {config.provider}. Falling back to local OCR guess."
+            return ocr_result, "ocr", USER_VLM_FALLBACK
 
-        return ReceiptExtraction(**data), "vlm", None
+        return _to_extraction(data), "vlm", None
     except Exception as exc:
         logger.exception("VLM extraction failed (%s/%s): %s", config.provider, config.model, exc)
-        # Don't throw the receipt away — fall back to whatever OCR found.
-        return (
-            ocr_result,
-            "ocr",
-            f"VLM extraction failed ({exc}); showing local OCR guess instead. Please double check the fields.",
-        )
+        return ocr_result, "ocr", USER_VLM_FALLBACK
 
 
 def _parse_json_response(text: str) -> dict:
@@ -120,7 +128,7 @@ def _extract_google(image_bytes: bytes, mime_type: str, api_key: str, model: str
         ],
         config={
             "response_mime_type": "application/json",
-            "response_schema": ReceiptExtraction,
+            "response_schema": _VlmReceiptSchema,
         },
     )
     return json.loads(response.text)
@@ -193,11 +201,3 @@ def _extract_anthropic(image_bytes: bytes, mime_type: str, api_key: str, model: 
         res.raise_for_status()
         content = res.json()["content"][0]["text"]
     return _parse_json_response(content)
-
-
-def _stub() -> ReceiptExtraction:
-    return ReceiptExtraction(
-        store_name="Unknown Store (edit me)",
-        bill_date=date.today().isoformat(),
-        total_amount=0.00,
-    )

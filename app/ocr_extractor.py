@@ -80,7 +80,6 @@ _TOTAL_PHRASES = [
     "tally",
     "total",
     "balance",
-    "tab",
 ]
 
 _TAX_PHRASES = [

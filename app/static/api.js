@@ -54,7 +54,7 @@ function showToast(msg, type = "info", duration = 3500) {
   const toast = document.createElement("div");
   const bg = type === "error" ? "bg-stamp text-white" : type === "success" ? "bg-emerald-700 text-white" : "bg-ink text-paper";
   toast.className = `p-3 rounded-lg shadow-xl text-xs font-mono transition-all transform duration-300 opacity-0 translate-y-2 pointer-events-auto flex items-center justify-between gap-2 ${bg}`;
-  toast.innerHTML = `<span>${escapeHtml(msg)}</span><button class="opacity-70 hover:opacity-100 font-bold">&times;</button>`;
+    toast.innerHTML = `<span>${escapeHtml(String(msg).slice(0, 180))}</span><button class="opacity-70 hover:opacity-100 font-bold">&times;</button>`;
   
   toast.querySelector("button").onclick = () => {
     toast.classList.add("opacity-0", "translate-y-2");
