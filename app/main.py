@@ -301,11 +301,9 @@ def _personal_uploads_dir(account_id: int) -> str:
     return path
 
 
-def _public_scan_message(source: str, message: Optional[str]) -> str:
-    safe = "Read from the receipt photo. Please double-check merchant, date, and total before saving."
-    fallback = "Could not auto-read every field. Please check merchant, date, and total before saving."
+def _public_scan_message(message: Optional[str]) -> Optional[str]:
     if not message:
-        return safe
+        return None
     lowered = message.lower()
     if any(
         token in lowered
@@ -321,9 +319,9 @@ def _public_scan_message(source: str, message: Optional[str]) -> str:
             "exception",
         )
     ):
-        return fallback
+        return None
     if len(message) > 180:
-        return fallback
+        return None
     return message
 
 
@@ -1002,7 +1000,7 @@ async def upload_receipt(
     mime = file.content_type or "image/jpeg"
     vlm_config = resolve_vlm_config(db, account.id, group_id)
     extraction, source, message = extract_receipt_data(contents, mime, vlm_config)
-    message = _public_scan_message(source, message)
+    message = _public_scan_message(message)
 
     return schemas.ExtractionResponse(
         upload_id=upload_id,
@@ -1584,7 +1582,7 @@ async def upload_personal_receipt(
     mime = file.content_type or "image/jpeg"
     vlm_config = resolve_vlm_config(db, account.id)
     extraction, source, message = extract_receipt_data(contents, mime, vlm_config)
-    message = _public_scan_message(source, message)
+    message = _public_scan_message(message)
 
     return schemas.ExtractionResponse(
         upload_id=upload_id,

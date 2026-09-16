@@ -15,9 +15,31 @@ from .settings_service import ResolvedVlmConfig
 
 logger = logging.getLogger(__name__)
 
-USER_VLM_FALLBACK = (
-    "Could not auto-read every field. Please check merchant, date, and total before saving."
-)
+
+def _missing_scan_fields(extraction: ReceiptExtraction) -> list[str]:
+    missing: list[str] = []
+    store = (extraction.store_name or "").strip().lower()
+    if not store or store.startswith("unknown"):
+        missing.append("merchant")
+    if not (extraction.bill_date or "").strip():
+        missing.append("date")
+    try:
+        if float(extraction.total_amount or 0) <= 0:
+            missing.append("total")
+    except (TypeError, ValueError):
+        missing.append("total")
+    return missing
+
+
+def _message_for_extraction(extraction: ReceiptExtraction) -> str | None:
+    missing = _missing_scan_fields(extraction)
+    if not missing:
+        return None
+    if len(missing) == 1:
+        return f"Could not read the {missing[0]}. Please fill it in before saving."
+    if len(missing) == 2:
+        return f"Could not read {' and '.join(missing)}. Please fill those in before saving."
+    return "Could not read merchant, date, or total. Please enter them before saving."
 
 EXTRACTION_PROMPT = (
     "You are a receipt-parsing assistant. Look at the receipt image and "
@@ -70,14 +92,10 @@ def extract_receipt_data(
     ocr_result, ocr_confident = extract_receipt_data_ocr(image_bytes)
 
     if ocr_confident:
-        return ocr_result, "ocr", None
+        return ocr_result, "ocr", _message_for_extraction(ocr_result)
 
     if not config.api_key:
-        return (
-            ocr_result,
-            "ocr",
-            "Some fields could not be read clearly. Please double-check them before saving.",
-        )
+        return ocr_result, "ocr", _message_for_extraction(ocr_result)
 
     try:
         if config.provider == "google":
@@ -100,12 +118,13 @@ def extract_receipt_data(
                 "https://api.groq.com/openai/v1/chat/completions",
             )
         else:
-            return ocr_result, "ocr", USER_VLM_FALLBACK
+            return ocr_result, "ocr", _message_for_extraction(ocr_result)
 
-        return _to_extraction(data), "vlm", None
+        result = _to_extraction(data)
+        return result, "vlm", _message_for_extraction(result)
     except Exception as exc:
         logger.exception("VLM extraction failed (%s/%s): %s", config.provider, config.model, exc)
-        return ocr_result, "ocr", USER_VLM_FALLBACK
+        return ocr_result, "ocr", _message_for_extraction(ocr_result)
 
 
 def _parse_json_response(text: str) -> dict:

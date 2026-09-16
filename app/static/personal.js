@@ -203,7 +203,11 @@ async function handleReceiptUpload(file) {
         data.extraction.currency || currentSummary?.currency || "USD"
       );
     }
-    ShareSquad.showToast(data.message || "Receipt scanned. Please verify and save.", "success");
+    const warn = Boolean(data.message);
+    ShareSquad.showToast(
+      data.message || "Receipt scanned. Please verify and save.",
+      warn ? "info" : "success"
+    );
   } catch (err) {
     ShareSquad.showToast(err.message, "error");
   } finally {

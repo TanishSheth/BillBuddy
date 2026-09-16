@@ -812,7 +812,11 @@ async function handleReceiptUpload(file) {
 
     $("#sourceTag").textContent = "Scanned";
     renderSplitOptions();
-    ShareSquad.showToast(data.message || "Receipt scanned. Please verify and save.", data.message && /failed|could not|double check/i.test(data.message) ? "info" : "success");
+    const warn = Boolean(data.message);
+    ShareSquad.showToast(
+      data.message || "Receipt scanned. Please verify and save.",
+      warn ? "info" : "success"
+    );
   } catch (err) {
     ShareSquad.showToast(err.message, "error");
   }
