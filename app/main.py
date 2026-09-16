@@ -121,61 +121,67 @@ for d in (UPLOADS_DIR, TMP_UPLOADS_DIR, REPORTS_DIR):
 
 Base.metadata.create_all(bind=engine)
 
-# Auto-migration for SQLite databases to ensure all new columns exist
-def _ensure_sqlite_columns():
+
+def _ensure_schema():
+    """Add columns introduced after the first production database was created."""
     from sqlalchemy import text
-    with engine.connect() as conn:
-        try:
-            # Check groups table
-            res = conn.execute(text("PRAGMA table_info(groups)")).fetchall()
-            cols = [r[1] for r in res]
-            if "currency" not in cols:
-                conn.execute(text("ALTER TABLE groups ADD COLUMN currency VARCHAR(10) DEFAULT 'USD'"))
-            
-            # Check expenses table
-            res = conn.execute(text("PRAGMA table_info(expenses)")).fetchall()
-            cols = [r[1] for r in res]
-            if "currency" not in cols:
-                conn.execute(text("ALTER TABLE expenses ADD COLUMN currency VARCHAR(10) DEFAULT 'USD'"))
-            if "category" not in cols:
-                conn.execute(text("ALTER TABLE expenses ADD COLUMN category VARCHAR(50) DEFAULT 'General'"))
-            if "split_type" not in cols:
-                conn.execute(text("ALTER TABLE expenses ADD COLUMN split_type VARCHAR(20) DEFAULT 'EQUAL'"))
-            if "fx_rate_to_group" not in cols:
-                conn.execute(text("ALTER TABLE expenses ADD COLUMN fx_rate_to_group NUMERIC(12,6) DEFAULT 1.0"))
-            
-            # Check expense_splits table
-            res = conn.execute(text("PRAGMA table_info(expense_splits)")).fetchall()
-            cols = [r[1] for r in res]
-            if "split_value" not in cols:
-                conn.execute(text("ALTER TABLE expense_splits ADD COLUMN split_value NUMERIC(10,2)"))
-            
-            # Check monthly_periods table
-            res = conn.execute(text("PRAGMA table_info(monthly_periods)")).fetchall()
-            cols = [r[1] for r in res]
-            if "target_currency" not in cols:
-                conn.execute(text("ALTER TABLE monthly_periods ADD COLUMN target_currency VARCHAR(10)"))
-            if "settlement_fx_rate" not in cols:
-                conn.execute(text("ALTER TABLE monthly_periods ADD COLUMN settlement_fx_rate NUMERIC(12,6)"))
 
-            # Check account_settings table
-            res = conn.execute(text("PRAGMA table_info(account_settings)")).fetchall()
-            cols = [r[1] for r in res]
-            if "preferred_currency" not in cols:
-                conn.execute(text("ALTER TABLE account_settings ADD COLUMN preferred_currency VARCHAR(10) DEFAULT 'USD'"))
-            
-            # Check pending_uploads table
-            res = conn.execute(text("PRAGMA table_info(pending_uploads)")).fetchall()
-            cols = [r[1] for r in res]
-            if "account_id" not in cols:
-                conn.execute(text("ALTER TABLE pending_uploads ADD COLUMN account_id INTEGER"))
+    dialect = engine.dialect.name
+    statements = [
+        ("groups", "currency", "VARCHAR(10) DEFAULT 'USD'"),
+        ("expenses", "currency", "VARCHAR(10) DEFAULT 'USD'"),
+        ("expenses", "category", "VARCHAR(50) DEFAULT 'General'"),
+        ("expenses", "split_type", "VARCHAR(20) DEFAULT 'EQUAL'"),
+        ("expenses", "fx_rate_to_group", "NUMERIC(12,6) DEFAULT 1.0"),
+        ("expense_splits", "split_value", "NUMERIC(10,2)"),
+        ("monthly_periods", "target_currency", "VARCHAR(10)"),
+        ("monthly_periods", "settlement_fx_rate", "NUMERIC(12,6)"),
+        ("account_settings", "preferred_currency", "VARCHAR(10) DEFAULT 'USD'"),
+        ("pending_uploads", "account_id", "INTEGER"),
+    ]
 
-            conn.commit()
-        except Exception as err:
-            logger.info("SQLite column check: %s", err)
+    with engine.begin() as conn:
+        def table_exists(table: str) -> bool:
+            if dialect == "sqlite":
+                row = conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table' AND name=:t"),
+                    {"t": table},
+                ).fetchone()
+                return bool(row)
+            row = conn.execute(
+                text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = current_schema() AND table_name = :t"
+                ),
+                {"t": table},
+            ).fetchone()
+            return bool(row)
 
-if str(engine.url).startswith("sqlite"):
-    _ensure_sqlite_columns()
+        def has_column(table: str, column: str) -> bool:
+            if dialect == "sqlite":
+                rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+                return column in [r[1] for r in rows]
+            rows = conn.execute(
+                text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = :table AND column_name = :column"
+                ),
+                {"table": table, "column": column},
+            ).fetchall()
+            return bool(rows)
+
+        for table, column, spec in statements:
+            try:
+                if not table_exists(table) or has_column(table, column):
+                    continue
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {spec}"))
+                logger.info("Added missing column %s.%s", table, column)
+            except Exception as err:
+                logger.warning("Could not add %s.%s: %s", table, column, err)
+
+
+_ensure_schema()
 
 app = FastAPI(title="ShareSquad — Multi-User Expense Splitter")
 
@@ -615,17 +621,24 @@ def create_group(
         created_by_id=account.id,
     )
     db.add(group)
-    db.flush()
-
-    member = models.GroupMember(
-        group_id=group.id,
-        account_id=account.id,
-        display_name=account.display_name,
-        role="owner",
-    )
-    db.add(member)
-    db.commit()
-    db.refresh(group)
+    try:
+        db.flush()
+        member = models.GroupMember(
+            group_id=group.id,
+            account_id=account.id,
+            display_name=account.display_name,
+            role="owner",
+        )
+        db.add(member)
+        db.commit()
+        db.refresh(group)
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to create group")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not create the group. Try again in a moment.",
+        )
     return group
 
 

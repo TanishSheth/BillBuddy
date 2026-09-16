@@ -106,13 +106,14 @@ async function loadDashboard() {
     renderGroups(groups);
   } catch (err) {
     console.error("Failed to load dashboard:", err);
+    ShareSquad.showToast(err.message || "Could not load groups", "error");
   }
 }
 
 async function submitCreateGroup(e) {
   e.preventDefault();
   const name = $("#createGroupName").value.trim();
-  const currency = $("#createGroupCurrency").value;
+  const currency = $("#createGroupCurrency").value || "USD";
   const msg = $("#createGroupMsg");
 
   if (!name) {
@@ -133,6 +134,7 @@ async function submitCreateGroup(e) {
   } catch (err) {
     msg.textContent = err.message;
     msg.className = "text-xs font-mono balance-negative";
+    ShareSquad.showToast(err.message, "error");
   }
 }
 
