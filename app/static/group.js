@@ -75,12 +75,32 @@ async function loadGroup() {
   const me = state.account;
   const myMem = group.members.find((m) => m.email === me.email);
   if (myMem) {
-    state.myMemberId = myMem.id;
+    state.myMemberId = Number(myMem.id);
     state.myRole = myMem.role;
   }
 
   renderPayerOptions();
+  applyDefaultSplit();
   renderSplitOptions();
+}
+
+async function loadGroupSettings() {
+  try {
+    state.groupSettings = await ShareSquad.api(`/settings/groups/${gid()}`);
+  } catch (err) {
+    state.groupSettings = { equal_split_default: true };
+  }
+}
+
+function applyDefaultSplit() {
+  const useAll = state.groupSettings?.equal_split_default !== false;
+  if (useAll) {
+    state.selectedSplit = new Set(state.members.map((m) => Number(m.id)));
+  } else if (state.myMemberId != null) {
+    state.selectedSplit = new Set([Number(state.myMemberId)]);
+  } else {
+    state.selectedSplit = new Set();
+  }
 }
 
 async function loadPeriods() {
@@ -222,17 +242,18 @@ function renderSplitOptions() {
     chipsWrap.className = "flex flex-wrap gap-2";
 
     state.members.forEach((m) => {
-      const isSelected = state.selectedSplit.has(m.id);
+      const memberId = Number(m.id);
+      const isSelected = state.selectedSplit.has(memberId);
       const chip = document.createElement("button");
       chip.type = "button";
       chip.className = `bb-chip ${isSelected ? "selected" : ""}`;
-      chip.dataset.id = m.id;
+      chip.dataset.id = String(memberId);
       chip.textContent = m.display_name;
       chip.addEventListener("click", () => {
-        if (state.selectedSplit.has(m.id)) {
-          if (state.selectedSplit.size > 1) state.selectedSplit.delete(m.id);
+        if (state.selectedSplit.has(memberId)) {
+          if (state.selectedSplit.size > 1) state.selectedSplit.delete(memberId);
         } else {
-          state.selectedSplit.add(m.id);
+          state.selectedSplit.add(memberId);
         }
         renderSplitOptions();
       });
@@ -429,6 +450,8 @@ function cancelEdit() {
   $("#extractionPanel").classList.add("hidden");
   $("#cancelEditBtn").classList.add("hidden");
   $("#previewImg").classList.add("hidden");
+  $("#receiptPreviewWrap")?.classList.add("hidden");
+  setScanBusy(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -777,18 +800,33 @@ async function loadMembers() {
 // ---------------------------------------------------------------------------
 // Receipt Upload & VLM Handler
 // ---------------------------------------------------------------------------
+function setScanBusy(on) {
+  const wrap = $("#receiptPreviewWrap");
+  if (on) wrap?.classList.remove("hidden");
+  $("#scanProgress")?.classList.toggle("hidden", !on);
+  $("#scanProgress")?.setAttribute("aria-busy", on ? "true" : "false");
+  $("#uploadStatus")?.classList.toggle("hidden", !on);
+  $("#receiptSourceRow")?.classList.toggle("is-busy", on);
+  $("#dropzone")?.classList.toggle("is-busy", on);
+}
+
 async function handleReceiptUpload(file) {
   if (!file) return;
+  if (!ShareSquad.isReceiptImageFile(file)) {
+    ShareSquad.showToast("Please choose a photo or image file.", "error");
+    return;
+  }
 
   const preview = $("#previewImg");
+  if (preview.src && preview.src.startsWith("blob:")) URL.revokeObjectURL(preview.src);
   preview.src = URL.createObjectURL(file);
   preview.classList.remove("hidden");
+  setScanBusy(true);
 
   const formData = new FormData();
   formData.append("file", file);
 
   try {
-    ShareSquad.showToast("Uploading receipt and reading it…", "info");
     const data = await ShareSquad.api(`/groups/${gid()}/receipts/upload`, {
       method: "POST",
       body: formData,
@@ -811,6 +849,7 @@ async function handleReceiptUpload(file) {
     }
 
     $("#sourceTag").textContent = "Scanned";
+    applyDefaultSplit();
     renderSplitOptions();
     const warn = Boolean(data.message);
     ShareSquad.showToast(
@@ -819,6 +858,8 @@ async function handleReceiptUpload(file) {
     );
   } catch (err) {
     ShareSquad.showToast(err.message, "error");
+  } finally {
+    setScanBusy(false);
   }
 }
 
@@ -888,13 +929,15 @@ async function handleReceiptUpload(file) {
     state.editingExpenseId = null;
     $("#extractionPanel").classList.remove("hidden");
     $("#previewImg").classList.add("hidden");
+    $("#receiptPreviewWrap")?.classList.add("hidden");
+    setScanBusy(false);
     $("#f_store").value = "";
     $("#f_date").value = new Date().toISOString().split("T")[0];
     $("#f_amount").value = "";
     $("#f_category").value = "Food & Dining";
     ShareSquad.fillCurrencySelect($("#f_currency"), groupCurrency());
     syncExpenseCurrencyUI();
-    state.selectedSplit = new Set(state.members.map((m) => m.id));
+    applyDefaultSplit();
     renderSplitOptions();
   });
 
@@ -906,15 +949,13 @@ async function handleReceiptUpload(file) {
   const galleryInput = $("#fileInputGallery");
   const cameraInput = $("#fileInputCamera");
   dropzone.addEventListener("click", () => galleryInput?.click());
-  galleryInput?.addEventListener("change", (e) => handleReceiptUpload(e.target.files[0]));
-  cameraInput?.addEventListener("change", (e) => handleReceiptUpload(e.target.files[0]));
-  $("#pickGalleryBtn")?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    galleryInput?.click();
+  galleryInput?.addEventListener("change", (e) => {
+    handleReceiptUpload(e.target.files[0]);
+    e.target.value = "";
   });
-  $("#pickCameraBtn")?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    cameraInput?.click();
+  cameraInput?.addEventListener("change", (e) => {
+    handleReceiptUpload(e.target.files[0]);
+    e.target.value = "";
   });
 
   dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("dragover"); });
@@ -999,6 +1040,7 @@ async function handleReceiptUpload(file) {
     window.location.href = "/login.html";
   });
 
+  await loadGroupSettings();
   await loadGroup();
   await loadPeriods();
   await loadExpenses();

@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20260917a">
+<link rel="stylesheet" href="/styles.css?v=20260917d">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -88,24 +88,34 @@
         <div class="grid md:grid-cols-2 gap-6">
           <div>
             <div id="dropzone" class="dropzone">
-              <input id="fileInputGallery" type="file" accept="image/*" class="hidden">
-              <input id="fileInputCamera" type="file" accept="image/*" capture="environment" class="hidden">
               <i data-lucide="receipt" class="w-8 h-8 mx-auto mb-2 text-brand"></i>
               <p class="font-mono text-sm font-bold">Add a receipt photo</p>
-              <p class="text-xs text-ink/40 mt-1">Photo library or camera — merchant, total, and date are read automatically</p>
+              <p class="text-xs text-ink/40 mt-1">Your files on this phone, or the camera — merchant, total, and date are read automatically</p>
             </div>
+            <input id="fileInputGallery" type="file" class="file-input-sr">
+            <input id="fileInputCamera" type="file" accept="image/*" capture="environment" class="file-input-sr">
             <div class="receipt-source-row">
-              <button type="button" id="pickGalleryBtn" class="bb-btn-secondary !py-2 text-[11px]">
-                <i data-lucide="images" class="w-4 h-4"></i> Photo library
-              </button>
-              <button type="button" id="pickCameraBtn" class="bb-btn-secondary !py-2 text-[11px]">
+              <label for="fileInputGallery" id="pickGalleryBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
+                <i data-lucide="folder-open" class="w-4 h-4"></i> Choose file
+              </label>
+              <label for="fileInputCamera" id="pickCameraBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
                 <i data-lucide="camera" class="w-4 h-4"></i> Take photo
-              </button>
+              </label>
             </div>
             <button id="manualEntryBtn" type="button" class="bb-btn-secondary w-full mt-3">
               <i data-lucide="pen-line" class="w-4 h-4"></i> Enter expense manually
             </button>
-            <img id="previewImg" class="hidden mt-4 w-full rounded border border-ink/10 receipt-preview" />
+            <div id="receiptPreviewWrap" class="receipt-preview-wrap hidden mt-4">
+              <img id="previewImg" class="w-full rounded border border-ink/10 receipt-preview" alt="Receipt preview" />
+              <div id="scanProgress" class="scan-progress hidden" aria-live="polite" aria-busy="true">
+                <div class="scan-progress-ring"></div>
+                <p class="scan-progress-label">Reading receipt…</p>
+              </div>
+            </div>
+            <div id="uploadStatus" class="hidden scan-status-bar mt-3">
+              <div class="scan-progress-ring scan-progress-ring-sm"></div>
+              <span>Reading receipt… this can take a few seconds</span>
+            </div>
           </div>
 
           <div id="extractionPanel" class="hidden">
@@ -378,8 +388,8 @@
     </div>
   </div>
 
-  <script src="/api.js?v=20260917a"></script>
-  <script src="/group.js?v=20260917a"></script>
+  <script src="/api.js?v=20260917d"></script>
+  <script src="/group.js?v=20260917d"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

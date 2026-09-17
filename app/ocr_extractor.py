@@ -267,88 +267,108 @@ def _looks_implausible(extraction: ReceiptExtraction) -> bool:
 
 _AMOUNT_RE = re.compile(r"(?<!\d)(\d{1,3}(?:,\d{3})*(?:\.\d{2})|\d+\.\d{2})(?!\d)")
 
-# Longer phrases first so "total savings" wins over "total".
-_TOTAL_PHRASES = [
-    "amount before rounding",
-    "total amount due",
-    "total amount",
-    "grand total",
-    "sum total",
-    "net payable",
-    "gross amount",
-    "amount due",
-    "balance due",
-    "due balance",
-    "amount paid",
-    "total due",
-    "to pay",
-    "pay this",
-    "aggregate",
-    "tally",
-    "total",
-    "balance",
-]
-
-_TAX_PHRASES = [
-    "sales tax",
-    "service tax",
-    "excise duty",
-    "custom duty",
-    "customs duty",
-    "surcharge",
-    "taxation",
-    "assessment",
-    "tariff",
-    "levy",
-    "cgst",
-    "sgst",
-    "igst",
-    "hst",
-    "gst",
-    "vat",
-    "tax",
-]
-
-_SAVINGS_PHRASES = [
-    "promotional savings",
-    "price reduction",
-    "price cut",
-    "mark down",
-    "markdown",
-    "total savings",
-    "you saved",
-    "member savings",
-    "store credit",
-    "savings",
-    "discount",
-    "allowance",
-    "deduction",
-    "rebate",
-    "concession",
-    "waiver",
-    "coupon",
-]
-
-_SUBTOTAL_PHRASES = [
-    "amount before tax",
-    "pre-tax total",
-    "pre tax total",
-    "running total",
-    "section total",
-    "interim total",
-    "item total",
-    "line total",
-    "base amount",
-    "base value",
-    "gross total",
-    "net total",
-    "sub total",
-    "subtotal",
-]
+_AMBIGUOUS_TOTALS = {"due", "net", "sum", "tot", "charged", "balance"}
 
 
 def _norm_label_text(line: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", line.lower()).split())
+
+
+def _prep_phrases(words: list[str], drop: set[str] | None = None) -> list[str]:
+    drop = drop or set()
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in words:
+        phrase = _norm_label_text(raw)
+        if not phrase or phrase in seen or phrase in drop:
+            continue
+        seen.add(phrase)
+        out.append(phrase)
+    out.sort(key=lambda s: (-len(s), s))
+    return out
+
+
+# Ignore-lists are checked first so tax / subtotal / change are never used as the total.
+_TAX_PHRASES = _prep_phrases([
+    "Tax", "Sales Tax", "VAT", "Value Added Tax", "GST", "Goods & Services Tax",
+    "HST", "Harmonized Sales Tax", "PST", "Provincial Sales Tax", "QST",
+    "Quebec Sales Tax", "CGST", "SGST", "IGST", "UTGST", "State Tax", "Local Tax",
+    "City Tax", "County Tax", "Fed Tax", "Federal Tax", "Consumption Tax",
+    "Service Tax", "Cess", "Swachh Bharat Cess", "Krishi Kalyan Cess", "Luxury Tax",
+    "Excise", "Excise Duty", "Surcharge", "Addl Tax", "Additional Tax", "Levies",
+    "Levy", "Govt Tax", "Tax Amt", "Tax Amount", "Total Tax", "Txs", "Tx",
+    "Sales Tx", "Vat Amount", "Vat Amt", "Gst Amount", "Gst Amt", "Hst Amt",
+    "Pst Amt", "Rounding Tax", "Non-Tax", "Taxable", "Tax 1", "Tax 2", "Tax A",
+    "Tax B", "Fiscal Tax", "Municipal Tax", "Entertainment Tax",
+    "sales tax", "custom duty", "customs duty", "taxation", "tariff",
+])
+
+_SUBTOTAL_PHRASES = _prep_phrases([
+    "Subtotal", "Sub-Total", "Net Total", "Sub Tot", "Sub-Tot",
+    "Sub Amt", "Sub Amount", "Net Amt", "Net Amount", "Before Tax", "Ex Tax",
+    "Excl Tax", "Excluding Tax", "Pre-Tax", "Pre Tax", "Total Before Tax",
+    "Items Total", "Goods Total", "Merchandise Total", "Mdse Total", "MDSE",
+    "Line Total", "Items Subtotal", "Basket Total", "Subtotal Amount",
+    "Subtotal Amt", "Amount Before Tax", "Net Items", "Product Total",
+    "Menu Total", "Order Subtotal", "Ticket Subtotal", "Prev Total",
+    "Preliminary Total", "Initial Total", "Base Amount", "Base Amt",
+    "Taxable Amt", "Taxable Amount", "Untaxed Amount", "Untaxed Amt",
+    "Net Order", "Value Before Tax", "Summary Subtotal", "Raw Total",
+    "Sub Total Amount", "Sub-Total Amount", "Total Excl Tax",
+    "pre-tax total", "running total", "section total", "interim total",
+    "item total", "base value", "gross total",
+])
+
+_CHANGE_PHRASES = _prep_phrases([
+    "Change", "Cash Change", "Change Due", "Tendered Change", "Balance Return",
+    "Balance Returned", "Refund", "Refund Amount", "Amount Returned", "Cash Back",
+    "Cashback", "Return Amt", "Return Amount", "Change Given", "Given Back",
+    "Cash Return", "Cash Returned", "Change Cash", "Due Back", "Due To Customer",
+    "Customer Change", "Dispensed", "Dispensed Amt", "Dispensed Amount",
+    "Coin Change", "Notes Change", "Overpayment", "Remainder", "Residual",
+    "Surplus", "Payout", "Cash Payout", "Tender Change", "Change Tendered",
+    "Out Change", "Change Out", "Bal Return", "Net Change", "Final Change",
+    "Leftover", "Leftover Cash", "Change Amount", "Change Amt", "Paid Out",
+    "Paid Back", "Chg", "Change Tender",
+])
+
+_SAVINGS_PHRASES = _prep_phrases([
+    "promotional savings", "price reduction", "price cut", "mark down", "markdown",
+    "total savings", "you saved", "member savings", "store credit", "savings",
+    "discount", "allowance", "deduction", "rebate", "concession", "waiver", "coupon",
+])
+
+_META_PHRASES = _prep_phrases([
+    "Address", "Addr", "Location", "Store Location", "Store Address", "Venue",
+    "Site", "Branch Address", "Shop Address", "Outlet Address", "Business Address",
+    "Corporate Address", "Registered Office", "Reg Office", "Office Address",
+    "Head Office", "Premise", "Premises", "Postal Address", "Mailing Address",
+    "ZIP", "Zip Code", "Postal Code", "Postcode", "PIN Code",
+    "Phone", "Phone No", "Phone No.", "Telephone", "Tel No", "Tel No.",
+    "Contact No", "Contact No.", "Mobile", "Mob No", "Mob No.", "Cell No",
+    "Cell No.", "Hotline", "Customer Care", "Cust Care", "Support No",
+    "Support Number", "Helpline", "Office Phone", "Branch Phone", "Store Phone",
+    "Shop Phone", "Landline", "Land Line", "Toll Free", "Toll-Free", "Call Us",
+    "Email", "E-Mail", "Email Address", "E-Mail Address", "Email Addr",
+    "Mail Address", "Electronic Mail", "Contact Email", "Support Email",
+    "Customer Email", "Feedback Email", "Office Email", "Store Email",
+    "Branch Email", "Corporate Email", "Info Email", "Email Us", "Help Email",
+    "Sales Email", "Billing Email", "Accounts Email", "Email ID", "E-Mail ID",
+])
+
+_TOTAL_PHRASES = _prep_phrases([
+    "amount before rounding", "Total", "Grand Total", "Gross Total",
+    "Total Amount", "Amt Due", "Amount Due", "Total Due", "Balance Due",
+    "Payable", "Total Payable", "Net Payable", "Final Total", "Final Amount",
+    "Invoice Total", "Receipt Total", "Order Total", "Sale Total", "Total Sale",
+    "Total Cash", "Total Charged", "Card Total", "Amnt Due", "Grand Tot",
+    "Net Tot", "Tot Amt", "Tot Amount", "G. Total", "G.Total", "Summary Total",
+    "Check Total", "Bill Total", "Statement Total", "Amount To Pay", "Total To Pay",
+    "Total Price", "Net Price", "Total Charge", "Combined Total", "Aggregate Total",
+    "End Total", "Total Cost", "Total Value", "Transaction Total", "To Pay",
+    "sum total", "gross amount", "due balance", "amount paid", "pay this",
+    "aggregate", "tally",
+], drop=_AMBIGUOUS_TOTALS)
 
 
 def _phrase_in_line(norm: str, phrase: str) -> bool:
@@ -356,7 +376,7 @@ def _phrase_in_line(norm: str, phrase: str) -> bool:
     compact_phrase = phrase.replace(" ", "").replace("-", "")
     if len(compact_phrase) >= 6 and compact_phrase in compact_line:
         return True
-    pat = r"(?<![a-z])" + re.escape(phrase).replace(r"\ ", r"[\s\-]*") + r"(?![a-z])"
+    pat = r"(?<![a-z0-9])" + re.escape(phrase).replace(r"\ ", r"[\s\-]*") + r"(?![a-z0-9])"
     return bool(re.search(pat, norm))
 
 
@@ -364,8 +384,11 @@ def _line_has_any_phrase(norm: str, phrases: list[str]) -> bool:
     return any(_phrase_in_line(norm, p) for p in phrases)
 
 
+_IGNORE_KINDS = ("savings", "tax", "subtotal", "change", "meta")
+
+
 def _classify_amount_line(line: str) -> str | None:
-    """savings | tax | subtotal | total | None"""
+    """savings | tax | subtotal | change | meta | total | None"""
     norm = _norm_label_text(line)
     if not norm:
         return None
@@ -375,6 +398,10 @@ def _classify_amount_line(line: str) -> str | None:
         return "tax"
     if _line_has_any_phrase(norm, _SUBTOTAL_PHRASES):
         return "subtotal"
+    if _line_has_any_phrase(norm, _CHANGE_PHRASES):
+        return "change"
+    if _line_has_any_phrase(norm, _META_PHRASES):
+        return "meta"
     if _line_has_any_phrase(norm, _TOTAL_PHRASES):
         if re.search(r"points?\s+balance|reward\s+balance|card\s+balance", norm):
             return None
@@ -397,7 +424,7 @@ def _amount_near_line(lines: list[str], idx: int) -> float | None:
         if not (0 <= j < len(lines)):
             continue
         kind = _classify_amount_line(lines[j])
-        if kind in ("savings", "tax", "subtotal") and j != idx:
+        if kind in _IGNORE_KINDS and j != idx:
             continue
         amounts = _parse_amounts(lines[j])
         if amounts:
@@ -407,19 +434,20 @@ def _amount_near_line(lines: list[str], idx: int) -> float | None:
 
 def _find_total(lines: list[str]) -> tuple[float | None, bool]:
     for idx in range(len(lines) - 1, -1, -1):
-        if _classify_amount_line(lines[idx]) == "total":
-            amount = _amount_near_line(lines, idx)
-            if amount is not None:
-                return amount, True
-
-    start = max(0, int(len(lines) * 0.6))
-    for line in reversed(lines[start:]):
-        kind = _classify_amount_line(line)
-        if kind in ("savings", "tax", "subtotal"):
+        if _classify_amount_line(lines[idx]) != "total":
             continue
-        amounts = _parse_amounts(line)
-        if amounts:
-            return amounts[-1], False
+        amount = _amount_near_line(lines, idx)
+        if amount is not None and amount > 0:
+            return amount, True
+
+    start = max(0, int(len(lines) * 0.5))
+    fallback: list[float] = []
+    for line in lines[start:]:
+        if _classify_amount_line(line) in _IGNORE_KINDS:
+            continue
+        fallback.extend(a for a in _parse_amounts(line) if a > 0)
+    if fallback:
+        return max(fallback), False
     return None, False
 
 

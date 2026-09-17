@@ -254,6 +254,7 @@ async function clearGroupKey() {
     renderModelSelect($("#groupModel"), e.target.value);
   });
   $("#saveGroupBtn").addEventListener("click", saveGroupSettings);
+  $("#equalSplitDefault")?.addEventListener("change", saveGroupSettings);
   $("#clearGroupKeyBtn").addEventListener("click", clearGroupKey);
 
   await loadGeneralSettings();

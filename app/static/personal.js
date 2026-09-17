@@ -154,7 +154,8 @@ function openExpenseModal(expense = null) {
   const modal = $("#expenseModal");
   modal.classList.remove("hidden");
   $("#formMsg").textContent = "";
-  $("#uploadStatus").classList.add("hidden");
+  setScanBusy(false);
+  $("#receiptPreviewWrap")?.classList.add("hidden");
 
   if (expense) {
     $("#modalTitle").textContent = "Edit Personal Expense";
@@ -195,10 +196,23 @@ function closeExpenseModal() {
   $("#expenseModal").classList.add("hidden");
 }
 
+function setScanBusy(on) {
+  const wrap = $("#receiptPreviewWrap");
+  if (on) wrap?.classList.remove("hidden");
+  $("#scanProgress")?.classList.toggle("hidden", !on);
+  $("#scanProgress")?.setAttribute("aria-busy", on ? "true" : "false");
+  $("#uploadStatus")?.classList.toggle("hidden", !on);
+  $("#receiptSourceRow")?.classList.toggle("is-busy", on);
+  $("#dropzone")?.classList.toggle("is-busy", on);
+}
+
 async function handleReceiptUpload(file) {
   if (!file) return;
-  const status = $("#uploadStatus");
-  status.classList.remove("hidden");
+  if (!ShareSquad.isReceiptImageFile(file)) {
+    ShareSquad.showToast("Please choose a photo or image file.", "error");
+    return;
+  }
+  setScanBusy(true);
 
   const preview = $("#previewImg");
   if (preview.src && preview.src.startsWith("blob:")) URL.revokeObjectURL(preview.src);
@@ -209,7 +223,6 @@ async function handleReceiptUpload(file) {
   formData.append("file", file);
 
   try {
-    ShareSquad.showToast("Uploading receipt and reading it…", "info");
     const data = await ShareSquad.api("/personal/receipts/upload", {
       method: "POST",
       body: formData,
@@ -235,7 +248,7 @@ async function handleReceiptUpload(file) {
   } catch (err) {
     ShareSquad.showToast(err.message, "error");
   } finally {
-    status.classList.add("hidden");
+    setScanBusy(false);
     ["#receiptGalleryInput", "#receiptCameraInput"].forEach((sel) => {
       const el = $(sel);
       if (el) el.value = "";
@@ -312,15 +325,13 @@ async function submitExpenseForm(e) {
   const galleryInput = $("#receiptGalleryInput");
   const cameraInput = $("#receiptCameraInput");
   dropzone.addEventListener("click", () => galleryInput?.click());
-  galleryInput?.addEventListener("change", (e) => handleReceiptUpload(e.target.files[0]));
-  cameraInput?.addEventListener("change", (e) => handleReceiptUpload(e.target.files[0]));
-  $("#pickGalleryBtn")?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    galleryInput?.click();
+  galleryInput?.addEventListener("change", (e) => {
+    handleReceiptUpload(e.target.files[0]);
+    e.target.value = "";
   });
-  $("#pickCameraBtn")?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    cameraInput?.click();
+  cameraInput?.addEventListener("change", (e) => {
+    handleReceiptUpload(e.target.files[0]);
+    e.target.value = "";
   });
 
   dropzone.addEventListener("dragover", (e) => {

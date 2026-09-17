@@ -189,6 +189,13 @@ async function downloadBlob(path, filename) {
   URL.revokeObjectURL(url);
 }
 
+function isReceiptImageFile(file) {
+  if (!file) return false;
+  const type = (file.type || "").toLowerCase();
+  if (type.startsWith("image/")) return true;
+  return /\.(jpe?g|png|webp|gif|bmp|heic|heif|tif{1,2})$/i.test(file.name || "");
+}
+
 window.ShareSquad = {
   api,
   getToken,
@@ -198,6 +205,7 @@ window.ShareSquad = {
   setStoredGroupId,
   removeStoredGroupId,
   showToast,
+  isReceiptImageFile,
   formatMoney,
   formatDate,
   escapeHtml,
