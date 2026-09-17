@@ -155,10 +155,10 @@ body {
   background: transparent;
   border: none;
   border-bottom: 1px solid var(--line);
-  padding: 8px 4px;
+  padding: 10px 4px;
   outline: none;
   font-family: 'Space Mono', monospace;
-  font-size: 15px;
+  font-size: 16px;
   color: var(--ink);
 }
 .bb-input:focus { border-color: var(--brand); }
@@ -430,11 +430,88 @@ select.bb-input {
   background: color-mix(in srgb, var(--paper) 30%, #fff);
 }
 
+.bb-mobile-card .card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.bb-mobile-card .card-store {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--ink);
+}
+.bb-mobile-card .card-amount {
+  font-family: "Noto Sans", Inter, sans-serif;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.bb-mobile-card .card-meta {
+  margin-top: 8px;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--ink) 55%, transparent);
+}
+.bb-mobile-card .card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.receipt-source-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.balance-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 @media (max-width: 767px) {
   .bb-table-wrap { display: none; }
   .bb-mobile-list { display: block; }
   .bb-card { padding: 16px; }
-  .dropzone { padding: 28px 16px; min-height: 120px; }
+  .dropzone { padding: 24px 14px; min-height: 110px; }
+  .header-bar {
+    flex-wrap: wrap;
+  }
+  .site-nav {
+    order: 3;
+    width: 100%;
+    justify-content: stretch;
+    margin-top: 2px;
+  }
+  .site-nav .nav-tab {
+    flex: 1;
+    justify-content: center;
+    padding: 8px 8px;
+  }
+  .site-nav .nav-tab span {
+    display: none;
+  }
+  .modal-overlay {
+    align-items: flex-end;
+    padding: 0;
+    padding-bottom: var(--safe-bottom);
+  }
+  .modal-card {
+    max-width: 100%;
+    max-height: min(92vh, 920px);
+    border-radius: 16px 16px 0 0;
+    padding: 18px 16px calc(18px + var(--safe-bottom));
+  }
+  #splitTypeSelector {
+    flex-wrap: wrap;
+  }
+  .split-type-pill {
+    flex: 1 1 calc(50% - 4px);
+  }
+  .tab-btn {
+    min-height: 40px;
+    padding: 8px 12px;
+  }
 }
 
 @media (max-width: 480px) {
@@ -443,5 +520,8 @@ select.bb-input {
   }
   .page-title {
     font-size: 15px !important;
+  }
+  .app-logo {
+    height: 32px;
   }
 }

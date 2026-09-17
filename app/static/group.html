@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20260916f">
+<link rel="stylesheet" href="/styles.css?v=20260916g">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -88,10 +88,19 @@
         <div class="grid md:grid-cols-2 gap-6">
           <div>
             <div id="dropzone" class="dropzone">
-              <input id="fileInput" type="file" accept="image/*" capture="environment" class="hidden">
+              <input id="fileInputGallery" type="file" accept="image/*" class="hidden">
+              <input id="fileInputCamera" type="file" accept="image/*" capture="environment" class="hidden">
               <i data-lucide="receipt" class="w-8 h-8 mx-auto mb-2 text-brand"></i>
-              <p class="font-mono text-sm font-bold">Drop receipt photo here</p>
-              <p class="text-xs text-ink/40 mt-1">or click to browse / take photo</p>
+              <p class="font-mono text-sm font-bold">Add a receipt photo</p>
+              <p class="text-xs text-ink/40 mt-1">Photo library or camera — merchant, total, and date are read automatically</p>
+            </div>
+            <div class="receipt-source-row">
+              <button type="button" id="pickGalleryBtn" class="bb-btn-secondary !py-2 text-[11px]">
+                <i data-lucide="images" class="w-4 h-4"></i> Photo library
+              </button>
+              <button type="button" id="pickCameraBtn" class="bb-btn-secondary !py-2 text-[11px]">
+                <i data-lucide="camera" class="w-4 h-4"></i> Take photo
+              </button>
             </div>
             <button id="manualEntryBtn" type="button" class="bb-btn-secondary w-full mt-3">
               <i data-lucide="pen-line" class="w-4 h-4"></i> Enter expense manually
@@ -155,7 +164,7 @@
                 <div class="pt-2 border-t border-ink/10">
                   <div class="flex items-center justify-between mb-2">
                     <label class="bb-label">Split Type</label>
-                    <div class="flex gap-1" id="splitTypeSelector">
+                    <div class="flex gap-1 flex-wrap" id="splitTypeSelector">
                       <button type="button" class="split-type-pill active" data-type="EQUAL">Equal (=)</button>
                       <button type="button" class="split-type-pill" data-type="PERCENTAGE">% Percent</button>
                       <button type="button" class="split-type-pill" data-type="EXACT">Exact</button>
@@ -369,8 +378,8 @@
     </div>
   </div>
 
-  <script src="/api.js?v=20260916f"></script>
-  <script src="/group.js?v=20260916f"></script>
+  <script src="/api.js?v=20260916g"></script>
+  <script src="/group.js?v=20260916g"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

@@ -903,9 +903,19 @@ async function handleReceiptUpload(file) {
 
   // File dropzone
   const dropzone = $("#dropzone");
-  const fileInput = $("#fileInput");
-  dropzone.addEventListener("click", () => fileInput.click());
-  fileInput.addEventListener("change", (e) => handleReceiptUpload(e.target.files[0]));
+  const galleryInput = $("#fileInputGallery");
+  const cameraInput = $("#fileInputCamera");
+  dropzone.addEventListener("click", () => galleryInput?.click());
+  galleryInput?.addEventListener("change", (e) => handleReceiptUpload(e.target.files[0]));
+  cameraInput?.addEventListener("change", (e) => handleReceiptUpload(e.target.files[0]));
+  $("#pickGalleryBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    galleryInput?.click();
+  });
+  $("#pickCameraBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    cameraInput?.click();
+  });
 
   dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("dragover"); });
   dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));

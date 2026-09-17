@@ -71,8 +71,10 @@ function filterAndRenderExpenses() {
   if (!currentSummary) return;
   const filterCat = $("#categoryFilter").value;
   const tbody = $("#expensesTableBody");
+  const mobileList = $("#expensesMobileList");
   const empty = $("#emptyExpenses");
   tbody.innerHTML = "";
+  if (mobileList) mobileList.innerHTML = "";
 
   const filtered = currentSummary.expenses.filter((e) => filterCat === "All" || e.category === filterCat);
 
@@ -83,12 +85,10 @@ function filterAndRenderExpenses() {
   empty.classList.add("hidden");
 
   filtered.forEach((e) => {
-    const tr = document.createElement("tr");
-    tr.className = "border-b border-ink/5 hover:bg-ink/5 transition-colors";
-    
-    // Category style class
     const catClass = `cat-${(e.category || "General").split(" ")[0]}`;
 
+    const tr = document.createElement("tr");
+    tr.className = "border-b border-ink/5 hover:bg-ink/5 transition-colors";
     tr.innerHTML = `
       <td class="py-2.5 px-2 font-mono text-ink/70">${e.bill_date}</td>
       <td class="py-2.5 px-2 font-mono font-bold text-ink">${ShareSquad.escapeHtml(e.store_name)}</td>
@@ -103,18 +103,38 @@ function filterAndRenderExpenses() {
       </td>
     `;
     tbody.appendChild(tr);
+
+    if (mobileList) {
+      const card = document.createElement("div");
+      card.className = "bb-mobile-card";
+      card.innerHTML = `
+        <div class="card-top">
+          <div>
+            <div class="card-store">${ShareSquad.escapeHtml(e.store_name)}</div>
+            <span class="category-tag ${catClass} mt-1">${ShareSquad.escapeHtml(e.category)}</span>
+          </div>
+          <div class="card-amount text-brand">${ShareSquad.formatMoney(e.total_amount, e.currency || "USD")}</div>
+        </div>
+        <div class="card-meta">${e.bill_date} &bull; ${ShareSquad.escapeHtml(e.notes || "No notes")}</div>
+        <div class="card-actions">
+          <button class="edit-expense bb-btn-secondary !py-1 !px-2 text-xs flex-1" data-id="${e.id}"><i data-lucide="edit-2" class="w-3 h-3"></i> Edit</button>
+          <button class="delete-expense bb-btn-secondary !py-1 !px-2 text-xs text-stamp border-stamp/30 flex-1" data-id="${e.id}" data-name="${ShareSquad.escapeHtml(e.store_name)}"><i data-lucide="trash-2" class="w-3 h-3"></i> Delete</button>
+        </div>
+      `;
+      mobileList.appendChild(card);
+    }
   });
 
   lucide.createIcons();
 
-  tbody.querySelectorAll(".edit-expense").forEach((btn) => {
+  $$(".edit-expense").forEach((btn) => {
     btn.addEventListener("click", () => {
       const exp = currentSummary.expenses.find((x) => x.id === Number(btn.dataset.id));
       if (exp) openExpenseModal(exp);
     });
   });
 
-  tbody.querySelectorAll(".delete-expense").forEach((btn) => {
+  $$(".delete-expense").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const name = btn.dataset.name;
       const id = Number(btn.dataset.id);
@@ -147,6 +167,7 @@ function openExpenseModal(expense = null) {
     $("#expenseNotes").value = expense.notes || "";
     $("#uploadId").value = "";
     $("#dropzone").classList.add("hidden");
+    $("#receiptSourceRow")?.classList.add("hidden");
     $("#previewImg").classList.add("hidden");
     $("#previewImg").removeAttribute("src");
   } else {
@@ -160,10 +181,13 @@ function openExpenseModal(expense = null) {
     $("#expenseNotes").value = "";
     $("#uploadId").value = "";
     $("#dropzone").classList.remove("hidden");
+    $("#receiptSourceRow")?.classList.remove("hidden");
     $("#previewImg").classList.add("hidden");
     $("#previewImg").removeAttribute("src");
-    const fileInput = $("#receiptFileInput");
-    if (fileInput) fileInput.value = "";
+    ["#receiptGalleryInput", "#receiptCameraInput"].forEach((sel) => {
+      const el = $(sel);
+      if (el) el.value = "";
+    });
   }
 }
 
@@ -212,8 +236,10 @@ async function handleReceiptUpload(file) {
     ShareSquad.showToast(err.message, "error");
   } finally {
     status.classList.add("hidden");
-    const fileInput = $("#receiptFileInput");
-    if (fileInput) fileInput.value = "";
+    ["#receiptGalleryInput", "#receiptCameraInput"].forEach((sel) => {
+      const el = $(sel);
+      if (el) el.value = "";
+    });
   }
 }
 
@@ -275,7 +301,6 @@ async function submitExpenseForm(e) {
   $("#addExpenseBtn").addEventListener("click", () => openExpenseModal());
   $("#scanReceiptBtn").addEventListener("click", () => {
     openExpenseModal();
-    $("#receiptFileInput").click();
   });
 
   $("#closeExpenseModalBtn").addEventListener("click", closeExpenseModal);
@@ -284,9 +309,19 @@ async function submitExpenseForm(e) {
 
   // Receipt Dropzone & File Input
   const dropzone = $("#dropzone");
-  const fileInput = $("#receiptFileInput");
-  dropzone.addEventListener("click", () => fileInput.click());
-  fileInput.addEventListener("change", (e) => handleReceiptUpload(e.target.files[0]));
+  const galleryInput = $("#receiptGalleryInput");
+  const cameraInput = $("#receiptCameraInput");
+  dropzone.addEventListener("click", () => galleryInput?.click());
+  galleryInput?.addEventListener("change", (e) => handleReceiptUpload(e.target.files[0]));
+  cameraInput?.addEventListener("change", (e) => handleReceiptUpload(e.target.files[0]));
+  $("#pickGalleryBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    galleryInput?.click();
+  });
+  $("#pickCameraBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    cameraInput?.click();
+  });
 
   dropzone.addEventListener("dragover", (e) => {
     e.preventDefault();
