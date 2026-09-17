@@ -48,7 +48,7 @@ from .settings_service import (
     update_account_settings,
     update_group_settings,
 )
-from .split_logic import calculate_splits, compute_balances, simplify_debts
+from .split_logic import calculate_splits, compute_balances, graph_constrained_settlements
 from .fx_service import get_exchange_rates, get_conversion_rate, convert_amount, SUPPORTED_CURRENCIES
 from .pdf_gen import generate_monthly_pdf, generate_personal_pdf, pdf_reports_available
 from .emailer import (
@@ -428,10 +428,9 @@ def build_balances_and_settlements(
         .order_by(models.Expense.bill_date.asc(), models.Expense.id.asc())
         .all()
     )
-    raw_balances = compute_balances(
-        members, _expenses_as_dicts(expenses, base_currency, base_currency)
-    )
-    raw_settlements = simplify_debts(raw_balances)
+    expense_dicts = _expenses_as_dicts(expenses, base_currency, base_currency)
+    raw_balances = compute_balances(members, expense_dicts)
+    raw_settlements = graph_constrained_settlements(members, expense_dicts, raw_balances)
 
     target_currency = (period.target_currency or "").upper() or None
     fx_rate = float(period.settlement_fx_rate) if period.settlement_fx_rate else None
@@ -441,17 +440,15 @@ def build_balances_and_settlements(
     if target_currency and target_currency != base_currency:
         if not fx_rate:
             fx_rate = get_conversion_rate(base_currency, target_currency)
-        tgt_balances = compute_balances(
-            members,
-            _expenses_as_dicts(
-                expenses,
-                dest_currency=target_currency,
-                base_currency=base_currency,
-                custom_base_to_dest=fx_rate,
-            ),
+        tgt_expense_dicts = _expenses_as_dicts(
+            expenses,
+            dest_currency=target_currency,
+            base_currency=base_currency,
+            custom_base_to_dest=fx_rate,
         )
+        tgt_balances = compute_balances(members, tgt_expense_dicts)
         converted_balances = tgt_balances
-        for s in simplify_debts(tgt_balances):
+        for s in graph_constrained_settlements(members, tgt_expense_dicts, tgt_balances):
             converted_settlements[(s["from_member_id"], s["to_member_id"])] = s["amount"]
 
     balances = []

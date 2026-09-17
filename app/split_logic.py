@@ -7,9 +7,10 @@ ShareSquad Core Money-Splitting Math:
   5. calculate_splits(split_type, total, items) -> unified split dispatcher
   6. compute_balances(expenses, members)        -> net balance per member
   7. simplify_debts(balances)                   -> greedy min-transaction settlement plan
+  8. graph_constrained_settlements(...)         -> who-pays-whom on original payer edges
 """
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, List, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 import heapq
 
 
@@ -230,4 +231,154 @@ def simplify_debts(balances: Dict[int, dict]) -> List[dict]:
         if remaining_debt > 0:
             heapq.heappush(debtors, (-remaining_debt, deb_id, deb_name))
 
+    return settlements
+
+
+EPS = 1e-9
+
+
+def _lstsq(matrix: List[List[float]], rhs: List[float]) -> List[float]:
+    """Least squares via normal equations. Groups are small; no numpy."""
+    rows = len(matrix)
+    cols = len(matrix[0]) if matrix else 0
+    if rows == 0 or cols == 0:
+        return []
+
+    ata = [[0.0] * cols for _ in range(cols)]
+    atb = [0.0] * cols
+    for r in range(rows):
+        for i in range(cols):
+            atb[i] += matrix[r][i] * rhs[r]
+            for j in range(cols):
+                ata[i][j] += matrix[r][i] * matrix[r][j]
+    for i in range(cols):
+        ata[i][i] += 1e-10
+
+    n = cols
+    aug = [ata[i][:] + [atb[i]] for i in range(n)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(aug[r][col]))
+        aug[col], aug[pivot] = aug[pivot], aug[col]
+        diag = aug[col][col]
+        if abs(diag) < 1e-12:
+            continue
+        for j in range(col, n + 1):
+            aug[col][j] /= diag
+        for r in range(n):
+            if r == col:
+                continue
+            factor = aug[r][col]
+            for j in range(col, n + 1):
+                aug[r][j] -= factor * aug[col][j]
+    return [aug[i][n] for i in range(n)]
+
+
+def graph_constrained_settlements(
+    members: List[dict],
+    expenses: List[dict],
+    balances: Optional[Dict[int, dict]] = None,
+) -> List[dict]:
+    """
+    Who-pays-whom: only debtor → original payer edges, pruned toward n-1
+    transfers, then a conservation solve. Unmatched leftover nets still
+    settle with the min-transfer matcher so the month always closes.
+    """
+    if balances is None:
+        balances = compute_balances(members, expenses)
+
+    names = {m["id"]: m["name"] for m in members}
+    user_ids = [m["id"] for m in members]
+    net = {mid: float(balances.get(mid, {}).get("net_balance", 0.0)) for mid in user_ids}
+
+    debtors = {u for u, v in net.items() if v < -EPS}
+    lenders = {u for u, v in net.items() if v > EPS}
+    if not debtors or not lenders:
+        return []
+
+    edges = set()
+    for exp in expenses:
+        payer = exp["payer_id"]
+        if payer not in lenders:
+            continue
+        for split in exp.get("splits") or []:
+            participant = split["user_id"]
+            owed = float(split.get("share_amount") or 0)
+            if participant in debtors and owed > EPS:
+                edges.add((participant, payer))
+
+    k = max(len(user_ids) - 1, 0)
+    edges = set(edges)
+    while len(edges) > k:
+        out_lenders: Dict[int, List[int]] = {}
+        for d, l in edges:
+            out_lenders.setdefault(d, []).append(l)
+        candidates = sorted(
+            [d for d in debtors if len(out_lenders.get(d, [])) > 1],
+            key=lambda d: (abs(net[d]), d),
+        )
+        if not candidates:
+            break
+        d_star = candidates[0]
+        lenders_of_d = out_lenders[d_star]
+        l_max = max(lenders_of_d, key=lambda l: (net[l], l))
+        others = [l for l in lenders_of_d if l != l_max]
+        l_drop = min(others, key=lambda l: (net[l], l))
+        edges.discard((d_star, l_drop))
+
+    transfers: Dict[Tuple[int, int], float] = {}
+    edge_list = sorted(edges)
+    if edge_list:
+        var_index = {edge: i for i, edge in enumerate(edge_list)}
+        equations: List[List[float]] = []
+        rhs: List[float] = []
+        num_vars = len(edge_list)
+        for d in sorted(debtors):
+            row = [0.0] * num_vars
+            for l in lenders:
+                if (d, l) in var_index:
+                    row[var_index[(d, l)]] = 1.0
+            if any(row):
+                equations.append(row)
+                rhs.append(abs(net[d]))
+        if equations:
+            solution = _lstsq(equations, rhs)
+            for edge, amount in zip(edge_list, solution):
+                if amount > EPS:
+                    transfers[edge] = round(float(amount), 2)
+
+    remaining = {mid: val for mid, val in net.items()}
+    for (d, l), amount in transfers.items():
+        remaining[d] = remaining.get(d, 0.0) + amount
+        remaining[l] = remaining.get(l, 0.0) - amount
+
+    leftover_balances = {
+        mid: {**balances.get(mid, {"member_id": mid, "name": names.get(mid, str(mid))}), "net_balance": remaining.get(mid, 0.0)}
+        for mid in user_ids
+    }
+    extra = simplify_debts(leftover_balances)
+    extra_pairs = {(s["from_member_id"], s["to_member_id"]): s["amount"] for s in extra}
+
+    settlements = []
+    seen = set()
+    for (d, l), amount in transfers.items():
+        if amount <= EPS:
+            continue
+        seen.add((d, l))
+        settlements.append({
+            "from_member_id": d,
+            "from_name": names.get(d, str(d)),
+            "to_member_id": l,
+            "to_name": names.get(l, str(l)),
+            "amount": amount,
+        })
+    for (d, l), amount in extra_pairs.items():
+        if (d, l) in seen:
+            continue
+        settlements.append({
+            "from_member_id": d,
+            "from_name": names.get(d, str(d)),
+            "to_member_id": l,
+            "to_name": names.get(l, str(l)),
+            "amount": amount,
+        })
     return settlements

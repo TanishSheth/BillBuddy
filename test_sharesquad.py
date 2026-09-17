@@ -22,6 +22,7 @@ from app.split_logic import (
     calculate_splits,
     compute_balances,
     simplify_debts,
+    graph_constrained_settlements,
 )
 from app.fx_service import get_exchange_rates, get_conversion_rate, convert_amount
 from app.database import Base, engine, SessionLocal
@@ -98,6 +99,39 @@ def test_debt_simplification():
     assert 2 in payer_ids and 3 in payer_ids
     assert all(s["to_member_id"] == 1 for s in settlements)
     assert all(s["amount"] == 30.0 for s in settlements)
+
+    constrained = graph_constrained_settlements(members, expenses, balances)
+    assert all(s["to_member_id"] == 1 for s in constrained)
+    assert {s["from_member_id"] for s in constrained} == {2, 3}
+
+    # Kartavya only sits on Bhagu's receipt. Sanjivani's bill does not include him.
+    trio = [
+        {"id": 1, "name": "Bhagu"},
+        {"id": 2, "name": "Sanjivani"},
+        {"id": 3, "name": "Kartavya"},
+        {"id": 4, "name": "Tanish"},
+    ]
+    mixed = [
+        {
+            "payer_id": 2,
+            "total_amount": 12.0,
+            "splits": [
+                {"user_id": 1, "share_amount": 4.0},
+                {"user_id": 2, "share_amount": 4.0},
+                {"user_id": 4, "share_amount": 4.0},
+            ],
+        },
+        {
+            "payer_id": 1,
+            "total_amount": 10.0,
+            "splits": [{"user_id": 3, "share_amount": 10.0}],
+        },
+    ]
+    mixed_balances = compute_balances(trio, mixed)
+    who_pays = graph_constrained_settlements(trio, mixed, mixed_balances)
+    kartavya_pays = [s for s in who_pays if s["from_member_id"] == 3]
+    assert kartavya_pays, "Kartavya should still have a payment"
+    assert all(s["to_member_id"] == 1 for s in kartavya_pays)
 
     print("  [PASS] Debt simplification tests passed!")
 
