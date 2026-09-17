@@ -426,7 +426,7 @@ _TOTAL_PHRASES = _prep_phrases([
     "sum total", "gross amount", "due balance", "amount paid", "pay this",
     "aggregate", "tally", "Net Due", "Left to Pay", "Amount Owed", "Amount Owed",
     "Rent", "Rental", "Rent Payment", "Rent Amt", "Rent Amount", "House Rent",
-    "Room Rent", "Office Rent", "Shop Rent", "Monthly Rent", "Lease",
+    "Room Rent", "Office Rent", "Shop Rent", "Monthly Rent", "Lease", "Account Balance",
     "Lease Payment", "Lease Amt", "Lease Amount", "Lease Rent", "Tenancy",
     "Tenancy Fee", "Licence Fee", "License Fee", "Occupancy Cost", "HRA",
     "House Rent Allowance", "Base Rent", "Basic Rent", "Net Rent", "Gross Rent",
