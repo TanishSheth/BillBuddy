@@ -332,6 +332,50 @@ _CHANGE_PHRASES = _prep_phrases([
     "Paid Back", "Chg", "Change Tender",
 ])
 
+_AMBIGUOUS_PAYMENT = {
+    "cs", "cc", "c c", "crd", "dr", "qr", "p2p", "p2m",
+    "bill", "bills", "notes", "coins", "charge", "card", "credit", "debit",
+    "chip", "swipe", "insert", "tap", "plastic", "currency", "moneys",
+    "greenbacks", "dbt", "wallet", "eft", "jcb",
+}
+
+_PAYMENT_PHRASES = _prep_phrases([
+    "Cash", "Cash Tendered", "Cash Paid", "Cash Amount", "Cash Amt", "Csh",
+    "Cashier Cash", "Hard Cash", "Physical Cash", "Cash Sale", "Cash Received",
+    "Cash Recd", "Cash Rec'd", "Tendered", "Amount Tendered", "Amt Tendered",
+    "Total Tendered", "Cash Total", "Paid Cash", "Paper Currency", "Cash Reg",
+    "Register Cash", "Drawer Cash", "Cash In", "Cash Payment", "Cash Pymt",
+    "Pymt Cash", "Payment Cash", "Hand Cash", "Cash Trans", "Cash Transaction",
+    "Cash Drawer", "Counter Cash", "Store Cash", "Local Currency",
+    "Cash Collected", "Collected Cash", "Liquid Cash", "Immediate Cash",
+    "Cash Value", "Cash Net", "Cash Gross",
+    "Credit Card", "Debit Card", "Visa", "Mastercard", "MasterCard", "Amex",
+    "American Express", "Discover", "Rupay", "RuPay", "Maestro", "Diners",
+    "Diners Club", "Card Charge", "Card Payment", "Card Pymt", "Credit Payment",
+    "Debit Payment", "Card Sale", "EFTPOS", "POS Payment", "Terminal Payment",
+    "Contactless", "Tap to Pay", "Apple Pay", "Google Pay", "GPay",
+    "Samsung Pay", "Mobile Wallet", "Digital Wallet", "Online Payment",
+    "Card Tendered", "Charged to Card", "Auth Code", "Approval Code",
+    "Card Total", "Card Number", "Card No",
+    "UPI", "UPI Payment", "BHIM", "BHIM UPI", "PhonePe", "Paytm", "Amazon Pay",
+    "WhatsApp Pay", "Cred Pay", "QR Code", "QR Payment", "Scan QR", "Scan & Pay",
+    "E-Wallet", "Wallet Payment", "Venmo", "PayPal", "Cash App", "Zelle",
+    "Online Pymt", "Net Banking", "NetBanking", "Internet Banking", "E-Payment",
+    "Electronic Payment", "IMPS", "NEFT", "RTGS", "Bank Transfer",
+    "Direct Transfer", "Virtual Payment", "VPA", "UPI ID", "Payee VPA",
+    "Instant Pay", "Mobile Pay", "Contactless Pay", "Digital Pay",
+    "App Payment", "Electronic Cash",
+    "Debit Sale", "Debit Pymt", "Debit Charge", "Debit Tendered", "EFT Debit",
+    "Visa Debit", "Mastercard Debit", "RuPay Debit", "Interac", "Interac Debit",
+    "Checking Card", "Savings Card", "ATM Card", "Check Card", "Cheque Card",
+    "Bank Card", "Direct Debit", "Direct Pay", "POS Debit", "Terminal Debit",
+    "Chip Debit", "Swipe Debit", "Pin Debit", "PIN Payment", "Debit Auth",
+    "Debited", "Amount Debited", "Amt Debited", "Account Debit", "Local Debit",
+    "Retail Debit", "Store Debit", "Card Debit", "Secured Debit", "Instant Debit",
+    "Debit Trans", "Debit Transaction", "DB Card", "Dbt Card", "D-Card",
+    "DR Card", "Debit Net", "Debit Total",
+], drop=_AMBIGUOUS_PAYMENT)
+
 _SAVINGS_PHRASES = _prep_phrases([
     "promotional savings", "price reduction", "price cut", "mark down", "markdown",
     "total savings", "you saved", "member savings", "store credit", "savings",
@@ -361,7 +405,7 @@ _TOTAL_PHRASES = _prep_phrases([
     "Total Amount", "Amt Due", "Amount Due", "Total Due", "Balance Due",
     "Payable", "Total Payable", "Net Payable", "Final Total", "Final Amount",
     "Invoice Total", "Receipt Total", "Order Total", "Sale Total", "Total Sale",
-    "Total Cash", "Total Charged", "Card Total", "Amnt Due", "Grand Tot",
+    "Total Charged", "Amnt Due", "Grand Tot",
     "Net Tot", "Tot Amt", "Tot Amount", "G. Total", "G.Total", "Summary Total",
     "Check Total", "Bill Total", "Statement Total", "Amount To Pay", "Total To Pay",
     "Total Price", "Net Price", "Total Charge", "Combined Total", "Aggregate Total",
@@ -384,11 +428,11 @@ def _line_has_any_phrase(norm: str, phrases: list[str]) -> bool:
     return any(_phrase_in_line(norm, p) for p in phrases)
 
 
-_IGNORE_KINDS = ("savings", "tax", "subtotal", "change", "meta")
+_IGNORE_KINDS = ("savings", "tax", "subtotal", "change", "payment", "meta")
 
 
 def _classify_amount_line(line: str) -> str | None:
-    """savings | tax | subtotal | change | meta | total | None"""
+    """savings | tax | subtotal | change | payment | meta | total | None"""
     norm = _norm_label_text(line)
     if not norm:
         return None
@@ -400,6 +444,8 @@ def _classify_amount_line(line: str) -> str | None:
         return "subtotal"
     if _line_has_any_phrase(norm, _CHANGE_PHRASES):
         return "change"
+    if _line_has_any_phrase(norm, _PAYMENT_PHRASES):
+        return "payment"
     if _line_has_any_phrase(norm, _META_PHRASES):
         return "meta"
     if _line_has_any_phrase(norm, _TOTAL_PHRASES):
