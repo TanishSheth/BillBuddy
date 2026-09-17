@@ -376,6 +376,19 @@ _PAYMENT_PHRASES = _prep_phrases([
     "DR Card", "Debit Net", "Debit Total",
 ], drop=_AMBIGUOUS_PAYMENT)
 
+# Leftover / statement carry-over — not the amount paid on this receipt.
+_REMAINING_PHRASES = _prep_phrases([
+    "Balance Remaining", "Remaining Balance", "Bal Remaining", "Bal Due",
+    "Amount Remaining", "Amt Remaining", "Amount Outstanding", "Amt Outstanding",
+    "Outstanding Balance", "Outstanding Bal", "Outstanding Amt", "Outstanding Amount",
+    "Arrears", "Total Arrears", "Unpaid Balance", "Unpaid Bal", "Unpaid Amt",
+    "Unpaid Amount", "Carried Forward", "Balance C/F", "Bal C/F", "B/F",
+    "Balance B/F", "Pending Balance", "Pending Bal", "Pending Amount", "Pending Amt",
+    "Account Balance", "Acct Bal", "Statement Balance", "Closing Balance",
+    "Closing Bal", "Amount Left", "Amt Left", "Remaining Charge", "Remaining Cost",
+    "Residual Balance", "Residual Bal", "Deferred Balance", "Carryover",
+], drop={"due", "bal", "balance", "remainder", "owed"})
+
 _SAVINGS_PHRASES = _prep_phrases([
     "promotional savings", "price reduction", "price cut", "mark down", "markdown",
     "total savings", "you saved", "member savings", "store credit", "savings",
@@ -411,7 +424,18 @@ _TOTAL_PHRASES = _prep_phrases([
     "Total Price", "Net Price", "Total Charge", "Combined Total", "Aggregate Total",
     "End Total", "Total Cost", "Total Value", "Transaction Total", "To Pay",
     "sum total", "gross amount", "due balance", "amount paid", "pay this",
-    "aggregate", "tally",
+    "aggregate", "tally", "Net Due", "Left to Pay", "Amount Owed", "Amount Owed",
+    "Rent", "Rental", "Rent Payment", "Rent Amt", "Rent Amount", "House Rent",
+    "Room Rent", "Office Rent", "Shop Rent", "Monthly Rent", "Lease",
+    "Lease Payment", "Lease Amt", "Lease Amount", "Lease Rent", "Tenancy",
+    "Tenancy Fee", "Licence Fee", "License Fee", "Occupancy Cost", "HRA",
+    "House Rent Allowance", "Base Rent", "Basic Rent", "Net Rent", "Gross Rent",
+    "Flat Rent", "Apartment Rent", "Studio Rent", "Space Rental", "Venue Rental",
+    "Equipment Rental", "Car Rental", "Vehicle Rent", "Hire Charges", "Hire Fee",
+    "Rental Fee", "Rental Charge", "Rental Cost", "Property Rent",
+    "Real Estate Rent", "Contract Rent", "Agreed Rent", "Current Rent",
+    "Advance Rent", "Prepaid Rent", "Rent Due", "Rent Paid", "Rent Collected",
+    "Rental Pymt",
 ], drop=_AMBIGUOUS_TOTALS)
 
 
@@ -428,11 +452,11 @@ def _line_has_any_phrase(norm: str, phrases: list[str]) -> bool:
     return any(_phrase_in_line(norm, p) for p in phrases)
 
 
-_IGNORE_KINDS = ("savings", "tax", "subtotal", "change", "payment", "meta")
+_IGNORE_KINDS = ("savings", "tax", "subtotal", "change", "payment", "remaining", "meta")
 
 
 def _classify_amount_line(line: str) -> str | None:
-    """savings | tax | subtotal | change | payment | meta | total | None"""
+    """savings | tax | subtotal | change | payment | remaining | meta | total | None"""
     norm = _norm_label_text(line)
     if not norm:
         return None
@@ -446,7 +470,10 @@ def _classify_amount_line(line: str) -> str | None:
         return "change"
     if _line_has_any_phrase(norm, _PAYMENT_PHRASES):
         return "payment"
+    if _line_has_any_phrase(norm, _REMAINING_PHRASES):
+        return "remaining"
     if _line_has_any_phrase(norm, _META_PHRASES):
+        return "meta"
         return "meta"
     if _line_has_any_phrase(norm, _TOTAL_PHRASES):
         if re.search(r"points?\s+balance|reward\s+balance|card\s+balance", norm):
