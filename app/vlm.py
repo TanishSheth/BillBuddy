@@ -84,8 +84,8 @@ def extract_receipt_data(
     """
     Two-tier extraction:
       1. Always try local OCR + regex first — free, offline, instant.
-      2. Only escalate to a paid VLM call if OCR came back low-confidence
-         on any field AND the user/host has an API key configured.
+      2. Escalate to a paid VLM if OCR is low-confidence, missing fields,
+         or implausible (unknown store / zero total) AND an API key is set.
     """
     from .ocr_extractor import extract_receipt_data_ocr
 

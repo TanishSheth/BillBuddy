@@ -26,32 +26,239 @@ try:
 except ImportError:  # pragma: no cover - only hit if pytesseract isn't installed
     TESSERACT_AVAILABLE = False
 
+try:
+    import cv2
+    import numpy as np
+    CV2_AVAILABLE = True
+except ImportError:
+    cv2 = None
+    np = None
+    CV2_AVAILABLE = False
+
+_TESSERACT_PSM = "--oem 3 --psm 4"
+_MIN_TESSERACT_CONF = 55.0
+_MAX_PLAUSIBLE_TOTAL = 200000.0
+
 
 # ---------------------------------------------------------------------------
-# OCR
+# Image cleanup + OCR
 # ---------------------------------------------------------------------------
 
-def _run_ocr(image_bytes: bytes) -> str:
-    """Preprocess the image a bit and return raw OCR text. Empty string on failure."""
+def _pil_to_bgr(image_bytes: bytes):
+    img = Image.open(io.BytesIO(image_bytes))
+    img = ImageOps.exif_transpose(img)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+
+
+def _order_quad(pts):
+    pts = pts.reshape(4, 2).astype(np.float32)
+    s = pts.sum(axis=1)
+    d = np.diff(pts, axis=1).ravel()
+    return np.array(
+        [pts[np.argmin(s)], pts[np.argmin(d)], pts[np.argmax(s)], pts[np.argmax(d)]],
+        dtype=np.float32,
+    )
+
+
+def _find_document_quad(bgr):
+    h, w = bgr.shape[:2]
+    scale = 900 / max(h, w)
+    small = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else bgr
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(gray, 50, 150)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    page_area = small.shape[0] * small.shape[1]
+    best = None
+    best_area = 0.0
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < page_area * 0.12:
+            continue
+        peri = cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+        if len(approx) == 4 and area > best_area:
+            best = approx
+            best_area = area
+    if best is None:
+        return None
+    quad = _order_quad(best)
+    if scale < 1:
+        quad = quad / scale
+    if cv2.contourArea(quad.reshape(-1, 1, 2)) < h * w * 0.12:
+        return None
+    return quad
+
+
+def _warp_perspective(bgr, quad):
+    tl, tr, br, bl = _order_quad(quad)
+    width = int(max(np.linalg.norm(br - bl), np.linalg.norm(tr - tl)))
+    height = int(max(np.linalg.norm(tr - br), np.linalg.norm(tl - bl)))
+    width = max(width, 80)
+    height = max(height, 80)
+    dst = np.array(
+        [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
+        dtype=np.float32,
+    )
+    matrix = cv2.getPerspectiveTransform(np.array([tl, tr, br, bl], dtype=np.float32), dst)
+    return cv2.warpPerspective(bgr, matrix, (width, height))
+
+
+def _crop_to_document(bgr):
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, mask = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if np.mean(mask) < 127:
+        mask = cv2.bitwise_not(mask)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return bgr
+    cnt = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(cnt) < bgr.shape[0] * bgr.shape[1] * 0.08:
+        return bgr
+    x, y, w, h = cv2.boundingRect(cnt)
+    pad = 8
+    x0, y0 = max(x - pad, 0), max(y - pad, 0)
+    x1, y1 = min(x + w + pad, bgr.shape[1]), min(y + h + pad, bgr.shape[0])
+    return bgr[y0:y1, x0:x1]
+
+
+def _deskew(bgr):
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    inverted = cv2.bitwise_not(gray)
+    thresh = cv2.threshold(inverted, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+    coords = np.column_stack(np.where(thresh > 0))
+    if len(coords) < 50:
+        return bgr
+    angle = cv2.minAreaRect(coords)[-1]
+    if angle < -45:
+        angle = -(90 + angle)
+    else:
+        angle = -angle
+    if abs(angle) < 0.4 or abs(angle) > 20:
+        return bgr
+    h, w = bgr.shape[:2]
+    center = (w // 2, h // 2)
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    return cv2.warpAffine(bgr, matrix, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+
+def _flatten_illumination(gray):
+    blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=25, sigmaY=25)
+    blur = np.maximum(blur, 1)
+    flat = cv2.divide(gray, blur, scale=255)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    return clahe.apply(flat)
+
+
+def _denoise_unsharp(gray):
+    den = cv2.medianBlur(gray, 3)
+    den = cv2.bilateralFilter(den, 5, 40, 40)
+    blur = cv2.GaussianBlur(den, (0, 0), 1.2)
+    sharp = cv2.addWeighted(den, 1.45, blur, -0.45, 0)
+    return np.clip(sharp, 0, 255).astype(np.uint8)
+
+
+def _sauvola(gray, window: int = 25, k: float = 0.2):
+    if window % 2 == 0:
+        window += 1
+    mean = cv2.boxFilter(gray.astype(np.float32), -1, (window, window), normalize=True)
+    sqmean = cv2.boxFilter((gray.astype(np.float32) ** 2), -1, (window, window), normalize=True)
+    std = np.sqrt(np.maximum(sqmean - mean * mean, 0))
+    thresh = mean * (1 + k * ((std / 128.0) - 1))
+    return np.where(gray.astype(np.float32) > thresh, 255, 0).astype(np.uint8)
+
+
+def _ensure_min_width(gray, min_width: int = 1400):
+    if gray.shape[1] >= min_width:
+        return gray
+    scale = min_width / gray.shape[1]
+    return cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+
+def _prepare_variants(image_bytes: bytes):
+    bgr = _pil_to_bgr(image_bytes)
+    quad = _find_document_quad(bgr)
+    if quad is not None:
+        bgr = _warp_perspective(bgr, quad)
+    else:
+        bgr = _crop_to_document(bgr)
+    bgr = _deskew(bgr)
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray = _flatten_illumination(gray)
+    gray = _denoise_unsharp(gray)
+    gray = _ensure_min_width(gray)
+    return [("gray", gray), ("binary", _sauvola(gray))]
+
+
+def _tesseract_text_and_conf(image) -> tuple[str, float]:
+    if not TESSERACT_AVAILABLE:
+        return "", 0.0
+    try:
+        data = pytesseract.image_to_data(image, config=_TESSERACT_PSM, output_type=pytesseract.Output.DICT)
+        confs = []
+        for raw in data.get("conf", []):
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if val >= 0:
+                confs.append(val)
+        text = pytesseract.image_to_string(image, config=_TESSERACT_PSM)
+        mean = sum(confs) / len(confs) if confs else 0.0
+        return text, mean
+    except Exception as exc:
+        logger.warning("Tesseract failed: %s", exc)
+        return "", 0.0
+
+
+def _run_ocr(image_bytes: bytes) -> tuple[str, float]:
+    """Return (text, mean Tesseract word confidence 0-100)."""
     if not TESSERACT_AVAILABLE:
         logger.warning("pytesseract not installed — local OCR extraction unavailable.")
-        return ""
+        return "", 0.0
+
+    if CV2_AVAILABLE:
+        try:
+            best_text, best_conf = "", -1.0
+            for name, variant in _prepare_variants(image_bytes):
+                text, conf = _tesseract_text_and_conf(variant)
+                logger.info("OCR variant %s mean confidence %.1f", name, conf)
+                if conf > best_conf or (conf == best_conf and len(text) > len(best_text)):
+                    best_text, best_conf = text, conf
+            return best_text, max(best_conf, 0.0)
+        except Exception as exc:
+            logger.warning("OpenCV cleanup failed, using basic OCR: %s", exc)
 
     try:
         img = Image.open(io.BytesIO(image_bytes))
-        img = ImageOps.exif_transpose(img)  # respect phone-camera rotation
-        img = img.convert("L")  # grayscale
+        img = ImageOps.exif_transpose(img)
+        img = img.convert("L")
         img = ImageOps.autocontrast(img)
-
-        # Upscale small photos — Tesseract does much better above ~1500px wide.
         if img.width < 1500:
             scale = 1500 / img.width
             img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
-
-        return pytesseract.image_to_string(img)
+        return _tesseract_text_and_conf(img)
     except Exception as exc:
         logger.warning("Local OCR failed: %s", exc)
-        return ""
+        return "", 0.0
+
+
+def _looks_implausible(extraction: ReceiptExtraction) -> bool:
+    store = (extraction.store_name or "").strip().lower()
+    if not store or store.startswith("unknown"):
+        return True
+    try:
+        total = float(extraction.total_amount or 0)
+    except (TypeError, ValueError):
+        return True
+    if total <= 0 or total > _MAX_PLAUSIBLE_TOTAL:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +557,7 @@ def extract_receipt_data_ocr(image_bytes: bytes) -> tuple[ReceiptExtraction, boo
     guess (or missing) — the caller can decide to escalate to a VLM if one
     is configured, or just hand the guess to the user to confirm/edit.
     """
-    text = _run_ocr(image_bytes)
+    text, mean_conf = _run_ocr(image_bytes)
     lines = [l for l in text.splitlines() if l.strip()]
 
     store_name, store_confident = _find_store_name(lines)
@@ -365,5 +572,12 @@ def extract_receipt_data_ocr(image_bytes: bytes) -> tuple[ReceiptExtraction, boo
         currency=currency or "USD",
         category=_guess_category(text, store_name),
     )
-    all_confident = store_confident and date_confident and total_confident and bool(text)
+    all_confident = (
+        store_confident
+        and date_confident
+        and total_confident
+        and bool(text.strip())
+        and mean_conf >= _MIN_TESSERACT_CONF
+        and not _looks_implausible(extraction)
+    )
     return extraction, all_confident

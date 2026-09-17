@@ -60,7 +60,7 @@ Open **http://localhost:8001**. The dev server watches `app/` and restarts on Py
 
 http://localhost:8001/api/health
 
-You should see `"app": "ShareSquad"` and a `"version"` string (for example `20260916e`).
+You should see `"app": "ShareSquad"` and a `"version"` string (for example `20260917a`).
 
 ### Stop
 
@@ -261,11 +261,14 @@ If the UI is stale:
 
 ## 10. Receipt scanning in production
 
-Docker image includes `tesseract-ocr`. Flow:
+Docker image includes `tesseract-ocr` and OpenCV. Flow:
 
-1. OCR on the server
-2. Vision API only if OCR is unsure **and** a key exists (Settings, group override, or `SERVER_VLM_API_KEY`)
-3. Toasts warn only when merchant, date, or total is actually missing
+1. Crop / perspective warp, deskew, flatten lighting, denoise + sharpen, Sauvola binarize
+2. Dual Tesseract (gray vs binary); keep the higher-confidence text
+3. Vision API if OCR is unsure **or** implausible (unknown store / zero total) **and** a key exists
+4. Toasts warn only when merchant, date, or total is actually missing
+
+The first rebuild after this change is slower (OpenCV wheel). Recreate **only** `app` (`--no-deps`); do not recreate `db`.
 
 Personal tracker uses the same pipeline. Production Postgres must allow `pending_uploads.group_id` to be empty; the app adds that on startup. If personal scan fails after a deploy, check `docker compose logs app` for schema warnings.
 
