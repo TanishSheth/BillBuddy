@@ -37,6 +37,12 @@ def test_split_logic():
     assert sum(eq.values()) == Decimal("100.00"), f"Equal split sum mismatch: {sum(eq.values())}"
     assert eq[1] == Decimal("33.34") and eq[2] == Decimal("33.33") and eq[3] == Decimal("33.33")
 
+    eq_rot = equal_split(100.0, [1, 2, 3], remainder_offset=1)
+    assert sum(eq_rot.values()) == Decimal("100.00")
+    assert eq_rot[1] == Decimal("33.33") and eq_rot[2] == Decimal("33.34") and eq_rot[3] == Decimal("33.33")
+    eq_rot2 = equal_split(100.0, [1, 2, 3], remainder_offset=2)
+    assert eq_rot2[3] == Decimal("33.34")
+
     # 2. Percentage Split ($200 with 15%, 40%, 45% -> $30.00, $80.00, $90.00)
     pct = percentage_split(200.0, {1: 15.0, 2: 40.0, 3: 45.0})
     assert sum(pct.values()) == Decimal("200.00"), f"Pct split sum mismatch: {sum(pct.values())}"

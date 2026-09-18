@@ -14,18 +14,24 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 import heapq
 
 
-def equal_split(total_amount: Decimal | float, member_ids: Sequence[int]) -> Dict[int, Decimal]:
+def equal_split(
+    total_amount: Decimal | float,
+    member_ids: Sequence[int],
+    remainder_offset: int = 0,
+) -> Dict[int, Decimal]:
     if not member_ids:
         raise ValueError("split_with must contain at least one member")
 
-    n = len(member_ids)
+    ids = [int(mid) for mid in member_ids]
+    n = len(ids)
     total_cents = int((Decimal(str(total_amount)) * 100).to_integral_value(rounding=ROUND_HALF_UP))
     base_cents, remainder = divmod(total_cents, n)
+    start = remainder_offset % n
 
     shares: Dict[int, Decimal] = {}
-    for i, mid in enumerate(member_ids):
-        cents = base_cents + (1 if i < remainder else 0)
-        shares[mid] = (Decimal(cents) / 100).quantize(Decimal("0.01"))
+    for i, mid in enumerate(ids):
+        extra = 1 if (i - start) % n < remainder else 0
+        shares[mid] = (Decimal(base_cents + extra) / 100).quantize(Decimal("0.01"))
     return shares
 
 
@@ -115,6 +121,7 @@ def calculate_splits(
     split_type: str,
     total_amount: Decimal | float,
     split_inputs: Union[List[int], Dict[int, Union[Decimal, float, int]], List[dict]],
+    remainder_offset: int = 0,
 ) -> Dict[int, Decimal]:
     """
     Unified router for split calculations.
@@ -129,7 +136,7 @@ def calculate_splits(
             member_ids = [item["member_id"] for item in split_inputs]
         else:
             member_ids = list(split_inputs)
-        return equal_split(total_amount, member_ids)
+        return equal_split(total_amount, member_ids, remainder_offset=remainder_offset)
 
     # Convert list of dicts [{member_id: X, value: Y}] to dict {member_id: value}
     data_dict: Dict[int, Union[Decimal, float, int]] = {}

@@ -1067,7 +1067,19 @@ def _apply_expense_splits_custom(
         raise HTTPException(400, "Must specify members to split with")
 
     try:
-        shares = calculate_splits(split_type, total_amount, inputs)
+        remainder_offset = 0
+        if split_type == "EQUAL":
+            prior = (
+                db.query(models.Expense)
+                .filter(
+                    models.Expense.period_id == expense.period_id,
+                    models.Expense.split_type == "EQUAL",
+                    models.Expense.id < expense.id,
+                )
+                .count()
+            )
+            remainder_offset = prior
+        shares = calculate_splits(split_type, total_amount, inputs, remainder_offset=remainder_offset)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
