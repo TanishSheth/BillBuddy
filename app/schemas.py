@@ -126,6 +126,10 @@ class ReceiptExtraction(BaseModel):
     total_amount: float = Field(description="Total amount charged, as a float with 2 decimals")
     currency: Optional[str] = Field(default="USD", description="Currency code (USD, INR, EUR, etc.)")
     category: Optional[str] = Field(default="General", description="Category of purchase")
+    currency_confidence: float = Field(
+        default=0,
+        description="0-100. UI should keep the group/default currency unless this is at least 85.",
+    )
 
 
 class ExtractionResponse(BaseModel):

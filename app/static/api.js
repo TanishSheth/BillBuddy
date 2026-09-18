@@ -147,6 +147,14 @@ function currencyOptionLabel(c) {
   return `${c.code}  ${c.symbol}  ·  ${c.name}`;
 }
 
+function pickScannedCurrency(extracted, fallback) {
+  const min = 85;
+  const conf = Number(extracted?.currency_confidence ?? 0);
+  const code = String(extracted?.currency || "").trim().toUpperCase();
+  if (code && conf >= min) return code;
+  return (fallback || "USD").toUpperCase();
+}
+
 function fillCurrencySelect(selectEl, selected) {
   if (!selectEl) return;
   const wanted = (selected || selectEl.value || "USD").toUpperCase();
@@ -362,6 +370,7 @@ window.ShareSquad = {
   currencySymbol,
   currencyMeta,
   fillCurrencySelect,
+  pickScannedCurrency,
   fillAllCurrencySelects,
   downloadBlob,
 };

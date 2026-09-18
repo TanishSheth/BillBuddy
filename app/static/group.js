@@ -929,11 +929,10 @@ async function handleReceiptUpload(file) {
       if (data.extraction.bill_date) $("#f_date").value = data.extraction.bill_date;
       if (data.extraction.total_amount) $("#f_amount").value = data.extraction.total_amount;
       if (data.extraction.category) $("#f_category").value = data.extraction.category;
-      if (data.extraction.currency) {
-        ShareSquad.fillCurrencySelect($("#f_currency"), data.extraction.currency);
-      } else {
-        ShareSquad.fillCurrencySelect($("#f_currency"), groupCurrency());
-      }
+      ShareSquad.fillCurrencySelect(
+        $("#f_currency"),
+        ShareSquad.pickScannedCurrency(data.extraction, groupCurrency())
+      );
       syncExpenseCurrencyUI();
     }
 

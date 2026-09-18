@@ -187,7 +187,9 @@ def test_db_schema():
 def test_ocr_receipt_parsing():
     print("Testing OCR receipt parsing...")
     from app.ocr_extractor import (
+        _find_currency,
         _find_date,
+        _find_store_name,
         _find_total,
         _group_tokens_into_lines,
         _is_register_line,
@@ -234,12 +236,46 @@ def test_ocr_receipt_parsing():
         "width": [60, 40, 40, 50, 40, 40],
         "height": [12, 10, 12, 12, 10, 12],
     }
-    grouped, ntok, mean = _group_tokens_into_lines(data)
+    grouped, ntok, mean, lefts = _group_tokens_into_lines(data)
     assert ntok == 6
     assert mean == 80.0
     assert len(grouped) == 2
     assert grouped[0].startswith("SUBTOTAL") and "20.00" in grouped[0]
     assert grouped[1].startswith("TOTAL") and "22.25" in grouped[1]
+    assert len(lefts) == 2
+
+    pub, pub_ok = _find_store_name(
+        ["Palmetto Park Square"],
+        "Palmetto Park Square\n1339 W Palmetto Park Rd\n(561) 362-5305\nstore 0553",
+    )
+    assert pub_ok and pub == "Publix", pub
+
+    fuzzy, _ = _find_store_name(["o u b l i x"], "Publix Milk Whole Red Ga\nfor shopping at store 1708")
+    assert fuzzy == "Publix", fuzzy
+
+    sav_lines = [
+        "SUBTOTAL 11.77",
+        "TOTAL TAX 0.00",
+        "TOTAL 11.77",
+        "SAVINGS: $2.84",
+        "Visa: *7212 $11.77 Purchase",
+    ]
+    sav_total, sav_ok = _find_total(sav_lines)
+    assert sav_total == 11.77, sav_total
+    assert sav_ok is True
+
+    portal_total, portal_ok = _find_total(["Account Balance $2,603.61"])
+    assert portal_total == 2603.61, portal_total
+    assert portal_ok is True
+
+    usd, usd_conf = _find_currency("Publix\nFL 33486\nTOTAL $11.77", 11.77)
+    assert usd == "USD" and usd_conf >= 85
+
+    weak_usd, weak_conf = _find_currency("TOTAL $11.77", 11.77)
+    assert weak_conf < 85
+
+    yen, yen_conf = _find_currency("TOTAL ¥ 11.77", 11.77)
+    assert yen == "USD" and yen_conf < 85
 
     sparse = _variant_score("HI", 95.0, 1)
     rich = _variant_score("SUBTOTAL 20.00 TAX 2.25 TOTAL $ 22.25 09/13/26", 60.0, 12)

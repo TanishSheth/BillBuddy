@@ -13,6 +13,7 @@ import io
 import logging
 import re
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 
 from PIL import Image, ImageOps
 
@@ -189,8 +190,34 @@ def _ensure_min_width(gray, min_width: int = 1400):
     return cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
 
-def _prepare_variants(image_bytes: bytes):
-    bgr = _pil_to_bgr(image_bytes)
+def _looks_like_digital_capture(bgr) -> bool:
+    """Phone/portal screenshots: dark UI, sharp contrast, no paper quad."""
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    mean = float(np.mean(gray))
+    h, w = gray.shape[:2]
+    if h < 40 or w < 40:
+        return False
+    border = np.concatenate([gray[:6, :].ravel(), gray[-6:, :].ravel(), gray[:, :6].ravel(), gray[:, -6:].ravel()])
+    interior = gray[h // 10: h - h // 10, w // 10: w - w // 10]
+    if interior.size == 0:
+        return False
+    if mean < 110:
+        return True
+    if float(np.mean(border)) < 95 and float(np.std(interior)) > 35:
+        return True
+    return False
+
+
+def _prepare_screenshot_variants(bgr):
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    if float(np.mean(gray)) < 127:
+        gray = cv2.bitwise_not(gray)
+    gray = _ensure_min_width(gray)
+    _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return [("screen_gray", gray), ("screen_bin", otsu)]
+
+
+def _prepare_paper_variants(bgr):
     quad = _find_document_quad(bgr)
     if quad is not None:
         bgr = _warp_perspective(bgr, quad)
@@ -204,6 +231,14 @@ def _prepare_variants(image_bytes: bytes):
     gray = _ensure_min_width(gray)
     binary = _bridge_thermal_dots(_sauvola(gray))
     return [("gray", gray), ("binary", binary)]
+
+
+def _prepare_variants(image_bytes: bytes):
+    bgr = _pil_to_bgr(image_bytes)
+    if _looks_like_digital_capture(bgr):
+        logger.info("OCR treating image as a digital screenshot (skip paper crop / lighting flatten)")
+        return _prepare_screenshot_variants(bgr)
+    return _prepare_paper_variants(bgr)
 
 
 def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float]:
@@ -233,6 +268,7 @@ def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float]:
             continue
     tokens.sort(key=lambda t: (t["top"], t["left"]))
     rows: list[dict] = []
+    lefts: list[int] = []
     for tok in tokens:
         cy = tok["top"] + tok["h"] / 2.0
         matched = None
@@ -254,21 +290,23 @@ def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float]:
         line = " ".join(t["text"] for t in row["tokens"]).strip()
         if line:
             lines.append(line)
+            lefts.append(row["tokens"][0]["left"])
     mean = sum(confs) / len(confs) if confs else 0.0
-    return lines, len(tokens), mean
+    return lines, len(tokens), mean, lefts
 
 
-def _tesseract_pass(image) -> tuple[str, float, list[str], int]:
+def _tesseract_pass(image) -> tuple[str, float, list[str], int, list[int]]:
+    empty = ("", 0.0, [], 0, [])
     if not TESSERACT_AVAILABLE:
-        return "", 0.0, [], 0
+        return empty
     try:
         data = pytesseract.image_to_data(image, config=_TESSERACT_PSM, output_type=pytesseract.Output.DICT)
-        lines, token_count, mean = _group_tokens_into_lines(data)
+        lines, token_count, mean, lefts = _group_tokens_into_lines(data)
         text = "\n".join(lines)
-        return text, mean, lines, token_count
+        return text, mean, lines, token_count, lefts
     except Exception as exc:
         logger.warning("Tesseract failed: %s", exc)
-        return "", 0.0, [], 0
+        return empty
 
 
 _ANCHOR_RE = re.compile(
@@ -296,24 +334,24 @@ def _variant_score(text: str, mean_conf: float, token_count: int) -> float:
     )
 
 
-def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str]]:
-    """Return (text, mean Tesseract word confidence 0-100, layout lines)."""
-    empty = ("", 0.0, [])
+def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int]]:
+    """Return (text, mean Tesseract word confidence 0-100, layout lines, line x-offsets)."""
+    empty = ("", 0.0, [], [])
     if not TESSERACT_AVAILABLE:
         logger.warning("pytesseract not installed — local OCR extraction unavailable.")
         return empty
 
     if CV2_AVAILABLE:
         try:
-            best = ("", -1.0, [], -1.0)
+            best = ("", -1.0, [], [], -1.0)
             for name, variant in _prepare_variants(image_bytes):
-                text, conf, lines, ntok = _tesseract_pass(variant)
+                text, conf, lines, ntok, lefts = _tesseract_pass(variant)
                 score = _variant_score(text, conf, ntok)
                 logger.info("OCR variant %s mean confidence %.1f score %.1f", name, conf, score)
-                if score > best[3]:
-                    best = (text, conf, lines, score)
-            if best[3] >= 0:
-                return best[0], max(best[1], 0.0), best[2]
+                if score > best[4]:
+                    best = (text, conf, lines, lefts, score)
+            if best[4] >= 0:
+                return best[0], max(best[1], 0.0), best[2], best[3]
         except Exception as exc:
             logger.warning("OpenCV cleanup failed, using basic OCR: %s", exc)
 
@@ -325,8 +363,8 @@ def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str]]:
         if img.width < 1500:
             scale = 1500 / img.width
             img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
-        text, conf, lines, _ntok = _tesseract_pass(img)
-        return text, conf, lines
+        text, conf, lines, _ntok, lefts = _tesseract_pass(img)
+        return text, conf, lines, lefts
     except Exception as exc:
         logger.warning("Local OCR failed: %s", exc)
         return empty
@@ -433,6 +471,8 @@ _PAYMENT_PHRASES = _prep_phrases([
     "Cash Drawer", "Counter Cash", "Store Cash", "Local Currency",
     "Cash Collected", "Collected Cash", "Liquid Cash", "Immediate Cash",
     "Cash Value", "Cash Net", "Cash Gross",
+    "Visa Purchase", "Mastercard Purchase", "Debit Purchase", "Credit Purchase",
+    "Card Purchase",
     "Credit Card", "Debit Card", "Visa", "Mastercard", "MasterCard", "Amex",
     "American Express", "Discover", "Rupay", "RuPay", "Maestro", "Diners",
     "Diners Club", "Card Charge", "Card Payment", "Card Pymt", "Credit Payment",
@@ -468,14 +508,14 @@ _REMAINING_PHRASES = _prep_phrases([
     "Arrears", "Total Arrears", "Unpaid Balance", "Unpaid Bal", "Unpaid Amt",
     "Unpaid Amount", "Carried Forward", "Balance C/F", "Bal C/F", "B/F",
     "Balance B/F", "Pending Balance", "Pending Bal", "Pending Amount", "Pending Amt",
-    "Account Balance", "Acct Bal", "Statement Balance", "Closing Balance",
-    "Closing Bal", "Amount Left", "Amt Left", "Remaining Charge", "Remaining Cost",
+    "Acct Bal", "Closing Bal", "Amount Left", "Amt Left", "Remaining Charge", "Remaining Cost",
     "Residual Balance", "Residual Bal", "Deferred Balance", "Carryover",
 ], drop={"due", "bal", "balance", "remainder", "owed"})
 
 _SAVINGS_PHRASES = _prep_phrases([
     "promotional savings", "price reduction", "price cut", "mark down", "markdown",
-    "total savings", "you saved", "member savings", "store credit", "savings",
+    "total savings", "you saved", "you save", "member savings", "store credit", "savings",
+    "savings:", "bogo", "buy one get one",
     "discount", "allowance", "deduction", "rebate", "concession", "waiver", "coupon",
 ])
 
@@ -511,6 +551,7 @@ _TOTAL_PHRASES = _prep_phrases([
     "aggregate", "tally", "Net Due", "Left to Pay", "Amount Owed", "Amount Owed",
     "Rent", "Rental", "Rent Payment", "Rent Amt", "Rent Amount", "House Rent",
     "Room Rent", "Office Rent", "Shop Rent", "Monthly Rent", "Lease", "Account Balance",
+    "Current Charges", "Current Charge", "Statement Balance", "Closing Balance",
     "Lease Payment", "Lease Amt", "Lease Amount", "Lease Rent", "Tenancy",
     "Tenancy Fee", "Licence Fee", "License Fee", "Occupancy Cost", "HRA",
     "House Rent Allowance", "Base Rent", "Basic Rent", "Net Rent", "Gross Rent",
@@ -544,6 +585,8 @@ def _classify_amount_line(line: str) -> str | None:
     norm = _norm_label_text(line)
     if not norm:
         return None
+    if re.search(r"\*\s*\d{3,4}\b", line) and _parse_amounts(line):
+        return "payment"
     if _line_has_any_phrase(norm, _SAVINGS_PHRASES):
         return "savings"
     if _line_has_any_phrase(norm, _TAX_PHRASES):
@@ -753,59 +796,189 @@ def _find_date(text: str) -> tuple[str | None, bool]:
     return None, False
 
 
-def _find_store_name(lines: list[str]) -> tuple[str | None, bool]:
-    # Store names print at the very top, before the address/items. Skip
-    # lines that are mostly digits/punctuation (phone numbers, addresses,
-    # separators) or too short/long to plausibly be a merchant name.
-    for line in lines[:6]:
+def _drop_child_promo_lines(lines: list[str], lefts: list[int] | None) -> list[str]:
+    """Skip indented BOGO / You saved children and $0.00 promo rows when picking a total."""
+    if not lines:
+        return lines
+    lefts = lefts or [0] * len(lines)
+    span = max(max(lefts) if lefts else 1, 1)
+    out = []
+    for line, left in zip(lines, lefts):
+        if left > span * 0.22 and re.search(r"you saved|saved:|bogo|\$0\.00|\b0\.00\b", line, re.I):
+            continue
+        if re.search(r"you saved", line, re.I):
+            continue
+        amounts = _parse_amounts(line)
+        if amounts and all(abs(a) < 0.005 for a in amounts) and _classify_amount_line(line) not in ("total", "subtotal", "tax"):
+            continue
+        out.append(line)
+    return out
+
+
+def _partial_ratio(needle: str, haystack: str) -> int:
+    needle = (needle or "").lower().strip()
+    haystack = (haystack or "").lower()
+    if not needle or not haystack:
+        return 0
+    if needle in haystack:
+        return 100
+    n = len(needle)
+    if len(haystack) < n:
+        return int(SequenceMatcher(None, needle, haystack).ratio() * 100)
+    best = 0.0
+    for i in range(len(haystack) - n + 1):
+        best = max(best, SequenceMatcher(None, needle, haystack[i:i + n]).ratio())
+        if best >= 0.99:
+            return 100
+    return int(best * 100)
+
+
+_KNOWN_VENDORS = [
+    {"name": "Publix", "phones": {"5613625305"}, "stores": {"0553", "1708", "553"}, "aliases": ["publix"]},
+    {"name": "Walmart", "phones": set(), "stores": set(), "aliases": ["walmart", "wal-mart"], "labels": ["great value"]},
+    {"name": "Costco", "phones": set(), "stores": set(), "aliases": ["costco"], "labels": ["kirkland"]},
+    {"name": "Trader Joe's", "phones": set(), "stores": set(), "aliases": ["trader joe", "trader joes"], "labels": ["trader joe"]},
+    {"name": "Target", "phones": set(), "stores": set(), "aliases": ["target"], "labels": ["good & gather", "good and gather"]},
+    {"name": "Kroger", "phones": set(), "stores": set(), "aliases": ["kroger"], "labels": []},
+    {"name": "Whole Foods", "phones": set(), "stores": set(), "aliases": ["whole foods"], "labels": ["365 whole"]},
+    {"name": "Aldi", "phones": set(), "stores": set(), "aliases": ["aldi"], "labels": []},
+    {"name": "Safeway", "phones": set(), "stores": set(), "aliases": ["safeway"], "labels": []},
+    {"name": "CVS", "phones": set(), "stores": set(), "aliases": ["cvs"], "labels": []},
+    {"name": "Walgreens", "phones": set(), "stores": set(), "aliases": ["walgreens"], "labels": []},
+    {"name": "Amazon", "phones": set(), "stores": set(), "aliases": ["amazon"], "labels": []},
+]
+
+_PHONE_RE = re.compile(r"\(?\d{3}\)?[\s.\-]*\d{3}[\s.\-]*\d{4}")
+_STORE_NUM_RE = re.compile(r"\bstore\s*#?\s*(\d{3,5})\b", re.I)
+_ADDRESSY_RE = re.compile(r"\b(rd|road|st|street|ave|avenue|blvd|square|hwy|dr|drive|ln|lane|pkwy|parkway)\b", re.I)
+
+
+def _phones_in_text(text: str) -> set[str]:
+    return {re.sub(r"\D", "", m.group(0)) for m in _PHONE_RE.finditer(text or "")}
+
+
+def _store_ids_in_text(text: str) -> set[str]:
+    found = set()
+    for m in _STORE_NUM_RE.finditer(text or ""):
+        found.add(m.group(1).lstrip("0") or m.group(1))
+        found.add(m.group(1))
+    return found
+
+
+def _vendor_from_directory(text: str) -> str | None:
+    phones = _phones_in_text(text)
+    store_ids = _store_ids_in_text(text)
+    blob = text.lower()
+    for vendor in _KNOWN_VENDORS:
+        if phones & vendor.get("phones", set()):
+            return vendor["name"]
+        if store_ids & vendor.get("stores", set()):
+            return vendor["name"]
+        for alias in vendor.get("aliases", []):
+            if _partial_ratio(alias, blob) >= 75:
+                return vendor["name"]
+        for label in vendor.get("labels", []):
+            if label in blob:
+                return vendor["name"]
+    return None
+
+
+def _header_store_candidate(lines: list[str]) -> str | None:
+    for line in lines[:8]:
         cleaned = line.strip()
-        if not (2 <= len(cleaned) <= 40):
+        if not (2 <= len(cleaned) <= 48):
             continue
         letters = sum(c.isalpha() for c in cleaned)
         if letters / max(len(cleaned), 1) < 0.5:
             continue
-        if re.search(r"\d{3,}", cleaned):  # phone numbers, addresses, receipt #s
+        if re.search(r"\d{3,}", cleaned):
             continue
-        return cleaned, True
+        if _ADDRESSY_RE.search(cleaned):
+            continue
+        return cleaned
+    return None
 
+
+def _find_store_name(lines: list[str], text: str | None = None) -> tuple[str | None, bool]:
+    blob = text or "\n".join(lines)
+    known = _vendor_from_directory(blob)
+    header = _header_store_candidate(lines)
+    if known:
+        return known, True
+    if header:
+        return header, True
     return None, False
 
 
-def _find_currency(text: str) -> str | None:
-    if "₹" in text or "Rs." in text or "Rs " in text or "INR" in text.upper() or "RUPEE" in text.upper():
-        return "INR"
-    upper = text.upper()
-    codes = (
-        ("CAD", "CAD"),
-        ("C$", "CAD"),
-        ("AUD", "AUD"),
-        ("A$", "AUD"),
-        ("GBP", "GBP"),
-        ("EUR", "EUR"),
-        ("AED", "AED"),
-        ("SGD", "SGD"),
-        ("CHF", "CHF"),
-        ("JPY", "JPY"),
-        ("CNY", "CNY"),
-        ("USD", "USD"),
-    )
-    for needle, code in codes:
-        if needle in upper or needle in text:
-            return code
-    if "£" in text:
-        return "GBP"
-    if "€" in text:
-        return "EUR"
-    if "¥" in text:
-        return "JPY"
-    if "$" in text:
-        return "USD"
-    return None
+_US_STATE_ZIP = re.compile(
+    r"\b(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\s+\d{5}(?:-\d{4})?\b"
+)
+_CA_POSTAL = re.compile(r"\b[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z]\s?\d[ABCEGHJ-NPRSTV-Z]\d\b", re.I)
+_UK_POSTAL = re.compile(r"\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b", re.I)
+_CA_PROV = re.compile(r"\b(ON|BC|QC|AB|MB|SK|NS|NB|NL|PE|YT|NT|NU)\b")
+_INR_MARK = re.compile(r"\b(GSTIN|CGST|SGST|IGST|HSN|Rs\.?|INR|RUPEE)\b", re.I)
+_INR_LAKH = re.compile(r"\b\d{1,2},\d{2},\d{3}(?:\.\d{2})?\b")
+_INR_SLASH = re.compile(r"\d+\s*/-")
+_HAS_CENTS = re.compile(r"\.\d{2}\b")
+
+
+def _find_currency(text: str, amount: float | None = None) -> tuple[str | None, float]:
+    """Return (ISO code, confidence 0-100). Below ~85 the UI should keep the group default."""
+    blob = text or ""
+    upper = blob.upper()
+    amount_str = f"{amount:.2f}" if amount is not None else ""
+
+    if _US_STATE_ZIP.search(blob) or _vendor_from_directory(blob) in {"Publix", "Walmart", "Target", "Kroger", "Safeway"}:
+        return "USD", 100.0
+    if _PHONE_RE.search(blob) and re.search(r"\bsales tax\b|\bsubtotal\b", blob, re.I):
+        return "USD", 92.0
+    if _INR_MARK.search(blob) or _INR_LAKH.search(blob) or _INR_SLASH.search(blob):
+        return "INR", 96.0
+    if _CA_POSTAL.search(blob) or (_CA_PROV.search(upper) and re.search(r"\b(GST|HST|PST)\b", upper)):
+        return "CAD", 94.0
+    if re.search(r"\b(VAT\s*REG|VAT REG)\b", upper) or (_UK_POSTAL.search(upper) and "VAT" in upper):
+        return "GBP", 92.0
+    if re.search(r"\b(MWST|TVA|IVA)\b", upper):
+        return "EUR", 90.0
+    if re.search(r"\b(GSTIN|CGST|SGST)\b", upper):
+        return "INR", 100.0
+    if re.search(r"\b(TRN|AED|DHS|DIRHAM)\b", upper):
+        return "AED", 90.0
+    if re.search(r"\bABN\b", upper) and re.search(r"\bGST\b", upper):
+        return "AUD", 88.0
+
+    if "₹" in blob or "RS." in upper or "RS " in upper or "RUPEE" in upper:
+        return "INR", 90.0
+    if "CAD" in upper or "C$" in blob:
+        return "CAD", 88.0
+    if "AUD" in upper or "A$" in blob:
+        return "AUD", 88.0
+    if "GBP" in upper:
+        return "GBP", 90.0
+    if "EUR" in upper:
+        return "EUR", 90.0
+    if "USD" in upper or "US$" in blob:
+        return "USD", 90.0
+
+    has_cents = bool(_HAS_CENTS.search(amount_str or blob))
+    if "¥" in blob or re.search(r"\bJPY\b|\bYEN\b", upper):
+        if has_cents:
+            return "USD", 55.0
+        return "JPY", 80.0
+    if "£" in blob:
+        return "GBP", 70.0
+    if "€" in blob:
+        return "EUR", 70.0
+    if "$" in blob:
+        return "USD", 58.0
+    if re.search(r"\b[YV]\s*\d+\.\d{2}\b", blob):
+        return "USD", 52.0
+    return None, 0.0
 
 
 _CATEGORY_HINTS = (
     ("Food & Dining", ("restaurant", "cafe", "coffee", "pizza", "burger", "diner", "bar")),
-    ("Groceries", ("grocery", "supermarket", "market", "trader joe", "whole foods", "walmart", "costco")),
+    ("Groceries", ("grocery", "supermarket", "market", "trader joe", "whole foods", "walmart", "costco", "publix")),
     ("Transit", ("uber", "lyft", "metro", "transit", "parking", "gas station", "shell", "exxon")),
     ("Travel", ("airline", "airways", "hotel", "airbnb", "booking.com", "expedia")),
     ("Healthcare", ("pharmacy", "clinic", "hospital", "dental", "cvs", "walgreens")),
@@ -835,13 +1008,14 @@ def extract_receipt_data_ocr(image_bytes: bytes) -> tuple[ReceiptExtraction, boo
     guess (or missing) — the caller can decide to escalate to a VLM if one
     is configured, or just hand the guess to the user to confirm/edit.
     """
-    text, mean_conf, boxed_lines = _run_ocr(image_bytes)
+    text, mean_conf, boxed_lines, line_lefts = _run_ocr(image_bytes)
     lines = boxed_lines or [l for l in text.splitlines() if l.strip()]
+    total_lines = _drop_child_promo_lines(lines, line_lefts)
 
-    store_name, store_confident = _find_store_name(lines)
+    store_name, store_confident = _find_store_name(lines, text)
     bill_date, date_confident = _find_date(text)
-    total_amount, total_confident = _find_total(lines)
-    currency = _find_currency(text)
+    total_amount, total_confident = _find_total(total_lines)
+    currency, currency_confidence = _find_currency(text, total_amount)
 
     extraction = ReceiptExtraction(
         store_name=store_name or "Unknown store",
@@ -849,6 +1023,7 @@ def extract_receipt_data_ocr(image_bytes: bytes) -> tuple[ReceiptExtraction, boo
         total_amount=total_amount or 0.0,
         currency=currency or "USD",
         category=_guess_category(text, store_name),
+        currency_confidence=float(currency_confidence or 0),
     )
     all_confident = (
         store_confident
