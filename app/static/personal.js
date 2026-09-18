@@ -219,14 +219,8 @@ async function handleReceiptUpload(file) {
   preview.src = URL.createObjectURL(file);
   preview.classList.remove("hidden");
 
-  const formData = new FormData();
-  formData.append("file", file);
-
   try {
-    const data = await ShareSquad.api("/personal/receipts/upload", {
-      method: "POST",
-      body: formData,
-    });
+    const data = await ShareSquad.uploadReceipt("/personal/receipts/upload", file);
     $("#uploadId").value = data.upload_id;
     if (data.extraction) {
       if (data.extraction.store_name) $("#storeName").value = data.extraction.store_name;
@@ -332,6 +326,11 @@ async function submitExpenseForm(e) {
   cameraInput?.addEventListener("change", (e) => {
     handleReceiptUpload(e.target.files[0]);
     e.target.value = "";
+  });
+  ShareSquad.bindReceiptCamera({
+    openBtn: "#pickCameraBtn",
+    fileInput: "#receiptCameraInput",
+    onCapture: handleReceiptUpload,
   });
 
   dropzone.addEventListener("dragover", (e) => {

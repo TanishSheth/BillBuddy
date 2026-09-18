@@ -65,7 +65,15 @@ async function loadGroup() {
   state.group = group;
   state.members = group.members;
 
+  const isOwner = state.myRole === "owner";
+  $("#ownerTools")?.classList.toggle("hidden", !isOwner);
   $("#currentGroupName").textContent = group.name;
+  if (group.has_cover) {
+    ShareSquad.setAuthImage($("#groupCoverImg"), `/groups/${gid()}/cover`);
+    $("#groupCoverImg")?.classList.remove("hidden");
+  } else {
+    $("#groupCoverImg")?.classList.add("hidden");
+  }
   const gCurr = group.currency || "USD";
   $("#groupCurrencyBadge").innerHTML = `<span class="currency-sym">${ShareSquad.escapeHtml(ShareSquad.currencySymbol(gCurr))}</span> ${gCurr}`;
 
@@ -94,8 +102,9 @@ async function loadGroupSettings() {
 
 function applyDefaultSplit() {
   const useAll = state.groupSettings?.equal_split_default !== false;
+  const active = (state.members || []).filter((m) => m.is_active !== false);
   if (useAll) {
-    state.selectedSplit = new Set(state.members.map((m) => Number(m.id)));
+    state.selectedSplit = new Set(active.map((m) => Number(m.id)));
   } else if (state.myMemberId != null) {
     state.selectedSplit = new Set([Number(state.myMemberId)]);
   } else {
@@ -222,9 +231,14 @@ function setSplitType(type) {
   renderSplitOptions();
 }
 
+function activeMembers() {
+  return (state.members || []).filter((m) => m.is_active !== false);
+}
+
 function renderPayerOptions() {
   const sel = $("#f_payer");
-  sel.innerHTML = state.members
+  const list = activeMembers();
+  sel.innerHTML = list
     .map((m) => `<option value="${m.id}" ${m.id === state.myMemberId ? "selected" : ""}>${ShareSquad.escapeHtml(m.display_name)}</option>`)
     .join("");
 }
@@ -242,6 +256,7 @@ function renderSplitOptions() {
     chipsWrap.className = "flex flex-wrap gap-2";
 
     state.members.forEach((m) => {
+      if (m.is_active === false) return;
       const memberId = Number(m.id);
       const isSelected = state.selectedSplit.has(memberId);
       const chip = document.createElement("button");
@@ -264,7 +279,7 @@ function renderSplitOptions() {
   }
 
   // Percentage, Exact, or Shares custom inputs
-  state.members.forEach((m) => {
+  activeMembers().forEach((m) => {
     const val = state.splitValues[m.id] !== undefined ? state.splitValues[m.id] : (state.splitType === "SHARES" ? 1 : 0);
     const row = document.createElement("div");
     row.className = "flex items-center justify-between gap-3 p-2 bg-ink/5 rounded-lg text-xs font-mono";
@@ -780,18 +795,38 @@ async function loadMembers() {
   state.members = group.members;
 
   const list = $("#memberList");
+  const list = $("#memberList");
+  const isOwner = state.myRole === "owner";
   list.innerHTML = group.members
-    .map(
-      (m) => `
-      <div class="member-row">
+    .map((m) => {
+      const inactive = m.is_active === false;
+      const canRemove = isOwner && !inactive && Number(m.id) !== Number(state.myMemberId);
+      return `
+      <div class="member-row ${inactive ? "opacity-50" : ""}">
         <div>
           <span class="font-bold text-ink">${ShareSquad.escapeHtml(m.display_name)}</span>
           ${m.role === "owner" ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-brand/10 text-brand font-bold ml-1.5 uppercase">Owner</span>' : ""}
+          ${inactive ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-ink/10 text-ink/50 font-bold ml-1.5 uppercase">Removed</span>' : ""}
           <span class="member-email">${ShareSquad.escapeHtml(m.email)}</span>
         </div>
-      </div>`
-    )
+        ${canRemove ? `<button type="button" class="remove-member bb-btn-secondary !py-1 !px-2 text-[10px] text-stamp border-stamp/30" data-id="${m.id}" data-name="${ShareSquad.escapeHtml(m.display_name)}">Remove</button>` : ""}
+      </div>`;
+    })
     .join("");
+
+  list.querySelectorAll(".remove-member").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm(`Remove ${btn.dataset.name} from this group?\n\nTheir past expenses stay in the history. They will not be included on new bills.`)) return;
+      try {
+        await ShareSquad.api(`/groups/${gid()}/members/${btn.dataset.id}`, { method: "DELETE" });
+        ShareSquad.showToast(`${btn.dataset.name} was removed`, "success");
+        await loadGroup();
+        await loadMembers();
+      } catch (err) {
+        ShareSquad.showToast(err.message, "error");
+      }
+    });
+  });
 
   const url = `${window.location.origin}/join.html?code=${group.invite_code}`;
   $("#inviteLink").value = url;
@@ -823,14 +858,8 @@ async function handleReceiptUpload(file) {
   preview.classList.remove("hidden");
   setScanBusy(true);
 
-  const formData = new FormData();
-  formData.append("file", file);
-
   try {
-    const data = await ShareSquad.api(`/groups/${gid()}/receipts/upload`, {
-      method: "POST",
-      body: formData,
-    });
+    const data = await ShareSquad.uploadReceipt(`/groups/${gid()}/receipts/upload`, file);
 
     state.currentUploadId = data.upload_id;
     $("#extractionPanel").classList.remove("hidden");
@@ -956,6 +985,41 @@ async function handleReceiptUpload(file) {
   cameraInput?.addEventListener("change", (e) => {
     handleReceiptUpload(e.target.files[0]);
     e.target.value = "";
+  });
+  ShareSquad.bindReceiptCamera({
+    openBtn: "#pickCameraBtn",
+    fileInput: "#fileInputCamera",
+    onCapture: handleReceiptUpload,
+  });
+  $("#renameGroupBtn")?.addEventListener("click", async () => {
+    const next = prompt("New group name", state.group?.name || "");
+    if (!next || !next.trim()) return;
+    try {
+      const updated = await ShareSquad.api(`/groups/${gid()}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name: next.trim() }),
+      });
+      state.group = updated;
+      $("#currentGroupName").textContent = updated.name;
+      ShareSquad.showToast("Group name updated", "success");
+    } catch (err) {
+      ShareSquad.showToast(err.message, "error");
+    }
+  });
+  $("#groupCoverInput")?.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("file", await ShareSquad.prepareReceiptFile(file));
+    try {
+      const updated = await ShareSquad.api(`/groups/${gid()}/cover`, { method: "POST", body: fd });
+      state.group = updated;
+      ShareSquad.setAuthImage($("#groupCoverImg"), `/groups/${gid()}/cover`);
+      ShareSquad.showToast("Group photo updated", "success");
+    } catch (err) {
+      ShareSquad.showToast(err.message, "error");
+    }
   });
 
   dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("dragover"); });

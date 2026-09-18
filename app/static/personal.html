@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20260917g">
+<link rel="stylesheet" href="/styles.css?v=20260918a">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -152,7 +152,7 @@
       <div id="dropzone" class="dropzone mb-3">
         <i data-lucide="receipt" class="w-8 h-8 text-brand/60 mb-2"></i>
         <p class="text-xs font-mono text-ink/70 font-bold">Add a receipt photo</p>
-        <p class="text-[10px] text-ink/40 font-mono mt-1">Your files on this phone, or the camera</p>
+        <p class="text-[10px] text-ink/40 font-mono mt-1">Choose a file or take a photo. Confirm the amount before saving.</p>
       </div>
       <input type="file" id="receiptGalleryInput" class="file-input-sr" />
       <input type="file" id="receiptCameraInput" accept="image/*" capture="environment" class="file-input-sr" />
@@ -160,9 +160,9 @@
         <label for="receiptGalleryInput" id="pickGalleryBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
           <i data-lucide="folder-open" class="w-4 h-4"></i> Choose file
         </label>
-        <label for="receiptCameraInput" id="pickCameraBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
+        <button type="button" id="pickCameraBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
           <i data-lucide="camera" class="w-4 h-4"></i> Take photo
-        </label>
+        </button>
       </div>
       <div id="receiptPreviewWrap" class="receipt-preview-wrap hidden mb-4">
         <img id="previewImg" class="w-full rounded border border-ink/10 receipt-preview" alt="Receipt preview" />
@@ -234,8 +234,23 @@
     </div>
   </div>
 
-  <script src="/api.js?v=20260917g"></script>
-  <script src="/personal.js?v=20260917g"></script>
+  </div>
+
+  <div id="liveCameraModal" class="modal-overlay hidden">
+    <div class="bb-card modal-card">
+      <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Take photo</h2>
+      <video id="liveCameraVideo" class="live-camera-video" playsinline autoplay muted></video>
+      <p class="text-[10px] text-ink/50 font-mono mt-2">If the camera does not start, tap Phone camera.</p>
+      <div class="flex flex-wrap gap-2 mt-4">
+        <button type="button" id="liveCameraCapture" class="bb-btn-primary flex-1">Capture</button>
+        <button type="button" id="liveCameraFallback" class="bb-btn-secondary">Phone camera</button>
+        <button type="button" id="liveCameraCancel" class="bb-btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/api.js?v=20260918a"></script>
+  <script src="/personal.js?v=20260918a"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

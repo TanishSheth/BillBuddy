@@ -34,7 +34,39 @@ function renderModelSelect(selectEl, providerId, selectedModelId) {
     .join("");
 }
 
-async function loadGeneralSettings() {
+async function loadProfile() {
+  const me = await ShareSquad.api("/auth/me");
+  if ($("#profileName")) $("#profileName").value = me.account.display_name || "";
+  if ($("#profileEmail")) $("#profileEmail").value = me.account.email || "";
+  if (me.account.has_avatar) {
+    ShareSquad.setAuthImage($("#profileAvatar"), "/auth/me/avatar");
+  }
+}
+
+async function saveProfile() {
+  const msg = $("#profileMsg");
+  msg.textContent = "Saving…";
+  msg.className = "text-xs font-mono text-ink/50";
+  const body = {
+    display_name: $("#profileName").value.trim(),
+    email: $("#profileEmail").value.trim(),
+  };
+  const current = $("#profileCurrentPassword").value;
+  const next = $("#profileNewPassword").value;
+  if (current) body.current_password = current;
+  if (next) body.new_password = next;
+  try {
+    await ShareSquad.api("/auth/me", { method: "PATCH", body: JSON.stringify(body) });
+    $("#profileCurrentPassword").value = "";
+    $("#profileNewPassword").value = "";
+    msg.textContent = "Profile saved.";
+    msg.className = "text-xs font-mono balance-positive";
+    ShareSquad.showToast("Profile saved", "success");
+  } catch (err) {
+    msg.textContent = err.message;
+    msg.className = "text-xs font-mono balance-negative";
+  }
+}
   const settings = await ShareSquad.api("/settings/account");
   state.accountSettings = settings;
 
@@ -256,7 +288,23 @@ async function clearGroupKey() {
   $("#saveGroupBtn").addEventListener("click", saveGroupSettings);
   $("#equalSplitDefault")?.addEventListener("change", saveGroupSettings);
   $("#clearGroupKeyBtn").addEventListener("click", clearGroupKey);
+  $("#saveProfileBtn")?.addEventListener("click", saveProfile);
+  $("#profileAvatarInput")?.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("file", await ShareSquad.prepareReceiptFile(file));
+    try {
+      await ShareSquad.api("/auth/me/avatar", { method: "POST", body: fd });
+      ShareSquad.setAuthImage($("#profileAvatar"), "/auth/me/avatar");
+      ShareSquad.showToast("Photo updated", "success");
+    } catch (err) {
+      ShareSquad.showToast(err.message, "error");
+    }
+  });
 
+  await loadProfile();
   await loadGeneralSettings();
   await loadGroupsList();
 })();

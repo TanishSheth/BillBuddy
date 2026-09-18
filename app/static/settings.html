@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20260917g">
+<link rel="stylesheet" href="/styles.css?v=20260918a">
 </head>
 <body class="bb-bg text-ink min-h-screen">
 
@@ -23,15 +23,16 @@
           <img src="/logo.png" alt="ShareSquad" class="app-logo" onerror="this.style.display='none'">
         </a>
         <div class="min-w-0">
-          <h1 class="page-title font-mono font-bold text-base sm:text-lg tracking-tight leading-none text-brand">Settings</h1>
-          <p class="text-[10px] uppercase tracking-widest text-ink/50 leading-none mt-1 font-mono">ShareSquad Preferences</p>
+          <h1 class="page-title font-mono font-bold text-base sm:text-lg tracking-tight leading-none text-brand">Profile &amp; Settings</h1>
+          <p class="text-[10px] uppercase tracking-widest text-ink/50 leading-none mt-1 font-mono">Your account, photos, and scan keys</p>
         </div>
       </div>
     </div>
     <nav class="max-w-3xl mx-auto px-4 sm:px-5 pb-2">
       <div class="tab-nav flex gap-1 overflow-x-auto pb-1">
-        <button type="button" data-settings-tab="general" class="tab-btn active">General Preferences</button>
-        <button type="button" data-settings-tab="group" class="tab-btn">Group Settings</button>
+        <button type="button" data-settings-tab="general" class="tab-btn active">Profile</button>
+        <button type="button" data-settings-tab="scan" class="tab-btn">Receipt scanning</button>
+        <button type="button" data-settings-tab="group" class="tab-btn">Group</button>
       </div>
     </nav>
   </header>
@@ -40,6 +41,38 @@
 
     <!-- General settings -->
     <section id="tab-general" class="settings-panel space-y-4">
+      <div class="bb-card space-y-4">
+        <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Your profile</h2>
+        <p class="text-xs text-ink/60">This name and photo show up for people in your groups. Email is how you sign in.</p>
+        <div class="flex items-center gap-3">
+          <img id="profileAvatar" alt="" class="profile-avatar hidden">
+          <div class="flex-1 min-w-0">
+            <label class="bb-label">Profile photo</label>
+            <input id="profileAvatarInput" type="file" accept="image/jpeg,image/png,image/webp" class="bb-input text-xs">
+          </div>
+        </div>
+        <div>
+          <label class="bb-label">Display name</label>
+          <input id="profileName" class="bb-input" maxlength="100" autocomplete="name">
+        </div>
+        <div>
+          <label class="bb-label">Email</label>
+          <input id="profileEmail" type="email" class="bb-input" autocomplete="email">
+        </div>
+        <div>
+          <label class="bb-label">Current password</label>
+          <input id="profileCurrentPassword" type="password" class="bb-input" autocomplete="current-password" placeholder="Needed to change email or password">
+        </div>
+        <div>
+          <label class="bb-label">New password</label>
+          <input id="profileNewPassword" type="password" class="bb-input" autocomplete="new-password" placeholder="Leave blank to keep the current password">
+        </div>
+        <button type="button" id="saveProfileBtn" class="bb-btn-primary text-[11px]">Save profile</button>
+        <p id="profileMsg" class="text-xs font-mono"></p>
+      </div>
+    </section>
+
+    <section id="tab-scan" class="settings-panel hidden space-y-4">
       <div class="bb-card space-y-5">
         <div>
           <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-1">Receipt scanning</h2>
@@ -159,8 +192,8 @@
 
   </main>
 
-  <script src="/api.js?v=20260917g"></script>
-  <script src="/settings.js?v=20260917g"></script>
+  <script src="/api.js?v=20260918a"></script>
+  <script src="/settings.js?v=20260918a"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

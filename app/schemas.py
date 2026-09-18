@@ -45,6 +45,14 @@ class AccountOut(BaseModel):
     id: int
     email: str
     display_name: str
+    has_avatar: bool = False
+
+
+class AccountProfileUpdate(BaseModel):
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    email: Optional[EmailStr] = None
+    current_password: Optional[str] = None
+    new_password: Optional[str] = Field(default=None, min_length=6, max_length=128)
 
 
 class MeOut(BaseModel):
@@ -65,6 +73,11 @@ class GroupOut(BaseModel):
     currency: str = "USD"
     invite_code: str
     created_at: datetime
+    has_cover: bool = False
+
+
+class GroupUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=150)
 
 
 class GroupListOut(GroupOut):
@@ -82,6 +95,7 @@ class MemberOut(BaseModel):
     display_name: str
     email: str
     role: str
+    is_active: bool = True
 
 
 class InviteByEmailRequest(BaseModel):

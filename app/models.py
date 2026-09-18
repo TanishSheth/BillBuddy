@@ -17,6 +17,7 @@ class Account(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
     display_name = Column(String(100), nullable=False)
+    avatar_path = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     memberships = relationship("GroupMember", back_populates="account")
@@ -64,6 +65,7 @@ class Group(Base):
     currency = Column(String(10), default="USD", nullable=False)
     invite_code = Column(String(64), unique=True, nullable=False, default=generate_invite_code)
     created_by_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
+    cover_image_path = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     creator = relationship("Account", back_populates="groups_created")
@@ -82,6 +84,7 @@ class GroupMember(Base):
     account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     display_name = Column(String(100), nullable=False)
     role = Column(String(20), default="member")
+    is_active = Column(Boolean, default=True, nullable=False)
     joined_at = Column(DateTime, server_default=func.now())
 
     group = relationship("Group", back_populates="members")

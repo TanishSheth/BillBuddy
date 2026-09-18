@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20260917g">
+<link rel="stylesheet" href="/styles.css?v=20260918a">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -24,10 +24,18 @@
         </a>
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-2">
+            <img id="groupCoverImg" alt="" class="group-cover-thumb hidden">
             <h1 id="currentGroupName" class="page-title font-mono font-bold text-base sm:text-lg tracking-tight leading-tight truncate">Group</h1>
             <span id="groupCurrencyBadge" class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-brand/10 text-brand">USD</span>
           </div>
           <p class="text-[10px] sm:text-[11px] uppercase tracking-widest text-ink/50 leading-none mt-0.5 font-mono">Shared group</p>
+          <div id="ownerTools" class="hidden owner-tools mt-1">
+            <button type="button" id="renameGroupBtn" class="text-[10px] font-mono text-brand underline">Rename</button>
+            <label class="text-[10px] font-mono text-brand underline cursor-pointer">
+              Group photo
+              <input id="groupCoverInput" type="file" accept="image/jpeg,image/png,image/webp" class="file-input-sr">
+            </label>
+          </div>
         </div>
       </div>
 
@@ -83,6 +91,10 @@
         </div>
       </div>
 
+      <div class="how-it-works mb-5">
+        <p><strong>How this group works:</strong> Scan or enter a bill → pick who paid and who shares it → save. <strong>Balances</strong> shows who is owed money. <strong>Members</strong> is where the owner invites people, removes someone, or changes the group name and photo.</p>
+      </div>
+
       <!-- Add / Scan Expense Tab -->
       <section id="tab-upload" class="tab-panel">
         <div class="grid md:grid-cols-2 gap-6">
@@ -90,7 +102,7 @@
             <div id="dropzone" class="dropzone">
               <i data-lucide="receipt" class="w-8 h-8 mx-auto mb-2 text-brand"></i>
               <p class="font-mono text-sm font-bold">Add a receipt photo</p>
-              <p class="text-xs text-ink/40 mt-1">Your files on this phone, or the camera — merchant, total, and date are read automatically</p>
+              <p class="text-xs text-ink/40 mt-1">Scan a receipt or pick a file. ShareSquad reads merchant, date, and total, then you confirm before saving.</p>
             </div>
             <input id="fileInputGallery" type="file" class="file-input-sr">
             <input id="fileInputCamera" type="file" accept="image/*" capture="environment" class="file-input-sr">
@@ -98,9 +110,9 @@
               <label for="fileInputGallery" id="pickGalleryBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
                 <i data-lucide="folder-open" class="w-4 h-4"></i> Choose file
               </label>
-              <label for="fileInputCamera" id="pickCameraBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
+              <button type="button" id="pickCameraBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
                 <i data-lucide="camera" class="w-4 h-4"></i> Take photo
-              </label>
+              </button>
             </div>
             <button id="manualEntryBtn" type="button" class="bb-btn-secondary w-full mt-3">
               <i data-lucide="pen-line" class="w-4 h-4"></i> Enter expense manually
@@ -388,8 +400,23 @@
     </div>
   </div>
 
-  <script src="/api.js?v=20260917g"></script>
-  <script src="/group.js?v=20260917g"></script>
+  </div>
+
+  <div id="liveCameraModal" class="modal-overlay hidden">
+    <div class="bb-card modal-card">
+      <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Take photo</h2>
+      <video id="liveCameraVideo" class="live-camera-video" playsinline autoplay muted></video>
+      <p class="text-[10px] text-ink/50 font-mono mt-2">Hold the receipt flat and fill the frame. If this fails, use the phone camera.</p>
+      <div class="flex flex-wrap gap-2 mt-4">
+        <button type="button" id="liveCameraCapture" class="bb-btn-primary flex-1">Capture</button>
+        <button type="button" id="liveCameraFallback" class="bb-btn-secondary">Phone camera</button>
+        <button type="button" id="liveCameraCancel" class="bb-btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/api.js?v=20260918a"></script>
+  <script src="/group.js?v=20260918a"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

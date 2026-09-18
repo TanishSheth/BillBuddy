@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20260917g">
+<link rel="stylesheet" href="/styles.css?v=20260918a">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -39,8 +39,9 @@
         <button id="newGroupBtn" type="button" class="bb-btn-primary !py-1.5 !px-3 text-[11px]">
           <i data-lucide="plus" class="w-3.5 h-3.5"></i> <span class="btn-label">New Group</span>
         </button>
-        <button id="settingsBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px]" title="Settings">
-          <i data-lucide="settings" class="w-3.5 h-3.5"></i>
+        <button id="settingsBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px]" title="Profile and settings">
+          <img id="headerAvatar" alt="" class="header-avatar hidden">
+          <i data-lucide="user" class="w-3.5 h-3.5"></i>
         </button>
         <button id="logoutBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] hover:text-stamp hover:border-stamp/40" title="Sign out">
           <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
@@ -53,8 +54,11 @@
     <div class="flex items-center justify-between mb-6">
       <div>
         <h2 class="font-mono font-bold text-xl text-ink">Shared Expense Groups</h2>
-        <p class="text-xs text-ink/60 mt-0.5">Split bills, track balances, and calculate settlements with your groups.</p>
+        <p class="text-xs text-ink/60 mt-0.5">Split bills, track balances, and settle up with people you travel or live with.</p>
       </div>
+    </div>
+    <div class="how-it-works mb-5">
+      <p><strong>Start here:</strong> Create a group → invite people from Members → scan a receipt on Add / Scan → check Balances to see who pays whom. Open the gear icon for your photo, name, email, and receipt API key.</p>
     </div>
 
     <div id="groupsGrid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
@@ -94,8 +98,8 @@
     </div>
   </div>
 
-  <script src="/api.js?v=20260917g"></script>
-  <script src="/dashboard.js?v=20260917g"></script>
+  <script src="/api.js?v=20260918a"></script>
+  <script src="/dashboard.js?v=20260918a"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

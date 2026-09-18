@@ -490,6 +490,10 @@ select.bb-input {
   animation: scan-spin 0.75s linear infinite;
 }
 
+@keyframes scan-spin {
+  to { transform: rotate(360deg); }
+}
+
 .scan-progress-ring-sm {
   width: 18px;
   height: 18px;
@@ -546,8 +550,60 @@ label.receipt-source-btn {
   margin: 0;
 }
 
-@keyframes scan-spin {
-  to { transform: rotate(360deg); }
+.how-it-works {
+  background: rgba(15, 118, 110, 0.07);
+  border: 1px solid rgba(15, 118, 110, 0.18);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--ink) 78%, transparent);
+}
+.how-it-works strong { color: var(--brand); }
+
+.live-camera-video {
+  width: 100%;
+  max-height: 52vh;
+  background: #111;
+  border-radius: 10px;
+  object-fit: cover;
+}
+
+.group-cover-thumb,
+.profile-avatar,
+.header-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.profile-avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 12px;
+}
+.header-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+}
+
+.owner-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.member-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
 }
 
 .file-input-sr {

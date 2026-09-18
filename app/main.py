@@ -21,6 +21,7 @@ from . import models, schemas
 from .config import (
     APP_VERSION,
     BASE_URL,
+    DATA_DIR,
     DISABLE_SCHEDULER,
     IS_DEVELOPMENT,
     REPORTS_DIR,
@@ -186,6 +187,9 @@ def _ensure_schema():
         ("monthly_periods", "settlement_fx_rate", "NUMERIC(12,6)"),
         ("account_settings", "preferred_currency", "VARCHAR(10) DEFAULT 'USD'"),
         ("pending_uploads", "account_id", "INTEGER"),
+        ("accounts", "avatar_path", "VARCHAR"),
+        ("groups", "cover_image_path", "VARCHAR"),
+        ("group_members", "is_active", "BOOLEAN DEFAULT TRUE"),
     ]
 
     for table, column, spec in statements:
@@ -301,6 +305,24 @@ def _personal_uploads_dir(account_id: int) -> str:
     return path
 
 
+def _member_is_active(member: models.GroupMember) -> bool:
+    return getattr(member, "is_active", True) is not False
+
+
+def _save_profile_image(upload: UploadFile, dest_path: str) -> None:
+    contents = upload.file.read()
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(400, f"File exceeds maximum size of {MAX_FILE_SIZE // (1024 * 1024)}MB")
+    mime = (upload.content_type or "").lower()
+    if mime not in ALLOWED_MIME_TYPES and not (upload.filename or "").lower().endswith(
+        (".jpg", ".jpeg", ".png", ".webp")
+    ):
+        raise HTTPException(400, "Use a JPEG, PNG, or WEBP image")
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    with open(dest_path, "wb") as fh:
+        fh.write(contents)
+
+
 def _public_scan_message(message: Optional[str]) -> Optional[str]:
     if not message:
         return None
@@ -335,6 +357,8 @@ def require_group_member(
     )
     if not member:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a member of this group")
+    if not _member_is_active(member):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You are no longer a member of this group")
     return member
 
 
@@ -544,6 +568,7 @@ def me(account: models.Account = Depends(get_current_account), db: Session = Dep
                 currency=g.currency or "USD",
                 invite_code=g.invite_code,
                 created_at=g.created_at,
+                has_cover=bool(getattr(g, "cover_image_path", None) and os.path.exists(g.cover_image_path or "")),
             )
         )
     return schemas.MeOut(
@@ -551,9 +576,80 @@ def me(account: models.Account = Depends(get_current_account), db: Session = Dep
             id=account.id,
             email=account.email,
             display_name=account.display_name,
+            has_avatar=bool(getattr(account, "avatar_path", None) and os.path.exists(account.avatar_path or "")),
         ),
         groups=groups_out,
     )
+
+
+@app.patch("/api/auth/me", response_model=schemas.AccountOut)
+def update_profile(
+    payload: schemas.AccountProfileUpdate,
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    if payload.display_name:
+        name = payload.display_name.strip()
+        account.display_name = name
+        for membership in db.query(models.GroupMember).filter_by(account_id=account.id).all():
+            membership.display_name = name
+
+    if payload.email:
+        email_clean = str(payload.email).lower().strip()
+        if email_clean != account.email.lower():
+            if not payload.current_password or not verify_password(payload.current_password, account.password_hash):
+                raise HTTPException(400, "Current password is required to change email")
+            taken = db.query(models.Account).filter(models.Account.email == email_clean, models.Account.id != account.id).first()
+            if taken:
+                raise HTTPException(409, "That email is already in use")
+            account.email = email_clean
+
+    if payload.new_password:
+        if not payload.current_password or not verify_password(payload.current_password, account.password_hash):
+            raise HTTPException(400, "Current password is required to change password")
+        account.password_hash = hash_password(payload.new_password.strip())
+
+    db.commit()
+    db.refresh(account)
+    return schemas.AccountOut(
+        id=account.id,
+        email=account.email,
+        display_name=account.display_name,
+        has_avatar=bool(getattr(account, "avatar_path", None) and os.path.exists(account.avatar_path or "")),
+    )
+
+
+@app.post("/api/auth/me/avatar", response_model=schemas.AccountOut)
+def upload_avatar(
+    file: UploadFile = File(...),
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    dest_dir = os.path.join(DATA_DIR, "avatars")
+    dest = os.path.join(dest_dir, f"account_{account.id}.jpg")
+    _save_profile_image(file, dest)
+    if account.avatar_path and account.avatar_path != dest and os.path.exists(account.avatar_path):
+        try:
+            os.remove(account.avatar_path)
+        except OSError:
+            pass
+    account.avatar_path = dest
+    db.commit()
+    db.refresh(account)
+    return schemas.AccountOut(
+        id=account.id,
+        email=account.email,
+        display_name=account.display_name,
+        has_avatar=True,
+    )
+
+
+@app.get("/api/auth/me/avatar")
+def get_my_avatar(account: models.Account = Depends(get_current_account)):
+    path = getattr(account, "avatar_path", None)
+    if not path or not os.path.exists(path):
+        raise HTTPException(404, "No profile photo")
+    return FileResponse(path)
 
 
 @app.post("/api/auth/forgot-password", response_model=schemas.MessageResponse)
@@ -675,8 +771,11 @@ def list_groups(account: models.Account = Depends(get_current_account), db: Sess
     memberships = db.query(models.GroupMember).filter_by(account_id=account.id).all()
     results = []
     for m in memberships:
+        if not _member_is_active(m):
+            continue
         g = m.group
-        member_count = db.query(models.GroupMember).filter_by(group_id=g.id).count()
+        all_members = db.query(models.GroupMember).filter_by(group_id=g.id).all()
+        member_count = sum(1 for x in all_members if _member_is_active(x))
         results.append(
             schemas.GroupListOut(
                 id=g.id,
@@ -684,6 +783,7 @@ def list_groups(account: models.Account = Depends(get_current_account), db: Sess
                 currency=g.currency or "USD",
                 invite_code=g.invite_code,
                 created_at=g.created_at,
+                has_cover=bool(getattr(g, "cover_image_path", None) and os.path.exists(g.cover_image_path or "")),
                 role=m.role,
                 member_count=member_count,
             )
@@ -792,6 +892,7 @@ def get_group(
             display_name=m.display_name,
             email=m.account.email,
             role=m.role,
+            is_active=_member_is_active(m),
         )
         for m in members
     ]
@@ -802,8 +903,88 @@ def get_group(
         currency=group.currency or "USD",
         invite_code=group.invite_code,
         created_at=group.created_at,
+        has_cover=bool(getattr(group, "cover_image_path", None) and os.path.exists(group.cover_image_path or "")),
         members=members_out,
     )
+
+
+@app.patch("/api/groups/{group_id}", response_model=schemas.GroupDetailOut)
+def update_group(
+    group_id: int,
+    payload: schemas.GroupUpdate,
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    require_group_owner(group_id, account, db)
+    group = db.query(models.Group).get(group_id)
+    if not group:
+        raise HTTPException(404, "Group not found")
+    if payload.name:
+        group.name = payload.name.strip()
+    db.commit()
+    return get_group(group_id, account, db)
+
+
+@app.post("/api/groups/{group_id}/cover", response_model=schemas.GroupDetailOut)
+def upload_group_cover(
+    group_id: int,
+    file: UploadFile = File(...),
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    require_group_owner(group_id, account, db)
+    group = db.query(models.Group).get(group_id)
+    if not group:
+        raise HTTPException(404, "Group not found")
+    dest = os.path.join(_group_uploads_dir(group_id), "cover.jpg")
+    _save_profile_image(file, dest)
+    group.cover_image_path = dest
+    db.commit()
+    return get_group(group_id, account, db)
+
+
+@app.get("/api/groups/{group_id}/cover")
+def get_group_cover(
+    group_id: int,
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    require_group_member(group_id, account, db)
+    group = db.query(models.Group).get(group_id)
+    path = getattr(group, "cover_image_path", None) if group else None
+    if not path or not os.path.exists(path):
+        raise HTTPException(404, "No group photo")
+    return FileResponse(path)
+
+
+@app.delete("/api/groups/{group_id}/members/{member_id}")
+def remove_group_member(
+    group_id: int,
+    member_id: int,
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    require_group_owner(group_id, account, db)
+    target = (
+        db.query(models.GroupMember)
+        .filter_by(id=member_id, group_id=group_id)
+        .first()
+    )
+    if not target:
+        raise HTTPException(404, "Member not found")
+    if target.account_id == account.id:
+        raise HTTPException(400, "You cannot remove yourself. Transfer ownership or delete the group.")
+    if target.role == "owner":
+        owner_count = (
+            db.query(models.GroupMember)
+            .filter_by(group_id=group_id, role="owner")
+            .count()
+        )
+        if owner_count <= 1:
+            raise HTTPException(400, "Cannot remove the only owner")
+    target.is_active = False
+    db.commit()
+    return {"ok": True, "message": f"{target.display_name} was removed from the group"}
 
 
 @app.delete("/api/groups/{group_id}")

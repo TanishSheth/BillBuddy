@@ -33,7 +33,10 @@ function renderGroups(groups) {
       (g) => `<div class="bb-card group-card flex flex-col justify-between gap-3">
         <div>
           <div class="flex items-start justify-between gap-2">
-            <h3 class="font-mono font-bold text-base leading-tight text-ink">${ShareSquad.escapeHtml(g.name)}</h3>
+            <div class="flex items-start gap-2 min-w-0">
+              <img alt="" class="group-cover-thumb ${g.has_cover ? "" : "hidden"}" data-cover-id="${g.id}">
+              <h3 class="font-mono font-bold text-base leading-tight text-ink">${ShareSquad.escapeHtml(g.name)}</h3>
+            </div>
             <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-brand/10 text-brand"><span class="currency-sym">${ShareSquad.escapeHtml(ShareSquad.currencySymbol(g.currency || "USD"))}</span> ${g.currency || "USD"}</span>
           </div>
           <p class="text-xs text-ink/50 mt-1 font-mono flex items-center gap-1.5">
@@ -61,6 +64,11 @@ function renderGroups(groups) {
     .join("");
 
   lucide.createIcons();
+  grid.querySelectorAll("[data-cover-id]").forEach((img) => {
+    if (!img.classList.contains("hidden")) {
+      ShareSquad.setAuthImage(img, `/groups/${img.dataset.coverId}/cover`);
+    }
+  });
 
   grid.querySelectorAll(".open-group").forEach((btn) => {
     btn.addEventListener("click", () => openGroup(Number(btn.dataset.id)));
@@ -102,6 +110,9 @@ async function loadDashboard() {
     const me = await ShareSquad.api("/auth/me");
     const greeting = $("#userGreeting");
     if (greeting) greeting.textContent = me.account.display_name;
+    if (me.account.has_avatar) {
+      ShareSquad.setAuthImage($("#headerAvatar"), "/auth/me/avatar");
+    }
     const groups = await ShareSquad.api("/groups");
     renderGroups(groups);
   } catch (err) {
