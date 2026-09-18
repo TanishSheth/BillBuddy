@@ -187,7 +187,6 @@ def test_db_schema():
 def test_ocr_receipt_parsing():
     print("Testing OCR receipt parsing...")
     from app.ocr_extractor import (
-        _find_currency,
         _find_date,
         _find_store_name,
         _find_total,
@@ -226,7 +225,8 @@ def test_ocr_receipt_parsing():
         "19428.08",
     ]
     fallback_total, fallback_ok = _find_total(footer_only)
-    assert fallback_total != 19428.08, fallback_total
+    assert fallback_total is None
+    assert fallback_ok is False
 
     data = {
         "text": ["SUBTOTAL", "........", "20.00", "TOTAL", "........", "22.25"],
@@ -268,14 +268,27 @@ def test_ocr_receipt_parsing():
     assert portal_total == 2603.61, portal_total
     assert portal_ok is True
 
-    usd, usd_conf = _find_currency("Publix\nFL 33486\nTOTAL $11.77", 11.77)
-    assert usd == "USD" and usd_conf >= 85
+    ignored = _find_total([
+        "SUBTOTAL 99.00",
+        "TAX 7.00",
+        "SAVINGS 5.00",
+        "CASH 50.00",
+        "TOTAL 22.25",
+    ])
+    assert ignored == (22.25, True)
 
-    weak_usd, weak_conf = _find_currency("TOTAL $11.77", 11.77)
-    assert weak_conf < 85
+    from app.ocr_extractor import _parse_amounts, _repair_ocr_digits
 
-    yen, yen_conf = _find_currency("TOTAL ¥ 11.77", 11.77)
-    assert yen == "USD" and yen_conf < 85
+    assert _repair_ocr_digits("TOTAL 12.O9") == "TOTAL 12.09"
+    assert _repair_ocr_digits("DATE 09/l3/26") == "DATE 09/13/26"
+    assert _parse_amounts("Total 1.234,56") == [1234.56]
+
+    slogan, slogan_ok = _find_store_name(["TAX INVOICE", "Some Cafe"])
+    assert slogan_ok is False
+    assert slogan == "Some Cafe"
+
+    eu_date, eu_ok = _find_date("GSTIN 29ABCDE1234F1Z5\n13.09.26 TOTAL 22.25")
+    assert eu_ok and eu_date == "2026-09-13", eu_date
 
     sparse = _variant_score("HI", 95.0, 1)
     rich = _variant_score("SUBTOTAL 20.00 TAX 2.25 TOTAL $ 22.25 09/13/26", 60.0, 12)

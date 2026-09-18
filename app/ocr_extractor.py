@@ -36,13 +36,64 @@ except ImportError:
     np = None
     CV2_AVAILABLE = False
 
-# PSM 6: one uniform text block. PSM 4 merges receipt columns (TOTAL ..... 22.25)
-# across the dotted leader into footer strings.
-_TESSERACT_PSM = "--oem 3 --psm 6"
+# PSM 11: sparse text. PSM 4 merges receipt columns; PSM 6 assumes one uniform block.
+_TESSERACT_PSM = "--oem 3 --psm 11"
+
+# ---------------------------------------------------------------------------
+# OCR letter/digit confusion repair
+#
+# Thermal/photo OCR very commonly swaps look-alike glyphs *inside* a numeric
+# token: O/o/D <-> 0, I/l/| <-> 1, S/s <-> 5, B <-> 8, Z <-> 2, G <-> 6.
+# This is the single biggest cause of "wrong amount" / "wrong date" reports.
+# We only touch a token when it already contains at least one real digit and
+# is shaped like an amount (NN.NN / NN,NN) or a date (NN/NN/NNNN etc.), so we
+# never mangle ordinary words.
+# ---------------------------------------------------------------------------
+_DIGIT_FIX_MAP = str.maketrans({
+    "O": "0", "o": "0", "D": "0",
+    "I": "1", "l": "1", "|": "1",
+    "S": "5", "s": "5",
+    "B": "8",
+    "Z": "2",
+    "G": "6",
+})
+_MONEY_TOKEN_RE = re.compile(r"(?<![\w.])[0-9OoIlSsBZGD]{1,7}[.,][0-9OoIlSsBZGD]{2}(?![\w.])")
+_DATE_TOKEN_RE = re.compile(
+    r"(?<![\w./-])[0-9OoIlSsBZGD]{1,2}[/.\-][0-9OoIlSsBZGD]{1,2}[/.\-][0-9OoIlSsBZGD]{2,4}(?![\w./-])"
+)
+
+
+def _repair_money_confusable(match: "re.Match") -> str:
+    token = match.group(0)
+    if not any(ch.isdigit() for ch in token):
+        return token  # no digit anchor at all — likely not a number, leave it
+    if token[0].isdigit():
+        return token.translate(_DIGIT_FIX_MAP)
+    # Leading char is a confusable *letter* (S, O, ...) rather than a digit —
+    # on a money token that's almost always a misread currency symbol
+    # ("$12.99" -> "S12.99"), not a digit. Leave it alone so the currency
+    # misread check downstream can still see it; only fix the numeral run.
+    return token[0] + token[1:].translate(_DIGIT_FIX_MAP)
+
+
+def _repair_date_confusable(match: "re.Match") -> str:
+    token = match.group(0)
+    if not any(ch.isdigit() for ch in token):
+        return token
+    return token.translate(_DIGIT_FIX_MAP)
+
+
+def _repair_ocr_digits(text: str) -> str:
+    """Run once on raw OCR output before any field extraction."""
+    if not text:
+        return text
+    text = _MONEY_TOKEN_RE.sub(_repair_money_confusable, text)
+    text = _DATE_TOKEN_RE.sub(_repair_date_confusable, text)
+    return text
+
+
 _MIN_TESSERACT_CONF = 55.0
 _MAX_PLAUSIBLE_TOTAL = 200000.0
-_UNLABELED_TOTAL_CAP = 10000.0
-_MONEY_TOL = 0.06
 
 
 # ---------------------------------------------------------------------------
@@ -112,24 +163,141 @@ def _warp_perspective(bgr, quad):
     return cv2.warpPerspective(bgr, matrix, (width, height))
 
 
-def _crop_to_document(bgr):
+def _rotate_bound(bgr, angle: float, border_value=None):
+    """Rotate by an arbitrary angle without cropping content off the edges
+    (canvas grows to fit). Used for angles far outside what the narrow-band
+    text-pixel deskew below is willing to touch."""
+    h, w = bgr.shape[:2]
+    cx, cy = w / 2.0, h / 2.0
+    matrix = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
+    cos, sin = abs(matrix[0, 0]), abs(matrix[0, 1])
+    new_w = int((h * sin) + (w * cos))
+    new_h = int((h * cos) + (w * sin))
+    matrix[0, 2] += (new_w / 2.0) - cx
+    matrix[1, 2] += (new_h / 2.0) - cy
+    kwargs = {} if border_value is None else {"borderValue": border_value}
+    return cv2.warpAffine(bgr, matrix, (new_w, new_h), **kwargs)
+
+
+def _foreground_mask(bgr):
+    """Binary mask + largest contour of the paper blob.
+
+    Tries both Otsu polarities and keeps whichever gives a plausible paper
+    blob. The original code guessed polarity from the mask's overall mean
+    brightness, which is backwards whenever the paper is the *bright*
+    object on a *dark* background (receipt on a dark counter/table) — it
+    would invert a perfectly good mask into one that swallows almost the
+    entire frame (background) instead of just the paper. Here we instead
+    reject any candidate whose largest contour is suspiciously close to
+    the full frame, since that's a sign the wrong polarity got picked.
+    """
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, mask = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    if np.mean(mask) < 127:
-        mask = cv2.bitwise_not(mask)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
+    _, base = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    img_area = bgr.shape[0] * bgr.shape[1]
+    best_mask, best_cnt, best_area = None, None, 0.0
+    for candidate in (base, cv2.bitwise_not(base)):
+        closed = cv2.morphologyEx(candidate, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        cnt = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(cnt)
+        if area >= img_area * 0.95:  # this polarity picked up the background, not the paper
+            continue
+        if area > best_area:
+            best_mask, best_cnt, best_area = closed, cnt, area
+    return best_mask, best_cnt, best_area
+
+
+def _blob_tilt_angle(cnt) -> float:
+    """Angle (degrees, folded to (-45, 45]) of the paper blob's long edge
+    relative to horizontal — works for *any* rotation, not just small tilts."""
+    rect = cv2.minAreaRect(cnt)
+    box = cv2.boxPoints(rect)
+    best_len, best_angle = -1.0, 0.0
+    for i in range(4):
+        p1, p2 = box[i], box[(i + 1) % 4]
+        dx, dy = float(p2[0] - p1[0]), float(p2[1] - p1[1])
+        length = (dx * dx + dy * dy) ** 0.5
+        if length > best_len:
+            best_len, best_angle = length, np.degrees(np.arctan2(dy, dx))
+    angle = best_angle % 180
+    if angle > 90:
+        angle -= 180
+    if angle > 45:
+        angle -= 90
+    elif angle <= -45:
+        angle += 90
+    return angle
+
+
+def _straighten_and_crop(bgr):
+    """Fallback path used when no clean 4-corner quad was found.
+
+    First coarsely rotates the *whole* image by the paper blob's actual
+    tilt angle — any angle, not capped like `_deskew` below — then crops
+    to that blob's bounding box. `_deskew` still runs afterward to mop up
+    the last degree or two of residual tilt from estimation noise.
+    """
+    mask, cnt, area = _foreground_mask(bgr)
+    if cnt is None or area < bgr.shape[0] * bgr.shape[1] * 0.08:
         return bgr
-    cnt = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(cnt) < bgr.shape[0] * bgr.shape[1] * 0.08:
-        return bgr
-    x, y, w, h = cv2.boundingRect(cnt)
+    angle = _blob_tilt_angle(cnt)
+    rotated = _rotate_bound(bgr, angle) if abs(angle) >= 0.5 else bgr
+    mask2, cnt2, area2 = _foreground_mask(rotated)
+    if cnt2 is None:
+        return rotated
+    x, y, w, h = cv2.boundingRect(cnt2)
     pad = 8
     x0, y0 = max(x - pad, 0), max(y - pad, 0)
-    x1, y1 = min(x + w + pad, bgr.shape[1]), min(y + h + pad, bgr.shape[0])
-    return bgr[y0:y1, x0:x1]
+    x1, y1 = min(x + w + pad, rotated.shape[1]), min(y + h + pad, rotated.shape[0])
+    return rotated[y0:y1, x0:x1]
+
+
+def _osd_rotation(gray_img) -> int:
+    """0/90/180/270 the *content* needs rotating to read upright, via
+    Tesseract's own orientation detector (OSD).
+
+    EXIF only corrects for how the camera sensor was held; the geometric
+    straightening above only corrects paper-edge tilt. Neither one knows
+    which side of an already-straight rectangle is "up" — a receipt laid
+    on the table sideways, or a perfectly deskewed scan that's upside
+    down, needs this step. Low-confidence OSD reads are ignored rather
+    than risking a wrong rotation.
+    """
+    if not TESSERACT_AVAILABLE:
+        return 0
+    try:
+        osd = pytesseract.image_to_osd(gray_img, output_type=pytesseract.Output.DICT)
+        conf = float(osd.get("orientation_conf", 0) or 0)
+        if conf < 1.0:
+            return 0
+        return int(osd.get("rotate", 0)) % 360
+    except Exception as exc:
+        logger.info("OSD orientation check skipped: %s", exc)
+        return 0
+
+
+def _apply_osd_correction(variants: list):
+    """Rotate every prepared variant together based on OSD read from the
+    first one, so the gray/binary pair stay in sync."""
+    if not variants:
+        return variants
+    angle = _osd_rotation(variants[0][1])
+    rot_code = {
+        90: cv2.ROTATE_90_CLOCKWISE,
+        180: cv2.ROTATE_180,
+        270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+    }.get(angle)
+    if rot_code is None:
+        return variants
+    logger.info("OSD detected content rotated ~%d degrees, correcting", angle)
+    return [(name, cv2.rotate(img, rot_code)) for name, img in variants]
+
+
+def _crop_to_document(bgr):
+    return _straighten_and_crop(bgr)
 
 
 def _deskew(bgr):
@@ -214,7 +382,7 @@ def _prepare_screenshot_variants(bgr):
         gray = cv2.bitwise_not(gray)
     gray = _ensure_min_width(gray)
     _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return [("screen_gray", gray), ("screen_bin", otsu)]
+    return _apply_osd_correction([("screen_gray", gray), ("screen_bin", otsu)])
 
 
 def _prepare_paper_variants(bgr):
@@ -222,7 +390,7 @@ def _prepare_paper_variants(bgr):
     if quad is not None:
         bgr = _warp_perspective(bgr, quad)
     else:
-        bgr = _crop_to_document(bgr)
+        bgr = _straighten_and_crop(bgr)
     bgr = _deskew(bgr)
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     gray = _flatten_illumination(gray)
@@ -230,7 +398,7 @@ def _prepare_paper_variants(bgr):
     gray = _bridge_thermal_dots(gray)
     gray = _ensure_min_width(gray)
     binary = _bridge_thermal_dots(_sauvola(gray))
-    return [("gray", gray), ("binary", binary)]
+    return _apply_osd_correction([("gray", gray), ("binary", binary)])
 
 
 def _prepare_variants(image_bytes: bytes):
@@ -241,7 +409,7 @@ def _prepare_variants(image_bytes: bytes):
     return _prepare_paper_variants(bgr)
 
 
-def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float]:
+def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float, list[int]]:
     """Join Tesseract tokens that share a horizontal band so labels stay with prices."""
     n = len(data.get("text") or [])
     tokens = []
@@ -302,7 +470,8 @@ def _tesseract_pass(image) -> tuple[str, float, list[str], int, list[int]]:
     try:
         data = pytesseract.image_to_data(image, config=_TESSERACT_PSM, output_type=pytesseract.Output.DICT)
         lines, token_count, mean, lefts = _group_tokens_into_lines(data)
-        text = "\n".join(lines)
+        lines = [_repair_ocr_digits(l) for l in lines]
+        text = _repair_ocr_digits("\n".join(lines))
         return text, mean, lines, token_count, lefts
     except Exception as exc:
         logger.warning("Tesseract failed: %s", exc)
@@ -310,7 +479,7 @@ def _tesseract_pass(image) -> tuple[str, float, list[str], int, list[int]]:
 
 
 _ANCHOR_RE = re.compile(
-    r"\b(?:total|subtotal|sub-tot|tax|gst|hst|pst|vat|change|cash|qty|item|amount due|balance)\b|[$₹€£]|\busd\b|\bcad\b|\binr\b",
+    r"\b(?:total|subtotal|sub-tot|tax|gst|hst|pst|vat|change|cash|qty|item|amount due|balance)\b",
     re.I,
 )
 _DATE_HINT_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-](?:\d{4}|\d{2})\b")
@@ -388,6 +557,10 @@ def _looks_implausible(extraction: ReceiptExtraction) -> bool:
 # ---------------------------------------------------------------------------
 
 _AMOUNT_RE = re.compile(r"(?<!\d)(\d{1,3}(?:,\d{3})*(?:\.\d{2})|\d+\.\d{2})(?!\d)")
+# European convention: "." groups thousands, "," is the decimal point
+# (e.g. "1.234,56"). Only tried when the US-style pattern above finds
+# nothing on that line, so a normal US/UK line is never re-parsed.
+_EURO_AMOUNT_RE = re.compile(r"(?<!\d)(\d{1,3}(?:\.\d{3})*,\d{2})(?!\d)")
 
 _AMBIGUOUS_TOTALS = {"due", "net", "sum", "tot", "charged", "balance"}
 
@@ -610,9 +783,19 @@ def _classify_amount_line(line: str) -> str | None:
 
 def _parse_amounts(text: str) -> list[float]:
     amounts = []
-    for raw in _AMOUNT_RE.findall(text):
+    matches = _AMOUNT_RE.findall(text)
+    if matches:
+        for raw in matches:
+            try:
+                amounts.append(float(raw.replace(",", "")))
+            except ValueError:
+                continue
+        return amounts
+    # Fall back to European decimal-comma parsing only if the US-style
+    # pattern found nothing on this line at all.
+    for raw in _EURO_AMOUNT_RE.findall(text):
         try:
-            amounts.append(float(raw.replace(",", "")))
+            amounts.append(float(raw.replace(".", "").replace(",", ".")))
         except ValueError:
             continue
     return amounts
@@ -631,113 +814,29 @@ def _is_register_line(line: str) -> bool:
     return bool(_REGISTER_LINE_RE.search(line or ""))
 
 
-def _amounts_close(a: float, b: float, tol: float = _MONEY_TOL) -> bool:
-    return abs(a - b) <= max(tol, 0.01)
+def _plausible_receipt_total(amount: float) -> bool:
+    return amount is not None and 0 < amount <= _MAX_PLAUSIBLE_TOTAL
 
 
-def _plausible_receipt_total(amount: float, labeled: bool) -> bool:
-    if amount <= 0 or amount > _MAX_PLAUSIBLE_TOTAL:
-        return False
-    if not labeled and amount >= _UNLABELED_TOTAL_CAP:
-        return False
-    return True
-
-
-def _amount_near_line(lines: list[str], idx: int) -> float | None:
-    for j in (idx, idx + 1, idx - 1):
-        if not (0 <= j < len(lines)):
-            continue
-        if _is_register_line(lines[j]) and j != idx:
-            continue
-        kind = _classify_amount_line(lines[j])
-        if kind in _IGNORE_KINDS and j != idx:
-            continue
-        amounts = _parse_amounts(lines[j])
-        if amounts:
-            return amounts[-1]
-    return None
-
-
-def _kind_amounts(lines: list[str]) -> dict[str, list[float]]:
-    buckets = {"subtotal": [], "tax": [], "total": [], "payment": [], "change": []}
-    for i, line in enumerate(lines):
-        if _is_register_line(line):
-            continue
-        kind = _classify_amount_line(line)
-        if kind not in buckets:
-            continue
-        amount = _amount_near_line(lines, i)
-        if amount is not None and amount > 0:
-            buckets[kind].append(amount)
-    return buckets
-
-
-def _tax_candidates(sub: float, taxes: list[float]) -> list[float]:
-    out = [0.0]
-    if not taxes:
-        return out
-    out.append(taxes[-1])
-    if len(taxes) > 1:
-        small = [t for t in taxes if sub <= 0 or t < sub]
-        if small:
-            out.append(round(sum(small), 2))
-    # unique preserve order
-    seen: set[float] = set()
-    uniq: list[float] = []
-    for t in out:
-        key = round(t, 2)
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(t)
-    return uniq
+def _amount_on_same_row(line: str) -> float | None:
+    """Rightmost money figure on this row only (the amount column)."""
+    amounts = _parse_amounts(line)
+    return amounts[-1] if amounts else None
 
 
 def _find_total(lines: list[str]) -> tuple[float | None, bool]:
-    buckets = _kind_amounts(lines)
-
-    for tot in reversed(buckets["total"]):
-        if not _plausible_receipt_total(tot, True):
-            continue
-        for sub in buckets["subtotal"]:
-            for tax in _tax_candidates(sub, buckets["tax"]):
-                if _amounts_close(sub + tax, tot):
-                    return tot, True
-        for cash in buckets["payment"]:
-            for chg in buckets["change"]:
-                inferred = round(cash - chg, 2)
-                if inferred > 0 and _amounts_close(inferred, tot):
-                    return tot, True
-
-    if buckets["subtotal"]:
-        for sub in reversed(buckets["subtotal"]):
-            for tax in _tax_candidates(sub, buckets["tax"]):
-                inferred = round(sub + tax, 2)
-                if inferred <= 0:
-                    continue
-                for tot in reversed(buckets["total"]):
-                    if _amounts_close(inferred, tot):
-                        return tot, True
-                if tax > 0 and _plausible_receipt_total(inferred, True):
-                    return inferred, True
-
-    for tot in reversed(buckets["total"]):
-        if _plausible_receipt_total(tot, True):
-            return tot, True
-
-    start = max(0, int(len(lines) * 0.5))
-    fallback: list[float] = []
-    for line in lines[start:]:
+    """Use only a Total-labeled row. Ignore tax / subtotal / savings / payment rows."""
+    found = None
+    for line in lines:
         if _is_register_line(line):
             continue
-        if _classify_amount_line(line) in _IGNORE_KINDS:
+        if _classify_amount_line(line) != "total":
             continue
-        fallback.extend(
-            a for a in _parse_amounts(line)
-            if _plausible_receipt_total(a, False)
-        )
-    if fallback:
-        return max(fallback), False
+        amount = _amount_on_same_row(line)
+        if amount is not None and _plausible_receipt_total(amount):
+            found = amount
+    if found is not None:
+        return found, True
     return None, False
 
 
@@ -748,6 +847,9 @@ _DATE_PATTERNS = [
     (r"\b(\d{1,2}/\d{1,2}/\d{2})(?!\d)", None),
     (r"\b(\d{1,2}-\d{1,2}-\d{4})\b", None),
     (r"\b(\d{1,2}-\d{1,2}-\d{2})(?!\d)", None),
+    # Dot-separated, common outside the US (13.09.2026 / 13.09.26).
+    (r"\b(\d{1,2}\.\d{1,2}\.\d{4})\b", None),
+    (r"\b(\d{1,2}\.\d{1,2}\.\d{2})(?!\d)", None),
     (r"\b([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})\b", None),
     (r"\b(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})\b", None),
 ]
@@ -758,19 +860,45 @@ _MONTH_NAMES = (
 ).split()
 
 
-def _try_parse_date(raw: str) -> datetime | None:
+def _prefers_day_first(text: str) -> bool:
+    """DD/MM order is the convention almost everywhere except the US.
+
+    Reuses the same locale anchors as currency detection so a UK/EU/India/
+    Canada receipt with an ambiguous 2-digit-year date (e.g. 03/04/25) isn't
+    silently read as US month-first when it plainly isn't a US receipt.
+    """
+    blob = text or ""
+    upper = blob.upper()
+    if _US_STATE_ZIP.search(blob):
+        return False
+    if (
+        _INR_MARK.search(blob)
+        or _CA_POSTAL.search(blob)
+        or _UK_POSTAL.search(upper)
+        or "VAT" in upper
+        or "GST" in upper
+        or "GSTIN" in upper
+    ):
+        return True
+    return False
+
+
+def _try_parse_date(raw: str, day_first: bool = False) -> datetime | None:
     raw = raw.strip().rstrip(",")
     candidates = []
 
     if "-" in raw and raw[:4].isdigit():
         candidates.append("%Y-%m-%d")
-    elif "/" in raw or "-" in raw:
-        sep = "/" if "/" in raw else "-"
+    elif "/" in raw or "-" in raw or "." in raw:
+        sep = "/" if "/" in raw else ("-" if "-" in raw else ".")
         parts = raw.split(sep)
+        # Dot-separated dates are almost always day-first regardless of locale.
+        prefer_day_first = day_first or sep == "."
         if len(parts[-1]) == 2:
-            candidates += [f"%m{sep}%d{sep}%y", f"%d{sep}%m{sep}%y"]
+            pair = [f"%d{sep}%m{sep}%y", f"%m{sep}%d{sep}%y"]
         else:
-            candidates += [f"%m{sep}%d{sep}%Y", f"%d{sep}%m{sep}%Y"]
+            pair = [f"%d{sep}%m{sep}%Y", f"%m{sep}%d{sep}%Y"]
+        candidates += pair if prefer_day_first else pair[::-1]
     else:
         candidates += ["%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y"]
 
@@ -786,10 +914,11 @@ def _find_date(text: str) -> tuple[str | None, bool]:
     now = datetime.now()
     earliest_sane = now - timedelta(days=365 * 5)
     latest_sane = now + timedelta(days=1)  # allow for timezone edge cases
+    day_first = _prefers_day_first(text)
 
     for pattern, _ in _DATE_PATTERNS:
         for raw in re.findall(pattern, text, flags=re.IGNORECASE):
-            parsed = _try_parse_date(raw)
+            parsed = _try_parse_date(raw, day_first=day_first)
             if parsed and earliest_sane <= parsed <= latest_sane:
                 return parsed.strftime("%Y-%m-%d"), True
 
@@ -883,6 +1012,15 @@ def _vendor_from_directory(text: str) -> str | None:
     return None
 
 
+_GENERIC_HEADER_PHRASES = {
+    "receipt", "tax receipt", "cash receipt", "sales receipt", "gift receipt",
+    "return receipt", "invoice", "tax invoice", "bill", "order summary",
+    "order receipt", "welcome", "thank you", "thank you for your visit",
+    "thank you for shopping", "customer copy", "merchant copy", "duplicate",
+    "original", "guest check", "order confirmation",
+}
+
+
 def _header_store_candidate(lines: list[str]) -> str | None:
     for line in lines[:8]:
         cleaned = line.strip()
@@ -895,18 +1033,31 @@ def _header_store_candidate(lines: list[str]) -> str | None:
             continue
         if _ADDRESSY_RE.search(cleaned):
             continue
+        if _norm_label_text(cleaned) in _GENERIC_HEADER_PHRASES:
+            continue
         return cleaned
     return None
 
 
 def _find_store_name(lines: list[str], text: str | None = None) -> tuple[str | None, bool]:
+    """Return (name, confident).
+
+    Only a hit against the known-vendor directory (phone/store#/alias/
+    private-label match) counts as confident. A bare "top header line"
+    guess is frequently a slogan, a misread logo, or a receipt-type banner
+    ("TAX INVOICE") rather than the merchant name — so it's still returned
+    as a best-effort guess for the user to see/edit, but it no longer
+    counts toward all_fields_confident, letting a wrong header line
+    correctly trigger the vision-API fallback instead of being trusted
+    at face value.
+    """
     blob = text or "\n".join(lines)
     known = _vendor_from_directory(blob)
-    header = _header_store_candidate(lines)
     if known:
         return known, True
+    header = _header_store_candidate(lines)
     if header:
-        return header, True
+        return header, False
     return None, False
 
 
@@ -915,65 +1066,7 @@ _US_STATE_ZIP = re.compile(
 )
 _CA_POSTAL = re.compile(r"\b[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z]\s?\d[ABCEGHJ-NPRSTV-Z]\d\b", re.I)
 _UK_POSTAL = re.compile(r"\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b", re.I)
-_CA_PROV = re.compile(r"\b(ON|BC|QC|AB|MB|SK|NS|NB|NL|PE|YT|NT|NU)\b")
-_INR_MARK = re.compile(r"\b(GSTIN|CGST|SGST|IGST|HSN|Rs\.?|INR|RUPEE)\b", re.I)
-_INR_LAKH = re.compile(r"\b\d{1,2},\d{2},\d{3}(?:\.\d{2})?\b")
-_INR_SLASH = re.compile(r"\d+\s*/-")
-_HAS_CENTS = re.compile(r"\.\d{2}\b")
-
-
-def _find_currency(text: str, amount: float | None = None) -> tuple[str | None, float]:
-    """Return (ISO code, confidence 0-100). Below ~85 the UI should keep the group default."""
-    blob = text or ""
-    upper = blob.upper()
-    amount_str = f"{amount:.2f}" if amount is not None else ""
-
-    if _US_STATE_ZIP.search(blob) or _vendor_from_directory(blob) in {"Publix", "Walmart", "Target", "Kroger", "Safeway"}:
-        return "USD", 100.0
-    if _PHONE_RE.search(blob) and re.search(r"\bsales tax\b|\bsubtotal\b", blob, re.I):
-        return "USD", 92.0
-    if _INR_MARK.search(blob) or _INR_LAKH.search(blob) or _INR_SLASH.search(blob):
-        return "INR", 96.0
-    if _CA_POSTAL.search(blob) or (_CA_PROV.search(upper) and re.search(r"\b(GST|HST|PST)\b", upper)):
-        return "CAD", 94.0
-    if re.search(r"\b(VAT\s*REG|VAT REG)\b", upper) or (_UK_POSTAL.search(upper) and "VAT" in upper):
-        return "GBP", 92.0
-    if re.search(r"\b(MWST|TVA|IVA)\b", upper):
-        return "EUR", 90.0
-    if re.search(r"\b(GSTIN|CGST|SGST)\b", upper):
-        return "INR", 100.0
-    if re.search(r"\b(TRN|AED|DHS|DIRHAM)\b", upper):
-        return "AED", 90.0
-    if re.search(r"\bABN\b", upper) and re.search(r"\bGST\b", upper):
-        return "AUD", 88.0
-
-    if "₹" in blob or "RS." in upper or "RS " in upper or "RUPEE" in upper:
-        return "INR", 90.0
-    if "CAD" in upper or "C$" in blob:
-        return "CAD", 88.0
-    if "AUD" in upper or "A$" in blob:
-        return "AUD", 88.0
-    if "GBP" in upper:
-        return "GBP", 90.0
-    if "EUR" in upper:
-        return "EUR", 90.0
-    if "USD" in upper or "US$" in blob:
-        return "USD", 90.0
-
-    has_cents = bool(_HAS_CENTS.search(amount_str or blob))
-    if "¥" in blob or re.search(r"\bJPY\b|\bYEN\b", upper):
-        if has_cents:
-            return "USD", 55.0
-        return "JPY", 80.0
-    if "£" in blob:
-        return "GBP", 70.0
-    if "€" in blob:
-        return "EUR", 70.0
-    if "$" in blob:
-        return "USD", 58.0
-    if re.search(r"\b[YV]\s*\d+\.\d{2}\b", blob):
-        return "USD", 52.0
-    return None, 0.0
+_INR_MARK = re.compile(r"\b(GSTIN|CGST|SGST|IGST|HSN)\b", re.I)
 
 
 _CATEGORY_HINTS = (
@@ -1015,15 +1108,14 @@ def extract_receipt_data_ocr(image_bytes: bytes) -> tuple[ReceiptExtraction, boo
     store_name, store_confident = _find_store_name(lines, text)
     bill_date, date_confident = _find_date(text)
     total_amount, total_confident = _find_total(total_lines)
-    currency, currency_confidence = _find_currency(text, total_amount)
 
     extraction = ReceiptExtraction(
         store_name=store_name or "Unknown store",
         bill_date=bill_date or datetime.now().strftime("%Y-%m-%d"),
         total_amount=total_amount or 0.0,
-        currency=currency or "USD",
+        currency="USD",
         category=_guess_category(text, store_name),
-        currency_confidence=float(currency_confidence or 0),
+        currency_confidence=0,
     )
     all_confident = (
         store_confident

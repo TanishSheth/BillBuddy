@@ -929,10 +929,7 @@ async function handleReceiptUpload(file) {
       if (data.extraction.bill_date) $("#f_date").value = data.extraction.bill_date;
       if (data.extraction.total_amount) $("#f_amount").value = data.extraction.total_amount;
       if (data.extraction.category) $("#f_category").value = data.extraction.category;
-      ShareSquad.fillCurrencySelect(
-        $("#f_currency"),
-        ShareSquad.pickScannedCurrency(data.extraction, groupCurrency())
-      );
+      ShareSquad.fillCurrencySelect($("#f_currency"), groupCurrency());
       syncExpenseCurrencyUI();
     }
 

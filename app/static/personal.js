@@ -231,7 +231,7 @@ async function handleReceiptUpload(file) {
       if (data.extraction.category) $("#expenseCategory").value = data.extraction.category;
       ShareSquad.fillCurrencySelect(
         $("#expenseCurrency"),
-        ShareSquad.pickScannedCurrency(data.extraction, currentSummary?.currency || "USD")
+        currentSummary?.currency || "USD"
       );
     }
     const warn = Boolean(data.message);

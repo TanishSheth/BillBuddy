@@ -73,7 +73,7 @@ def _to_extraction(data: dict) -> ReceiptExtraction:
         total_amount=float(amount or 0.0),
         currency=str(data.get("currency") or "USD").strip().upper()[:10] or "USD",
         category=str(data.get("category") or "General").strip() or "General",
-        currency_confidence=90.0,
+        currency_confidence=0,
     )
 
 
