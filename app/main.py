@@ -194,6 +194,8 @@ def _ensure_schema():
         ("pending_uploads", "ocr_phones", "VARCHAR(200)"),
         ("pending_uploads", "ocr_store_ids", "VARCHAR(80)"),
         ("pending_uploads", "ocr_header_key", "VARCHAR(200)"),
+        ("account_vendors", "name_key", "VARCHAR(80) DEFAULT ''"),
+        ("account_vendors", "category", "VARCHAR(50) DEFAULT 'General'"),
     ]
 
     for table, column, spec in statements:
@@ -1153,16 +1155,64 @@ def join_group(
 
 
 def _learned_vendors_for(db: Session, account_id: int) -> list[dict]:
-    rows = db.query(models.AccountVendor).filter_by(account_id=account_id).all()
-    return [
-        {
-            "name": row.name,
-            "phones": {row.phone} if row.phone else set(),
-            "store_ids": {row.store_id} if row.store_id else set(),
-            "header_key": row.header_key or "",
-        }
-        for row in rows
+    """Personal gazetteer: saved unique stores for this account, plus expense history."""
+    from .ocr_extractor import vendor_name_key
+
+    merged: dict[str, dict] = {}
+
+    def _add(name: str, phones=None, store_ids=None, header_key: str = "", category: str = ""):
+        label = (name or "").strip()
+        if not label or label.lower().startswith("unknown"):
+            return
+        key = vendor_name_key(label)
+        if len(key) < 3:
+            return
+        row = merged.get(key)
+        if row is None:
+            row = {
+                "name": label,
+                "phones": set(),
+                "store_ids": set(),
+                "header_key": "",
+                "category": "",
+            }
+            merged[key] = row
+        row["phones"].update(p for p in (phones or set()) if p)
+        row["store_ids"].update(s for s in (store_ids or set()) if s)
+        if header_key and not row["header_key"]:
+            row["header_key"] = header_key
+        cat = (category or "").strip()
+        if cat and cat != "General":
+            row["category"] = cat
+        elif not row["category"] and cat:
+            row["category"] = cat
+
+    for row in db.query(models.AccountVendor).filter_by(account_id=account_id).all():
+        phones = {row.phone} if row.phone else set()
+        stores = {row.store_id} if row.store_id else set()
+        _add(row.name, phones, stores, row.header_key or "", getattr(row, "category", "") or "")
+
+    for store_name, category in (
+        db.query(models.PersonalExpense.store_name, models.PersonalExpense.category)
+        .filter_by(account_id=account_id)
+        .distinct()
+        .all()
+    ):
+        _add(store_name, category=category or "")
+
+    member_ids = [
+        mid for (mid,) in db.query(models.GroupMember.id).filter_by(account_id=account_id).all()
     ]
+    if member_ids:
+        for store_name, category in (
+            db.query(models.Expense.store_name, models.Expense.category)
+            .filter(models.Expense.payer_member_id.in_(member_ids))
+            .distinct()
+            .all()
+        ):
+            _add(store_name, category=category or "")
+
+    return list(merged.values())[:500]
 
 
 def _apply_scan_fingerprint(pending: models.PendingUpload, fingerprint: dict, store_name: str) -> None:
@@ -1180,28 +1230,78 @@ def _upsert_account_vendor(
     phone: str = "",
     store_id: str = "",
     header_key: str = "",
+    category: str = "",
 ) -> None:
-    q = db.query(models.AccountVendor).filter_by(account_id=account_id)
-    if phone:
-        row = q.filter_by(phone=phone).first()
-    elif store_id:
-        row = q.filter_by(store_id=store_id).first()
-    elif header_key:
-        row = q.filter_by(header_key=header_key).first()
-    else:
+    from .ocr_extractor import vendor_name_key
+
+    name_key = vendor_name_key(name)
+    if len(name_key) < 3:
         return
+    rows = db.query(models.AccountVendor).filter_by(account_id=account_id).all()
+    row = None
+    if phone:
+        row = next((r for r in rows if r.phone == phone), None)
+    if row is None and store_id:
+        row = next((r for r in rows if r.store_id == store_id), None)
+    if row is None:
+        row = next((r for r in rows if (getattr(r, "name_key", None) or vendor_name_key(r.name)) == name_key), None)
+    if row is None and header_key:
+        row = next((r for r in rows if r.header_key == header_key), None)
+
+    cat = (category or "").strip() or "General"
     if row:
         row.name = name
+        if hasattr(row, "name_key"):
+            row.name_key = name_key
+        if phone:
+            row.phone = phone
+        if store_id:
+            row.store_id = store_id
+        if header_key:
+            row.header_key = header_key
+        if hasattr(row, "category"):
+            row.category = cat or row.category or "General"
         return
     db.add(
         models.AccountVendor(
             account_id=account_id,
             name=name,
+            name_key=name_key,
             phone=phone or "",
             store_id=store_id or "",
             header_key=header_key or "",
+            category=cat,
         )
     )
+
+
+def _remember_account_vendor(
+    db: Session,
+    account_id: int,
+    chosen_name: str,
+    pending: models.PendingUpload | None = None,
+    category: str | None = None,
+) -> None:
+    """Write the personal gazetteer from a saved bill (user-confirmed name)."""
+    if not account_id:
+        return
+    chosen = (chosen_name or "").strip()[:150]
+    if not chosen or chosen.lower().startswith("unknown"):
+        return
+    phones = [p for p in ((pending.ocr_phones if pending else None) or "").split(",") if len(p) >= 10]
+    store_ids = [s for s in ((pending.ocr_store_ids if pending else None) or "").split(",") if s]
+    header_key = ((pending.ocr_header_key if pending else None) or "").strip()
+    _upsert_account_vendor(
+        db,
+        account_id,
+        chosen,
+        phone=phones[0] if phones else "",
+        store_id=store_ids[0] if store_ids else "",
+        header_key=header_key,
+        category=(category or "").strip(),
+    )
+    for sid in store_ids[1:]:
+        _upsert_account_vendor(db, account_id, chosen, store_id=sid, category=(category or "").strip())
 
 
 def _remember_vendor_correction(
@@ -1209,26 +1309,9 @@ def _remember_vendor_correction(
     account_id: int,
     pending: models.PendingUpload | None,
     chosen_name: str,
+    category: str | None = None,
 ) -> None:
-    if not pending or not account_id:
-        return
-    chosen = (chosen_name or "").strip()[:150]
-    if not chosen or chosen.lower().startswith("unknown"):
-        return
-    guessed = (pending.ocr_store_name or "").strip()
-    if guessed and guessed.lower() == chosen.lower():
-        return
-    phones = [p for p in (pending.ocr_phones or "").split(",") if len(p) >= 10]
-    store_ids = [s for s in (pending.ocr_store_ids or "").split(",") if s]
-    header_key = (pending.ocr_header_key or "").strip()
-    if not phones and not store_ids and len(header_key) < 8:
-        return
-    for phone in phones:
-        _upsert_account_vendor(db, account_id, chosen, phone=phone)
-    for sid in store_ids:
-        _upsert_account_vendor(db, account_id, chosen, store_id=sid)
-    if len(header_key) >= 8:
-        _upsert_account_vendor(db, account_id, chosen, header_key=header_key)
+    _remember_account_vendor(db, account_id, chosen_name, pending=pending, category=category)
 
 
 # ---------------------------------------------------------------------------
@@ -1383,6 +1466,7 @@ def create_expense(
         raise HTTPException(404, "Group not found")
 
     final_path = None
+    pending = None
     if payload.upload_id:
         pending = (
             db.query(models.PendingUpload)
@@ -1391,13 +1475,11 @@ def create_expense(
         )
         if not pending or not os.path.exists(pending.file_path):
             raise HTTPException(400, "Upload not found or already used. Re-upload the receipt.")
-        _remember_vendor_correction(db, account.id, pending, payload.store_name)
         ext = os.path.splitext(pending.file_path)[1]
         final_filename = f"{uuid.uuid4().hex}{ext}"
         group_uploads = _group_uploads_dir(group_id)
         final_path = os.path.join(group_uploads, final_filename)
         shutil.move(pending.file_path, final_path)
-        db.delete(pending)
 
     participant_ids = []
     if payload.split_details:
@@ -1436,6 +1518,12 @@ def create_expense(
         payload.split_with,
         payload.split_details,
     )
+
+    _remember_account_vendor(
+        db, account.id, payload.store_name, pending=pending, category=payload.category,
+    )
+    if pending:
+        db.delete(pending)
 
     db.commit()
     db.refresh(expense)
@@ -1485,6 +1573,8 @@ def update_expense(
         payload.split_with,
         payload.split_details,
     )
+
+    _remember_account_vendor(db, account.id, expense.store_name, category=expense.category)
 
     db.commit()
     db.refresh(expense)
@@ -1707,7 +1797,7 @@ def _claim_personal_upload(
         except FileNotFoundError:
             src = None
     if pending and chosen_name:
-        _remember_vendor_correction(db, account_id, pending, chosen_name)
+        _remember_account_vendor(db, account_id, chosen_name, pending=pending)
     if pending:
         db.delete(pending)
     if not src or not os.path.exists(src):
@@ -1787,6 +1877,7 @@ def create_personal_expense(
         image_path=final_path,
     )
     db.add(expense)
+    _remember_account_vendor(db, account.id, expense.store_name, category=expense.category)
     db.commit()
     db.refresh(expense)
     return expense
@@ -1809,6 +1900,8 @@ def update_personal_expense(
     expense.currency = _normalize_currency(payload.currency, expense.currency or "USD")
     expense.category = payload.category or expense.category or "General"
     expense.notes = payload.notes
+
+    _remember_account_vendor(db, account.id, expense.store_name, category=expense.category)
 
     db.commit()
     db.refresh(expense)

@@ -295,6 +295,35 @@ def test_ocr_receipt_parsing():
     )
     assert local_ok and local_shop == "Premium Wine and Liquor"
 
+    gazetteer = [{
+        "name": "Premium Wine and Liquor",
+        "phones": set(),
+        "store_ids": set(),
+        "header_key": "",
+        "category": "Shopping",
+    }]
+    cached, cached_ok = _find_store_name(
+        ["Premium Wine"],
+        "Premium Wine\nThank you\nTOTAL 40.00",
+        learned_vendors=gazetteer,
+    )
+    assert cached_ok and cached == "Premium Wine and Liquor", cached
+
+    typo, typo_ok = _find_store_name(
+        ["Premlum Wine and Liquor"],
+        "Premlum Wine and Liquor\nTOTAL 40.00",
+        learned_vendors=gazetteer,
+    )
+    assert typo_ok and typo == "Premium Wine and Liquor", typo
+
+    aldi_cache = [{"name": "Aldi", "phones": set(), "store_ids": set(), "header_key": ""}]
+    not_cached, not_cached_ok = _find_store_name(
+        ["Cafe Luna"],
+        "Cafe Luna\nvalid thru 12/26\nTOTAL 10.00",
+        learned_vendors=aldi_cache,
+    )
+    assert not_cached == "Cafe Luna" and not_cached_ok is False
+
     trip, trip_ok = _find_store_name(
         ["Your trip"],
         "Your trip\nfare breakdown\nTotal 12.40",

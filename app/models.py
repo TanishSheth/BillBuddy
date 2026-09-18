@@ -208,15 +208,17 @@ class PersonalExpense(Base):
 
 
 class AccountVendor(Base):
-    """Per-account store name learned from a user's correction on a receipt."""
+    """Per-account gazetteer: trusted store names learned from saved bills."""
     __tablename__ = "account_vendors"
 
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String(150), nullable=False)
+    name_key = Column(String(80), nullable=False, default="", index=True)
     phone = Column(String(20), nullable=False, default="")
     store_id = Column(String(20), nullable=False, default="")
     header_key = Column(String(200), nullable=False, default="")
+    category = Column(String(50), nullable=False, default="General")
     created_at = Column(DateTime, server_default=func.now())
 
     account = relationship("Account", back_populates="vendors")

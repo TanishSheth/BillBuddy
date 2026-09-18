@@ -1046,6 +1046,43 @@ def _exact_alias_in_tokens(alias: str, tokens: list[str]) -> bool:
     return False
 
 
+def vendor_name_key(name: str) -> str:
+    return _compact_alnum(name)[:80]
+
+
+def _gazetteer_header_score(name: str, header_text: str) -> int:
+    """How strongly a saved store name appears in the receipt header (tokens only)."""
+    name_parts = _word_tokens(name)
+    tokens = _word_tokens(header_text)
+    if not name_parts or not tokens:
+        return 0
+    compact = _compact_alnum(name)
+    if len(compact) <= _SHORT_ALIAS_MAX:
+        return 100 if _exact_alias_in_tokens(name, tokens) else 0
+    if _exact_alias_in_tokens(name, tokens):
+        return 100
+    name_norm = _norm_label_text(name)
+    for line in (header_text or "").splitlines():
+        line_norm = _norm_label_text(line)
+        if not line_norm:
+            continue
+        ratio = _token_ratio(name_norm, line_norm)
+        if ratio >= _NEAR_EXACT_RATIO:
+            return ratio
+    overlap = 0
+    for n in range(min(len(name_parts), len(tokens)), 0, -1):
+        ngrams = {" ".join(name_parts[i:i + n]) for i in range(len(name_parts) - n + 1)}
+        for i in range(len(tokens) - n + 1):
+            if " ".join(tokens[i:i + n]) in ngrams:
+                overlap = n
+                break
+        if overlap:
+            break
+    if overlap >= 2:
+        return 100
+    return _best_token_match(name, tokens)
+
+
 def _hard_vendor_from_directory(text: str) -> str | None:
     phones = _phones_in_text(text)
     store_ids = _store_ids_in_text(text)
@@ -1078,24 +1115,43 @@ def _canonicalize_from_header(header_text: str) -> str | None:
     return None
 
 
-def _learned_vendor_match(text: str, lines: list[str], learned_vendors: list[dict] | None) -> str | None:
+def _learned_vendor_match(
+    text: str, lines: list[str], learned_vendors: list[dict] | None,
+) -> tuple[str | None, bool]:
+    """Personal gazetteer first: hard keys, then header-token similarity to saved names."""
     if not learned_vendors:
-        return None
+        return None, False
     phones = _phones_in_text(text)
     store_ids = _store_ids_in_text(text)
     header_key = _header_fingerprint(lines)
+    header_zone = "\n".join(_header_lines(lines))
+
     for vendor in learned_vendors:
         name = (vendor.get("name") or "").strip()
         if not name:
             continue
         if phones & set(vendor.get("phones") or []):
-            return name
+            return name, True
         if store_ids & set(vendor.get("store_ids") or []):
-            return name
+            return name, True
         key = (vendor.get("header_key") or "").strip()
         if key and header_key and key == header_key:
-            return name
-    return None
+            return name, True
+
+    best: tuple[int, int, str] | None = None
+    for vendor in learned_vendors:
+        name = (vendor.get("name") or "").strip()
+        if not name or len(vendor_name_key(name)) < 3:
+            continue
+        score = _gazetteer_header_score(name, header_zone)
+        if score < _NEAR_EXACT_RATIO:
+            continue
+        ranked = (score, len(vendor_name_key(name)), name)
+        if best is None or ranked > best:
+            best = ranked
+    if best:
+        return best[2], True
+    return None, False
 
 
 def _service_from_context(lines: list[str], blob: str) -> str | None:
@@ -1172,9 +1228,9 @@ def _find_store_name(
     blob = text or "\n".join(lines)
     header_zone = "\n".join(_header_lines(lines))
 
-    learned = _learned_vendor_match(blob, lines, learned_vendors)
+    learned, learned_ok = _learned_vendor_match(blob, lines, learned_vendors)
     if learned:
-        return learned, True
+        return learned, learned_ok
 
     hard = _hard_vendor_from_directory(blob)
     if hard:
@@ -1246,13 +1302,20 @@ def extract_receipt_data_ocr(
     )
     bill_date, date_confident = _find_date(text)
     total_amount, total_confident = _find_total(total_lines)
+    cached_category = None
+    if store_name:
+        needle = store_name.strip().lower()
+        for vendor in learned_vendors or []:
+            if (vendor.get("name") or "").strip().lower() == needle:
+                cached_category = (vendor.get("category") or "").strip() or None
+                break
 
     extraction = ReceiptExtraction(
         store_name=store_name or "Unknown store",
         bill_date=bill_date or datetime.now().strftime("%Y-%m-%d"),
         total_amount=total_amount or 0.0,
         currency="USD",
-        category=_guess_category(text, store_name),
+        category=cached_category or _guess_category(text, store_name),
         currency_confidence=0,
     )
     fingerprint["guessed_name"] = extraction.store_name
