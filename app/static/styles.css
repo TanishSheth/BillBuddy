@@ -596,6 +596,9 @@ label.receipt-source-btn {
   gap: 10px;
   align-items: center;
 }
+.owner-tools.hidden {
+  display: none;
+}
 
 .member-row {
   display: flex;

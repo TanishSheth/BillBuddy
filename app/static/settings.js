@@ -67,6 +67,8 @@ async function saveProfile() {
     msg.className = "text-xs font-mono balance-negative";
   }
 }
+
+async function loadGeneralSettings() {
   const settings = await ShareSquad.api("/settings/account");
   state.accountSettings = settings;
 

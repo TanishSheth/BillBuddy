@@ -35,6 +35,8 @@ function removeStoredGroupId() {
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+window.$ = $;
+window.$$ = $$;
 
 function escapeHtml(text) {
   const div = document.createElement("div");
@@ -337,6 +339,8 @@ function bindReceiptCamera(opts) {
 }
 
 window.ShareSquad = {
+  $,
+  $$,
   api,
   getToken,
   setToken,

@@ -65,6 +65,13 @@ async function loadGroup() {
   state.group = group;
   state.members = group.members;
 
+  const me = state.account;
+  const myMem = group.members.find((m) => m.email === me.email);
+  if (myMem) {
+    state.myMemberId = Number(myMem.id);
+    state.myRole = myMem.role;
+  }
+
   const isOwner = state.myRole === "owner";
   $("#ownerTools")?.classList.toggle("hidden", !isOwner);
   $("#currentGroupName").textContent = group.name;
@@ -80,13 +87,6 @@ async function loadGroup() {
   ShareSquad.fillCurrencySelect($("#f_currency"), gCurr);
   syncExpenseCurrencyUI();
 
-  const me = state.account;
-  const myMem = group.members.find((m) => m.email === me.email);
-  if (myMem) {
-    state.myMemberId = Number(myMem.id);
-    state.myRole = myMem.role;
-  }
-
   renderPayerOptions();
   applyDefaultSplit();
   renderSplitOptions();
@@ -97,6 +97,65 @@ async function loadGroupSettings() {
     state.groupSettings = await ShareSquad.api(`/settings/groups/${gid()}`);
   } catch (err) {
     state.groupSettings = { equal_split_default: true };
+  }
+}
+
+function openRenameGroupModal() {
+  const modal = $("#renameGroupModal");
+  const input = $("#renameGroupInput");
+  const msg = $("#renameGroupMsg");
+  if (!modal || !input) return;
+  if (msg) {
+    msg.textContent = "";
+    msg.className = "text-xs font-mono";
+  }
+  input.value = state.group?.name || "";
+  modal.classList.remove("hidden");
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 50);
+}
+
+function closeRenameGroupModal() {
+  $("#renameGroupModal")?.classList.add("hidden");
+}
+
+async function submitRenameGroup(e) {
+  e.preventDefault();
+  const input = $("#renameGroupInput");
+  const msg = $("#renameGroupMsg");
+  const next = (input?.value || "").trim();
+  if (!next) {
+    if (msg) {
+      msg.textContent = "Enter a group name.";
+      msg.className = "text-xs font-mono balance-negative";
+    }
+    return;
+  }
+  const btn = $("#saveRenameGroupBtn");
+  if (btn) btn.disabled = true;
+  if (msg) {
+    msg.textContent = "Saving…";
+    msg.className = "text-xs font-mono text-ink/50";
+  }
+  try {
+    const updated = await ShareSquad.api(`/groups/${gid()}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: next }),
+    });
+    state.group = updated;
+    $("#currentGroupName").textContent = updated.name;
+    closeRenameGroupModal();
+    ShareSquad.showToast("Group name updated", "success");
+  } catch (err) {
+    if (msg) {
+      msg.textContent = err.message;
+      msg.className = "text-xs font-mono balance-negative";
+    }
+    ShareSquad.showToast(err.message, "error");
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -245,9 +304,10 @@ function renderPayerOptions() {
 
 function renderSplitOptions() {
   const container = $("#f_splitwith");
+  const notice = $("#splitStatusNotice");
+  if (!container || !notice) return;
   const totalAmt = parseFloat($("#f_amount").value) || 0;
   const curr = expenseCurrency();
-  const notice = $("#splitStatusNotice");
   container.innerHTML = "";
 
   if (state.splitType === "EQUAL") {
@@ -795,7 +855,7 @@ async function loadMembers() {
   state.members = group.members;
 
   const list = $("#memberList");
-  const list = $("#memberList");
+  if (!list) return;
   const isOwner = state.myRole === "owner";
   list.innerHTML = group.members
     .map((m) => {
@@ -991,20 +1051,21 @@ async function handleReceiptUpload(file) {
     fileInput: "#fileInputCamera",
     onCapture: handleReceiptUpload,
   });
-  $("#renameGroupBtn")?.addEventListener("click", async () => {
-    const next = prompt("New group name", state.group?.name || "");
-    if (!next || !next.trim()) return;
-    try {
-      const updated = await ShareSquad.api(`/groups/${gid()}`, {
-        method: "PATCH",
-        body: JSON.stringify({ name: next.trim() }),
-      });
-      state.group = updated;
-      $("#currentGroupName").textContent = updated.name;
-      ShareSquad.showToast("Group name updated", "success");
-    } catch (err) {
-      ShareSquad.showToast(err.message, "error");
-    }
+  $("#renameGroupBtn")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openRenameGroupModal();
+  });
+  $("#changeGroupPhotoBtn")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    $("#groupCoverInput")?.click();
+  });
+  $("#renameGroupForm")?.addEventListener("submit", submitRenameGroup);
+  $("#cancelRenameGroupBtn")?.addEventListener("click", closeRenameGroupModal);
+  $("#closeRenameGroupBtn")?.addEventListener("click", closeRenameGroupModal);
+  $("#renameGroupModal")?.addEventListener("click", (e) => {
+    if (e.target.id === "renameGroupModal") closeRenameGroupModal();
   });
   $("#groupCoverInput")?.addEventListener("change", async (e) => {
     const file = e.target.files[0];

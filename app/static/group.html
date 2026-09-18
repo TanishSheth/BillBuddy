@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20260918a">
+<link rel="stylesheet" href="/styles.css?v=20260918d">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -30,11 +30,9 @@
           </div>
           <p class="text-[10px] sm:text-[11px] uppercase tracking-widest text-ink/50 leading-none mt-0.5 font-mono">Shared group</p>
           <div id="ownerTools" class="hidden owner-tools mt-1">
-            <button type="button" id="renameGroupBtn" class="text-[10px] font-mono text-brand underline">Rename</button>
-            <label class="text-[10px] font-mono text-brand underline cursor-pointer">
-              Group photo
-              <input id="groupCoverInput" type="file" accept="image/jpeg,image/png,image/webp" class="file-input-sr">
-            </label>
+            <button type="button" id="renameGroupBtn" class="bb-btn-secondary !py-1 !px-2.5 text-[10px]">Change group name</button>
+            <button type="button" id="changeGroupPhotoBtn" class="bb-btn-secondary !py-1 !px-2.5 text-[10px]">Change group photo</button>
+            <input id="groupCoverInput" type="file" accept="image/jpeg,image/png,image/webp" class="file-input-sr">
           </div>
         </div>
       </div>
@@ -106,7 +104,7 @@
             </div>
             <input id="fileInputGallery" type="file" class="file-input-sr">
             <input id="fileInputCamera" type="file" accept="image/*" capture="environment" class="file-input-sr">
-            <div class="receipt-source-row">
+            <div id="receiptSourceRow" class="receipt-source-row">
               <label for="fileInputGallery" id="pickGalleryBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
                 <i data-lucide="folder-open" class="w-4 h-4"></i> Choose file
               </label>
@@ -402,6 +400,26 @@
 
   </div>
 
+  <div id="renameGroupModal" class="modal-overlay hidden">
+    <div class="bb-card modal-card">
+      <div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3">
+        <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Change group name</h2>
+        <button type="button" id="closeRenameGroupBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button>
+      </div>
+      <form id="renameGroupForm" class="space-y-4">
+        <div>
+          <label class="bb-label" for="renameGroupInput">Group name</label>
+          <input id="renameGroupInput" class="bb-input" maxlength="150" required autocomplete="off" />
+        </div>
+        <p id="renameGroupMsg" class="text-xs font-mono"></p>
+        <div class="flex gap-2 justify-end pt-2">
+          <button type="button" id="cancelRenameGroupBtn" class="bb-btn-secondary">Cancel</button>
+          <button type="submit" id="saveRenameGroupBtn" class="bb-btn-primary">Save name</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="liveCameraModal" class="modal-overlay hidden">
     <div class="bb-card modal-card">
       <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Take photo</h2>
@@ -415,8 +433,8 @@
     </div>
   </div>
 
-  <script src="/api.js?v=20260918a"></script>
-  <script src="/group.js?v=20260918a"></script>
+  <script src="/api.js?v=20260918d"></script>
+  <script src="/group.js?v=20260918d"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>
