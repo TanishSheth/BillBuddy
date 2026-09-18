@@ -77,4 +77,19 @@ def process_pending_invites(db: Session, account: models.Account) -> list[models
         invite.status = "accepted"
     if invites:
         db.commit()
+    # Quick Split invitations do not create a group membership. Claim any
+    # pending shares addressed to this account as soon as they sign in.
+    quick_participants = (
+        db.query(models.QuickSplitParticipant)
+        .filter(
+            models.QuickSplitParticipant.email == account.email.lower(),
+            models.QuickSplitParticipant.account_id.is_(None),
+        )
+        .all()
+    )
+    if quick_participants:
+        for participant in quick_participants:
+            participant.account_id = account.id
+            participant.display_name = account.display_name
+        db.commit()
     return added

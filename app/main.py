@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Query, status
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -55,6 +55,7 @@ from .pdf_gen import generate_monthly_pdf, generate_personal_pdf, pdf_reports_av
 from .emailer import (
     is_email_configured,
     send_invite_email,
+    send_quick_split_email,
     send_monthly_report_email,
     send_password_reset_email,
 )
@@ -100,6 +101,10 @@ def _public_base_url(request: Request) -> str:
 
 def _invite_url(request: Request, invite_code: str) -> str:
     return f"{_public_base_url(request)}/join.html?code={invite_code}"
+
+
+def _quick_split_url(request: Request, invite_code: str) -> str:
+    return f"{_public_base_url(request)}/quick-join.html?code={invite_code}"
 
 
 def _validate_invite_email(email: str, account: models.Account, group_id: int, db: Session) -> None:
@@ -196,6 +201,9 @@ def _ensure_schema():
         ("pending_uploads", "ocr_header_key", "VARCHAR(200)"),
         ("account_vendors", "name_key", "VARCHAR(80) DEFAULT ''"),
         ("account_vendors", "category", "VARCHAR(50) DEFAULT 'General'"),
+        ("quick_splits", "split_type", "VARCHAR(20) DEFAULT 'EQUAL'"),
+        ("quick_splits", "payer_share_amount", "NUMERIC(10,2) DEFAULT 0"),
+        ("quick_split_participants", "split_value", "NUMERIC(10,2)"),
     ]
 
     for table, column, spec in statements:
@@ -254,6 +262,40 @@ def _ensure_schema():
                     logger.info("Rebuilt pending_uploads so group_id can be empty")
     except Exception as err:
         logger.warning("Could not make pending_uploads.group_id nullable: %s", err)
+
+    # Development builds before Quick Split was finalized could have created
+    # participant columns intended for personal expenses. Rebuild only that
+    # malformed local table; released databases create the correct shape.
+    try:
+        if table_exists("quick_split_participants") and has_column("quick_split_participants", "currency"):
+            if dialect == "sqlite":
+                with engine.begin() as conn:
+                    conn.execute(text("PRAGMA foreign_keys=OFF"))
+                    conn.execute(text(
+                        "CREATE TABLE quick_split_participants_new ("
+                        "id INTEGER NOT NULL PRIMARY KEY, quick_split_id INTEGER NOT NULL, "
+                        "email VARCHAR(255) NOT NULL, account_id INTEGER, display_name VARCHAR(100), "
+                        "share_amount NUMERIC(10,2) NOT NULL, payment_status VARCHAR(20) NOT NULL DEFAULT 'PENDING', "
+                        "payment_marked_at DATETIME, "
+                        "FOREIGN KEY(quick_split_id) REFERENCES quick_splits (id) ON DELETE CASCADE, "
+                        "FOREIGN KEY(account_id) REFERENCES accounts (id) ON DELETE SET NULL, "
+                        "CONSTRAINT uq_quick_split_email UNIQUE (quick_split_id, email))"
+                    ))
+                    conn.execute(text(
+                        "INSERT INTO quick_split_participants_new "
+                        "(id, quick_split_id, email, account_id, display_name, share_amount, payment_status, payment_marked_at) "
+                        "SELECT id, quick_split_id, email, account_id, display_name, share_amount, payment_status, payment_marked_at "
+                        "FROM quick_split_participants"
+                    ))
+                    conn.execute(text("DROP TABLE quick_split_participants"))
+                    conn.execute(text("ALTER TABLE quick_split_participants_new RENAME TO quick_split_participants"))
+                logger.info("Rebuilt malformed quick_split_participants table")
+            elif dialect == "postgresql":
+                for column in ("currency", "category", "notes", "image_path", "created_at"):
+                    if has_column("quick_split_participants", column):
+                        _ddl(f"ALTER TABLE quick_split_participants DROP COLUMN {column}")
+    except Exception as err:
+        logger.warning("Could not repair quick_split_participants schema: %s", err)
 
 
 _ensure_schema()
@@ -771,6 +813,251 @@ def set_period_currency_conversion(
     db.commit()
     db.refresh(period)
     return period
+
+
+# ---------------------------------------------------------------------------
+# Quick Split Endpoints
+# ---------------------------------------------------------------------------
+def _quick_split_out(split: models.QuickSplit, account: models.Account) -> schemas.QuickSplitOut:
+    is_payer = split.payer_account_id == account.id
+    return schemas.QuickSplitOut(
+        id=split.id,
+        title=split.title,
+        total_amount=float(split.total_amount),
+        currency=split.currency or "USD",
+        bill_date=split.bill_date,
+        category=split.category or "General",
+        split_type=split.split_type or "EQUAL",
+        payer_share_amount=float(split.payer_share_amount or 0),
+        payer_name=split.payer.display_name if split.payer else "Someone",
+        payer_account_id=split.payer_account_id,
+        invite_code=split.invite_code,
+        status=split.status,
+        created_at=split.created_at,
+        is_payer=is_payer,
+        participants=[
+            schemas.QuickSplitParticipantOut(
+                id=p.id,
+                email=p.email,
+                display_name=p.display_name,
+                share_amount=float(p.share_amount),
+                split_value=float(p.split_value) if p.split_value is not None else None,
+                payment_status=p.payment_status,
+                payment_marked_at=p.payment_marked_at,
+                is_me=(p.account_id == account.id or p.email.lower() == account.email.lower()),
+            )
+            for p in split.participants
+        ],
+    )
+
+
+def _apply_quick_split_values(split: models.QuickSplit, payer_value, participant_values: dict[int, object]) -> None:
+    """Apply normal-group split maths to the payer plus every invitee."""
+    split_type = (split.split_type or "EQUAL").upper()
+    if split_type not in {"EQUAL", "PERCENTAGE", "EXACT", "SHARES"}:
+        raise HTTPException(400, "Choose Equal, Percentage, Exact, or Shares")
+    inputs = {0: 1 if split_type == "EQUAL" else payer_value}
+    inputs.update(participant_values)
+    if split_type != "EQUAL" and any(value is None or float(value) < 0 for value in inputs.values()):
+        raise HTTPException(400, "Enter a value for every person in this split")
+    try:
+        shares = calculate_splits(split_type, Decimal(str(split.total_amount)), inputs)
+    except ValueError as err:
+        raise HTTPException(400, str(err)) from err
+    split.payer_share_amount = shares[0]
+    for participant in split.participants:
+        participant.share_amount = shares[participant.id]
+        participant.split_value = None if split_type == "EQUAL" else Decimal(str(participant_values[participant.id]))
+
+
+def _require_quick_split_access(split_id: int, account: models.Account, db: Session) -> models.QuickSplit:
+    split = db.query(models.QuickSplit).get(split_id)
+    if not split:
+        raise HTTPException(404, "Quick split not found")
+    if split.payer_account_id == account.id:
+        return split
+    allowed = db.query(models.QuickSplitParticipant).filter(
+        models.QuickSplitParticipant.quick_split_id == split.id,
+        or_(
+            models.QuickSplitParticipant.account_id == account.id,
+            models.QuickSplitParticipant.email == account.email.lower(),
+        ),
+    ).first()
+    if not allowed:
+        raise HTTPException(403, "You do not have access to this quick split")
+    if allowed.account_id is None:
+        allowed.account_id = account.id
+        allowed.display_name = account.display_name
+        db.commit()
+        db.refresh(split)
+    return split
+
+
+@app.get("/api/quick-splits", response_model=list[schemas.QuickSplitOut])
+def list_quick_splits(account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    rows = (
+        db.query(models.QuickSplit)
+        .outerjoin(models.QuickSplitParticipant)
+        .filter(
+            or_(
+                models.QuickSplit.payer_account_id == account.id,
+                models.QuickSplitParticipant.account_id == account.id,
+                models.QuickSplitParticipant.email == account.email.lower(),
+            )
+        )
+        .order_by(models.QuickSplit.created_at.desc())
+        .distinct()
+        .all()
+    )
+    return [_quick_split_out(item, account) for item in rows]
+
+
+@app.post("/api/quick-splits", response_model=schemas.QuickSplitOut)
+def create_quick_split(
+    payload: schemas.QuickSplitCreate,
+    request: Request,
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    invitees = []
+    for raw in payload.participants:
+        email = str(raw.email).strip().lower()
+        if email and email not in [item[0] for item in invitees]:
+            invitees.append((email, raw.value))
+    if not invitees:
+        raise HTTPException(400, "Add at least one person to split with")
+    if account.email.lower() in [item[0] for item in invitees]:
+        raise HTTPException(400, "Do not add your own email — your share is included automatically")
+
+    total = Decimal(str(payload.total_amount)).quantize(Decimal("0.01"))
+    split = models.QuickSplit(
+        title=payload.title.strip(), total_amount=total,
+        currency=_normalize_currency(payload.currency, "USD"), bill_date=payload.bill_date,
+        category=payload.category or "General", payer_account_id=account.id,
+        split_type=(payload.split_type or "EQUAL").upper(),
+    )
+    db.add(split)
+    db.flush()
+    invite_url = _quick_split_url(request, split.invite_code)
+    participant_values = {}
+    for email, value in invitees:
+        existing_account = db.query(models.Account).filter_by(email=email).first()
+        db.add(models.QuickSplitParticipant(
+            quick_split_id=split.id, email=email,
+            account_id=existing_account.id if existing_account else None,
+            display_name=existing_account.display_name if existing_account else None,
+            share_amount=Decimal("0.00"), split_value=value,
+        ))
+    db.flush()
+    for participant in split.participants:
+        participant_values[participant.id] = next(value for email, value in invitees if email == participant.email)
+    _apply_quick_split_values(split, payload.payer_value, participant_values)
+    db.commit()
+    db.refresh(split)
+
+    money = f"{payload.currency.upper()} {total:.2f}"
+    for email, _value in invitees:
+        if is_email_configured():
+            try:
+                send_quick_split_email(email, split.title, money, invite_url, account.display_name)
+            except Exception:
+                logger.exception("Could not send quick split invite to %s", email)
+    return _quick_split_out(split, account)
+
+
+@app.put("/api/quick-splits/{split_id}", response_model=schemas.QuickSplitOut)
+def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    split = _require_quick_split_access(split_id, account, db)
+    if split.payer_account_id != account.id:
+        raise HTTPException(403, "Only the person who paid can edit this split")
+    if any(p.payment_status != "PENDING" for p in split.participants):
+        raise HTTPException(400, "This split cannot be edited after someone has marked payment")
+    invitees = []
+    for raw in payload.participants:
+        email = str(raw.email).strip().lower()
+        if email and email not in [item[0] for item in invitees]:
+            invitees.append((email, raw.value))
+    if not invitees or account.email.lower() in [item[0] for item in invitees]:
+        raise HTTPException(400, "Add at least one other person's email")
+    split.title = payload.title.strip()
+    split.total_amount = Decimal(str(payload.total_amount)).quantize(Decimal("0.01"))
+    split.currency = _normalize_currency(payload.currency, "USD")
+    split.bill_date = payload.bill_date
+    split.category = payload.category or "General"
+    split.split_type = (payload.split_type or "EQUAL").upper()
+    existing_by_email = {p.email: p for p in split.participants}
+    kept = set()
+    for email, value in invitees:
+        participant = existing_by_email.get(email)
+        if participant is None:
+            existing_account = db.query(models.Account).filter_by(email=email).first()
+            participant = models.QuickSplitParticipant(quick_split_id=split.id, email=email, account_id=existing_account.id if existing_account else None, display_name=existing_account.display_name if existing_account else None, share_amount=0)
+            db.add(participant)
+        participant.split_value = value
+        kept.add(email)
+    for participant in list(split.participants):
+        if participant.email not in kept:
+            db.delete(participant)
+    db.flush()
+    participant_values = {p.id: p.split_value for p in split.participants if p.email in kept}
+    _apply_quick_split_values(split, payload.payer_value, participant_values)
+    db.commit(); db.refresh(split)
+    return _quick_split_out(split, account)
+
+
+@app.get("/api/quick-splits/{split_id}", response_model=schemas.QuickSplitOut)
+def get_quick_split(split_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    return _quick_split_out(_require_quick_split_access(split_id, account, db), account)
+
+
+@app.post("/api/quick-splits/join", response_model=schemas.QuickSplitOut)
+def join_quick_split(payload: schemas.JoinGroupRequest, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    split = db.query(models.QuickSplit).filter_by(invite_code=payload.invite_code.strip()).first()
+    if not split:
+        raise HTTPException(404, "Invalid quick split link")
+    participant = db.query(models.QuickSplitParticipant).filter_by(
+        quick_split_id=split.id, email=account.email.lower()
+    ).first()
+    if not participant:
+        raise HTTPException(403, "This quick split was invited to a different email address")
+    participant.account_id = account.id
+    participant.display_name = account.display_name
+    db.commit()
+    db.refresh(split)
+    return _quick_split_out(split, account)
+
+
+@app.post("/api/quick-splits/{split_id}/participants/{participant_id}/mark-paid", response_model=schemas.QuickSplitOut)
+def mark_quick_split_paid(split_id: int, participant_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    split = _require_quick_split_access(split_id, account, db)
+    participant = db.query(models.QuickSplitParticipant).filter_by(id=participant_id, quick_split_id=split.id).first()
+    if not participant:
+        raise HTTPException(404, "Participant not found")
+    if participant.account_id != account.id and participant.email.lower() != account.email.lower():
+        raise HTTPException(403, "Only this person can mark their share paid")
+    participant.account_id = account.id
+    participant.display_name = account.display_name
+    participant.payment_status = "PAID"
+    participant.payment_marked_at = datetime.utcnow()
+    db.commit()
+    db.refresh(split)
+    return _quick_split_out(split, account)
+
+
+@app.post("/api/quick-splits/{split_id}/participants/{participant_id}/confirm", response_model=schemas.QuickSplitOut)
+def confirm_quick_split_payment(split_id: int, participant_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    split = _require_quick_split_access(split_id, account, db)
+    if split.payer_account_id != account.id:
+        raise HTTPException(403, "Only the person who paid can confirm payment")
+    participant = db.query(models.QuickSplitParticipant).filter_by(id=participant_id, quick_split_id=split.id).first()
+    if not participant or participant.payment_status != "PAID":
+        raise HTTPException(400, "This payment has not been marked paid yet")
+    participant.payment_status = "CONFIRMED"
+    if all(p.payment_status == "CONFIRMED" for p in split.participants):
+        split.status = "SETTLED"
+    db.commit()
+    db.refresh(split)
+    return _quick_split_out(split, account)
 
 
 # ---------------------------------------------------------------------------

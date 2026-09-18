@@ -56,6 +56,7 @@
   <script src="/api.js?v=20260918g"></script>
   <script>
     const PENDING_INVITE_KEY = "sharesquad_pending_invite";
+    const PENDING_QUICK_SPLIT_KEY = "sharesquad_pending_quick_split";
 
     if (ShareSquad.getToken()) {
       window.location.href = "/";
@@ -169,6 +170,20 @@
             const group = await joinRes.json();
             ShareSquad.setStoredGroupId(group.id);
             redirect = "/group.html";
+          }
+        }
+
+        const quickCode = localStorage.getItem(PENDING_QUICK_SPLIT_KEY);
+        if (quickCode) {
+          localStorage.removeItem(PENDING_QUICK_SPLIT_KEY);
+          const quickRes = await fetch("/api/quick-splits/join", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${data.access_token}` },
+            body: JSON.stringify({ invite_code: quickCode }),
+          });
+          if (quickRes.ok) {
+            const quickSplit = await quickRes.json();
+            redirect = `/quick-split.html?id=${quickSplit.id}`;
           }
         }
 

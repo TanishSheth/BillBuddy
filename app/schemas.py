@@ -119,6 +119,56 @@ class JoinGroupRequest(BaseModel):
     invite_code: str
 
 
+# ---------- Quick Splits ----------
+class QuickSplitParticipantInput(BaseModel):
+    email: EmailStr
+    value: Optional[float] = None
+
+
+class QuickSplitCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=150)
+    total_amount: float = Field(gt=0)
+    currency: str = Field(default="USD", max_length=10)
+    bill_date: date
+    category: str = Field(default="General", max_length=50)
+    split_type: str = Field(default="EQUAL", max_length=20)
+    payer_value: Optional[float] = None
+    participants: List[QuickSplitParticipantInput] = Field(min_length=1, max_length=20)
+
+
+class QuickSplitUpdate(QuickSplitCreate):
+    pass
+
+
+class QuickSplitParticipantOut(BaseModel):
+    id: int
+    email: str
+    display_name: Optional[str] = None
+    share_amount: float
+    split_value: Optional[float] = None
+    payment_status: str
+    payment_marked_at: Optional[datetime] = None
+    is_me: bool = False
+
+
+class QuickSplitOut(BaseModel):
+    id: int
+    title: str
+    total_amount: float
+    currency: str
+    bill_date: date
+    category: str
+    split_type: str
+    payer_share_amount: float
+    payer_name: str
+    payer_account_id: int
+    invite_code: str
+    status: str
+    created_at: datetime
+    is_payer: bool
+    participants: List[QuickSplitParticipantOut]
+
+
 # ---------- VLM Extraction ----------
 class ReceiptExtraction(BaseModel):
     store_name: str = Field(description="Name of the store/merchant on the receipt")

@@ -16,6 +16,24 @@ function hideCreateGroupModal() {
   $("#createGroupModal").classList.add("hidden");
 }
 
+function openQuickSplit(id) {
+  window.location.href = `/quick-split.html?id=${encodeURIComponent(id)}`;
+}
+
+function renderQuickSplits(splits) {
+  const section = $("#quickSplitsSection");
+  const grid = $("#quickSplitsGrid");
+  if (!splits || !splits.length) { section?.classList.add("hidden"); return; }
+  section?.classList.remove("hidden");
+  grid.innerHTML = splits.map((s) => {
+    const mine = s.participants.find((p) => p.is_me);
+    const remaining = s.participants.filter((p) => p.payment_status !== "CONFIRMED").length;
+    const detail = s.is_payer ? `${remaining} payment${remaining === 1 ? "" : "s"} outstanding` : mine ? `You owe ${ShareSquad.formatMoney(mine.share_amount, s.currency)}` : "View split";
+    return `<div class="bb-card group-card flex flex-col justify-between gap-3"><div><div class="flex items-start justify-between gap-2"><h3 class="font-mono font-bold text-base leading-tight text-ink">${ShareSquad.escapeHtml(s.title)}</h3><span class="px-2 py-0.5 rounded text-[10px] font-bold bg-brand/10 text-brand">Quick Split</span></div><p class="text-xs text-ink/60 mt-2">${detail}</p><p class="text-[10px] text-ink/40 mt-1.5 font-mono">${s.status === "SETTLED" ? "Settled" : "Open"} · ${ShareSquad.formatDate(s.bill_date)}</p></div><button type="button" class="open-quick-split bb-btn-primary w-full !py-1.5 text-[11px]" data-id="${s.id}">View Split</button></div>`;
+  }).join("");
+  grid.querySelectorAll(".open-quick-split").forEach((button) => button.addEventListener("click", () => openQuickSplit(button.dataset.id)));
+}
+
 function renderGroups(groups) {
   const grid = $("#groupsGrid");
   const empty = $("#emptyGroups");
@@ -113,8 +131,9 @@ async function loadDashboard() {
     if (me.account.has_avatar) {
       ShareSquad.setAuthImage($("#headerAvatar"), "/auth/me/avatar");
     }
-    const groups = await ShareSquad.api("/groups");
+    const [groups, quickSplits] = await Promise.all([ShareSquad.api("/groups"), ShareSquad.api("/quick-splits")]);
     renderGroups(groups);
+    renderQuickSplits(quickSplits);
   } catch (err) {
     console.error("Failed to load dashboard:", err);
     ShareSquad.showToast(err.message || "Could not load groups", "error");
@@ -156,6 +175,7 @@ async function submitCreateGroup(e) {
   }
 
   $("#newGroupBtn")?.addEventListener("click", showCreateGroupModal);
+  $("#quickSplitBtn")?.addEventListener("click", () => { window.location.href = "/quick-split.html"; });
   $("#settingsBtn")?.addEventListener("click", () => { window.location.href = "/settings.html"; });
   $("#createFirstGroupBtn")?.addEventListener("click", showCreateGroupModal);
   $("#createGroupForm")?.addEventListener("submit", submitCreateGroup);

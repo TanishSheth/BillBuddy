@@ -207,6 +207,46 @@ class PersonalExpense(Base):
     account = relationship("Account", back_populates="personal_expenses")
 
 
+# A QuickSplit is a one-off bill shared directly with people, without asking
+# the creator to organise an ongoing group first.
+class QuickSplit(Base):
+    __tablename__ = "quick_splits"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(150), nullable=False)
+    total_amount = Column(Numeric(10, 2), nullable=False)
+    currency = Column(String(10), default="USD", nullable=False)
+    bill_date = Column(Date, nullable=False)
+    category = Column(String(50), default="General")
+    split_type = Column(String(20), default="EQUAL", nullable=False)
+    payer_share_amount = Column(Numeric(10, 2), default=0, nullable=False)
+    payer_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    invite_code = Column(String(64), unique=True, nullable=False, default=generate_invite_code)
+    status = Column(String(20), default="OPEN", nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    payer = relationship("Account", foreign_keys=[payer_account_id])
+    participants = relationship("QuickSplitParticipant", back_populates="quick_split", cascade="all, delete-orphan")
+
+
+class QuickSplitParticipant(Base):
+    __tablename__ = "quick_split_participants"
+    __table_args__ = (UniqueConstraint("quick_split_id", "email", name="uq_quick_split_email"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    quick_split_id = Column(Integer, ForeignKey("quick_splits.id", ondelete="CASCADE"), nullable=False)
+    email = Column(String(255), nullable=False)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
+    display_name = Column(String(100), nullable=True)
+    share_amount = Column(Numeric(10, 2), nullable=False)
+    split_value = Column(Numeric(10, 2), nullable=True)
+    payment_status = Column(String(20), default="PENDING", nullable=False)
+    payment_marked_at = Column(DateTime, nullable=True)
+
+    quick_split = relationship("QuickSplit", back_populates="participants")
+    account = relationship("Account", foreign_keys=[account_id])
+
+
 class AccountVendor(Base):
     """Per-account gazetteer: trusted store names learned from saved bills."""
     __tablename__ = "account_vendors"
