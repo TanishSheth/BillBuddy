@@ -184,9 +184,74 @@ def test_db_schema():
         db.close()
 
 
+def test_ocr_receipt_parsing():
+    print("Testing OCR receipt parsing...")
+    from app.ocr_extractor import (
+        _find_date,
+        _find_total,
+        _group_tokens_into_lines,
+        _is_register_line,
+        _variant_score,
+    )
+
+    date, ok = _find_date("Store\n09/13/26 06:49PM\nTOTAL 22.25")
+    assert ok and date == "2026-09-13", date
+
+    assert _find_date("09/13/268 extra") == (None, False)
+
+    assert _is_register_line("*1935 FS67/003/006 09/13/26")
+    assert not _is_register_line("TOTAL ........ $ 22.25")
+    assert not _is_register_line("09/13/26")
+
+    lines = [
+        "MILK 3.50",
+        "BREAD 4.00",
+        "SUBTOTAL 20.00",
+        "TAX 2.25",
+        "TOTAL 22.25",
+        "*1935 FS67/003/006 09/13/26",
+        "19428.08",
+        "CASH 40.00",
+        "CHANGE 17.75",
+    ]
+    total, confident = _find_total(lines)
+    assert total == 22.25, total
+    assert confident is True
+
+    footer_only = [
+        "MILK 3.50",
+        "*1935 FS67/003/006 09/13/26",
+        "19428.08",
+    ]
+    fallback_total, fallback_ok = _find_total(footer_only)
+    assert fallback_total != 19428.08, fallback_total
+
+    data = {
+        "text": ["SUBTOTAL", "........", "20.00", "TOTAL", "........", "22.25"],
+        "conf": ["80", "80", "80", "80", "80", "80"],
+        "left": [10, 80, 200, 10, 80, 200],
+        "top": [10, 12, 11, 40, 41, 42],
+        "width": [60, 40, 40, 50, 40, 40],
+        "height": [12, 10, 12, 12, 10, 12],
+    }
+    grouped, ntok, mean = _group_tokens_into_lines(data)
+    assert ntok == 6
+    assert mean == 80.0
+    assert len(grouped) == 2
+    assert grouped[0].startswith("SUBTOTAL") and "20.00" in grouped[0]
+    assert grouped[1].startswith("TOTAL") and "22.25" in grouped[1]
+
+    sparse = _variant_score("HI", 95.0, 1)
+    rich = _variant_score("SUBTOTAL 20.00 TAX 2.25 TOTAL $ 22.25 09/13/26", 60.0, 12)
+    assert rich > sparse, (rich, sparse)
+
+    print("  [PASS] OCR receipt parsing tests passed!")
+
+
 if __name__ == "__main__":
     test_split_logic()
     test_currency_conversion()
     test_debt_simplification()
     test_db_schema()
+    test_ocr_receipt_parsing()
     print("\nALL SHARESQUAD TESTS PASSED SUCCESSFULLY!")

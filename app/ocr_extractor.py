@@ -35,9 +35,13 @@ except ImportError:
     np = None
     CV2_AVAILABLE = False
 
-_TESSERACT_PSM = "--oem 3 --psm 4"
+# PSM 6: one uniform text block. PSM 4 merges receipt columns (TOTAL ..... 22.25)
+# across the dotted leader into footer strings.
+_TESSERACT_PSM = "--oem 3 --psm 6"
 _MIN_TESSERACT_CONF = 55.0
 _MAX_PLAUSIBLE_TOTAL = 200000.0
+_UNLABELED_TOTAL_CAP = 10000.0
+_MONEY_TOL = 0.06
 
 
 # ---------------------------------------------------------------------------
@@ -155,12 +159,17 @@ def _flatten_illumination(gray):
     return clahe.apply(flat)
 
 
-def _denoise_unsharp(gray):
-    den = cv2.medianBlur(gray, 3)
-    den = cv2.bilateralFilter(den, 5, 40, 40)
-    blur = cv2.GaussianBlur(den, (0, 0), 1.2)
-    sharp = cv2.addWeighted(den, 1.45, blur, -0.45, 0)
-    return np.clip(sharp, 0, 255).astype(np.uint8)
+def _soften_thermal_ink(gray):
+    """Light speckle removal only. Unsharp + bilateral split thermal pin-dots (3→8, I→|)."""
+    return cv2.medianBlur(gray, 3)
+
+
+def _bridge_thermal_dots(img):
+    """Horizontal close so 58mm/80mm heated-pin gaps join into strokes."""
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 1))
+    if float(np.mean(img)) > 127:
+        return cv2.bitwise_not(cv2.morphologyEx(cv2.bitwise_not(img), cv2.MORPH_CLOSE, kernel))
+    return cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
 
 
 def _sauvola(gray, window: int = 25, k: float = 0.2):
@@ -190,47 +199,121 @@ def _prepare_variants(image_bytes: bytes):
     bgr = _deskew(bgr)
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     gray = _flatten_illumination(gray)
-    gray = _denoise_unsharp(gray)
+    gray = _soften_thermal_ink(gray)
+    gray = _bridge_thermal_dots(gray)
     gray = _ensure_min_width(gray)
-    return [("gray", gray), ("binary", _sauvola(gray))]
+    binary = _bridge_thermal_dots(_sauvola(gray))
+    return [("gray", gray), ("binary", binary)]
 
 
-def _tesseract_text_and_conf(image) -> tuple[str, float]:
+def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float]:
+    """Join Tesseract tokens that share a horizontal band so labels stay with prices."""
+    n = len(data.get("text") or [])
+    tokens = []
+    confs: list[float] = []
+    for i in range(n):
+        word = str(data["text"][i] or "").strip()
+        try:
+            conf = float(data["conf"][i])
+        except (TypeError, ValueError):
+            conf = -1.0
+        if conf >= 0:
+            confs.append(conf)
+        if not word or conf < 0:
+            continue
+        try:
+            tokens.append({
+                "text": word,
+                "left": int(data["left"][i]),
+                "top": int(data["top"][i]),
+                "w": int(data["width"][i]),
+                "h": max(int(data["height"][i]), 1),
+            })
+        except (TypeError, ValueError, KeyError):
+            continue
+    tokens.sort(key=lambda t: (t["top"], t["left"]))
+    rows: list[dict] = []
+    for tok in tokens:
+        cy = tok["top"] + tok["h"] / 2.0
+        matched = None
+        for row in rows:
+            if abs(cy - row["cy"]) <= max(row["h"], tok["h"]) * 0.55:
+                matched = row
+                break
+        if matched is None:
+            rows.append({"tokens": [tok], "cy": cy, "h": float(tok["h"])})
+        else:
+            matched["tokens"].append(tok)
+            count = len(matched["tokens"])
+            matched["cy"] = (matched["cy"] * (count - 1) + cy) / count
+            matched["h"] = max(matched["h"], float(tok["h"]))
+    rows.sort(key=lambda r: r["cy"])
+    lines = []
+    for row in rows:
+        row["tokens"].sort(key=lambda t: t["left"])
+        line = " ".join(t["text"] for t in row["tokens"]).strip()
+        if line:
+            lines.append(line)
+    mean = sum(confs) / len(confs) if confs else 0.0
+    return lines, len(tokens), mean
+
+
+def _tesseract_pass(image) -> tuple[str, float, list[str], int]:
     if not TESSERACT_AVAILABLE:
-        return "", 0.0
+        return "", 0.0, [], 0
     try:
         data = pytesseract.image_to_data(image, config=_TESSERACT_PSM, output_type=pytesseract.Output.DICT)
-        confs = []
-        for raw in data.get("conf", []):
-            try:
-                val = float(raw)
-            except (TypeError, ValueError):
-                continue
-            if val >= 0:
-                confs.append(val)
-        text = pytesseract.image_to_string(image, config=_TESSERACT_PSM)
-        mean = sum(confs) / len(confs) if confs else 0.0
-        return text, mean
+        lines, token_count, mean = _group_tokens_into_lines(data)
+        text = "\n".join(lines)
+        return text, mean, lines, token_count
     except Exception as exc:
         logger.warning("Tesseract failed: %s", exc)
-        return "", 0.0
+        return "", 0.0, [], 0
 
 
-def _run_ocr(image_bytes: bytes) -> tuple[str, float]:
-    """Return (text, mean Tesseract word confidence 0-100)."""
+_ANCHOR_RE = re.compile(
+    r"\b(?:total|subtotal|sub-tot|tax|gst|hst|pst|vat|change|cash|qty|item|amount due|balance)\b|[$₹€£]|\busd\b|\bcad\b|\binr\b",
+    re.I,
+)
+_DATE_HINT_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-](?:\d{4}|\d{2})\b")
+_MONEY_HINT_RE = re.compile(r"\d+\.\d{2}")
+
+
+def _variant_score(text: str, mean_conf: float, token_count: int) -> float:
+    """Prefer a full receipt (TOTAL/TAX/dates/money) over a sparse high-confidence hallucination."""
+    if not (text or "").strip():
+        return -1.0
+    anchors = len(_ANCHOR_RE.findall(text))
+    dates = len(_DATE_HINT_RE.findall(text))
+    money = len(_MONEY_HINT_RE.findall(text))
+    return (
+        anchors * 14.0
+        + dates * 10.0
+        + min(money, 15) * 5.0
+        + min(len(text), 2500) / 180.0
+        + min(token_count, 120) * 0.25
+        + mean_conf * 0.12
+    )
+
+
+def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str]]:
+    """Return (text, mean Tesseract word confidence 0-100, layout lines)."""
+    empty = ("", 0.0, [])
     if not TESSERACT_AVAILABLE:
         logger.warning("pytesseract not installed — local OCR extraction unavailable.")
-        return "", 0.0
+        return empty
 
     if CV2_AVAILABLE:
         try:
-            best_text, best_conf = "", -1.0
+            best = ("", -1.0, [], -1.0)
             for name, variant in _prepare_variants(image_bytes):
-                text, conf = _tesseract_text_and_conf(variant)
-                logger.info("OCR variant %s mean confidence %.1f", name, conf)
-                if conf > best_conf or (conf == best_conf and len(text) > len(best_text)):
-                    best_text, best_conf = text, conf
-            return best_text, max(best_conf, 0.0)
+                text, conf, lines, ntok = _tesseract_pass(variant)
+                score = _variant_score(text, conf, ntok)
+                logger.info("OCR variant %s mean confidence %.1f score %.1f", name, conf, score)
+                if score > best[3]:
+                    best = (text, conf, lines, score)
+            if best[3] >= 0:
+                return best[0], max(best[1], 0.0), best[2]
         except Exception as exc:
             logger.warning("OpenCV cleanup failed, using basic OCR: %s", exc)
 
@@ -242,10 +325,11 @@ def _run_ocr(image_bytes: bytes) -> tuple[str, float]:
         if img.width < 1500:
             scale = 1500 / img.width
             img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
-        return _tesseract_text_and_conf(img)
+        text, conf, lines, _ntok = _tesseract_pass(img)
+        return text, conf, lines
     except Exception as exc:
         logger.warning("Local OCR failed: %s", exc)
-        return "", 0.0
+        return empty
 
 
 def _looks_implausible(extraction: ReceiptExtraction) -> bool:
@@ -474,7 +558,6 @@ def _classify_amount_line(line: str) -> str | None:
         return "remaining"
     if _line_has_any_phrase(norm, _META_PHRASES):
         return "meta"
-        return "meta"
     if _line_has_any_phrase(norm, _TOTAL_PHRASES):
         if re.search(r"points?\s+balance|reward\s+balance|card\s+balance", norm):
             return None
@@ -492,9 +575,36 @@ def _parse_amounts(text: str) -> list[float]:
     return amounts
 
 
+_REGISTER_LINE_RE = re.compile(
+    r"(?:\*\s*\d{3,})"
+    r"|(?:\b(?:FS|STR|REG|TRN|CSHR|TRANS|CASHIER|OP#)\d*\b)"
+    r"|(?:\d{3,}/\d{2,}/\d{2,})",
+    re.I,
+)
+
+
+def _is_register_line(line: str) -> bool:
+    """Register / store-system footers like *1935 FS67/003/006 — not a bill total."""
+    return bool(_REGISTER_LINE_RE.search(line or ""))
+
+
+def _amounts_close(a: float, b: float, tol: float = _MONEY_TOL) -> bool:
+    return abs(a - b) <= max(tol, 0.01)
+
+
+def _plausible_receipt_total(amount: float, labeled: bool) -> bool:
+    if amount <= 0 or amount > _MAX_PLAUSIBLE_TOTAL:
+        return False
+    if not labeled and amount >= _UNLABELED_TOTAL_CAP:
+        return False
+    return True
+
+
 def _amount_near_line(lines: list[str], idx: int) -> float | None:
     for j in (idx, idx + 1, idx - 1):
         if not (0 <= j < len(lines)):
+            continue
+        if _is_register_line(lines[j]) and j != idx:
             continue
         kind = _classify_amount_line(lines[j])
         if kind in _IGNORE_KINDS and j != idx:
@@ -505,20 +615,84 @@ def _amount_near_line(lines: list[str], idx: int) -> float | None:
     return None
 
 
-def _find_total(lines: list[str]) -> tuple[float | None, bool]:
-    for idx in range(len(lines) - 1, -1, -1):
-        if _classify_amount_line(lines[idx]) != "total":
+def _kind_amounts(lines: list[str]) -> dict[str, list[float]]:
+    buckets = {"subtotal": [], "tax": [], "total": [], "payment": [], "change": []}
+    for i, line in enumerate(lines):
+        if _is_register_line(line):
             continue
-        amount = _amount_near_line(lines, idx)
+        kind = _classify_amount_line(line)
+        if kind not in buckets:
+            continue
+        amount = _amount_near_line(lines, i)
         if amount is not None and amount > 0:
-            return amount, True
+            buckets[kind].append(amount)
+    return buckets
+
+
+def _tax_candidates(sub: float, taxes: list[float]) -> list[float]:
+    out = [0.0]
+    if not taxes:
+        return out
+    out.append(taxes[-1])
+    if len(taxes) > 1:
+        small = [t for t in taxes if sub <= 0 or t < sub]
+        if small:
+            out.append(round(sum(small), 2))
+    # unique preserve order
+    seen: set[float] = set()
+    uniq: list[float] = []
+    for t in out:
+        key = round(t, 2)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(t)
+    return uniq
+
+
+def _find_total(lines: list[str]) -> tuple[float | None, bool]:
+    buckets = _kind_amounts(lines)
+
+    for tot in reversed(buckets["total"]):
+        if not _plausible_receipt_total(tot, True):
+            continue
+        for sub in buckets["subtotal"]:
+            for tax in _tax_candidates(sub, buckets["tax"]):
+                if _amounts_close(sub + tax, tot):
+                    return tot, True
+        for cash in buckets["payment"]:
+            for chg in buckets["change"]:
+                inferred = round(cash - chg, 2)
+                if inferred > 0 and _amounts_close(inferred, tot):
+                    return tot, True
+
+    if buckets["subtotal"]:
+        for sub in reversed(buckets["subtotal"]):
+            for tax in _tax_candidates(sub, buckets["tax"]):
+                inferred = round(sub + tax, 2)
+                if inferred <= 0:
+                    continue
+                for tot in reversed(buckets["total"]):
+                    if _amounts_close(inferred, tot):
+                        return tot, True
+                if tax > 0 and _plausible_receipt_total(inferred, True):
+                    return inferred, True
+
+    for tot in reversed(buckets["total"]):
+        if _plausible_receipt_total(tot, True):
+            return tot, True
 
     start = max(0, int(len(lines) * 0.5))
     fallback: list[float] = []
     for line in lines[start:]:
+        if _is_register_line(line):
+            continue
         if _classify_amount_line(line) in _IGNORE_KINDS:
             continue
-        fallback.extend(a for a in _parse_amounts(line) if a > 0)
+        fallback.extend(
+            a for a in _parse_amounts(line)
+            if _plausible_receipt_total(a, False)
+        )
     if fallback:
         return max(fallback), False
     return None, False
@@ -526,8 +700,11 @@ def _find_total(lines: list[str]) -> tuple[float | None, bool]:
 
 _DATE_PATTERNS = [
     (r"\b(\d{4}-\d{2}-\d{2})\b", "%Y-%m-%d"),
-    (r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", None),  # ambiguous order, handled below
-    (r"\b(\d{1,2}-\d{1,2}-\d{2,4})\b", None),
+    # Year is exactly 2 or 4 digits so a timestamp (06:49PM) cannot glue onto 26.
+    (r"\b(\d{1,2}/\d{1,2}/\d{4})\b", None),
+    (r"\b(\d{1,2}/\d{1,2}/\d{2})(?!\d)", None),
+    (r"\b(\d{1,2}-\d{1,2}-\d{4})\b", None),
+    (r"\b(\d{1,2}-\d{1,2}-\d{2})(?!\d)", None),
     (r"\b([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})\b", None),
     (r"\b(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})\b", None),
 ]
@@ -658,8 +835,8 @@ def extract_receipt_data_ocr(image_bytes: bytes) -> tuple[ReceiptExtraction, boo
     guess (or missing) — the caller can decide to escalate to a VLM if one
     is configured, or just hand the guess to the user to confirm/edit.
     """
-    text, mean_conf = _run_ocr(image_bytes)
-    lines = [l for l in text.splitlines() if l.strip()]
+    text, mean_conf, boxed_lines = _run_ocr(image_bytes)
+    lines = boxed_lines or [l for l in text.splitlines() if l.strip()]
 
     store_name, store_confident = _find_store_name(lines)
     bill_date, date_confident = _find_date(text)
