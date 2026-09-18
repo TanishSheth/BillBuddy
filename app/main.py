@@ -190,6 +190,10 @@ def _ensure_schema():
         ("accounts", "avatar_path", "VARCHAR"),
         ("groups", "cover_image_path", "VARCHAR"),
         ("group_members", "is_active", "BOOLEAN DEFAULT TRUE"),
+        ("pending_uploads", "ocr_store_name", "VARCHAR(150)"),
+        ("pending_uploads", "ocr_phones", "VARCHAR(200)"),
+        ("pending_uploads", "ocr_store_ids", "VARCHAR(80)"),
+        ("pending_uploads", "ocr_header_key", "VARCHAR(200)"),
     ]
 
     for table, column, spec in statements:
@@ -225,6 +229,10 @@ def _ensure_schema():
                                 "group_id INTEGER, "
                                 "account_id INTEGER, "
                                 "file_path VARCHAR NOT NULL, "
+                                "ocr_store_name VARCHAR(150), "
+                                "ocr_phones VARCHAR(200), "
+                                "ocr_store_ids VARCHAR(80), "
+                                "ocr_header_key VARCHAR(200), "
                                 "created_at DATETIME, "
                                 "FOREIGN KEY(group_id) REFERENCES groups (id) ON DELETE CASCADE, "
                                 "FOREIGN KEY(account_id) REFERENCES accounts (id) ON DELETE CASCADE"
@@ -1144,6 +1152,85 @@ def join_group(
     return group
 
 
+def _learned_vendors_for(db: Session, account_id: int) -> list[dict]:
+    rows = db.query(models.AccountVendor).filter_by(account_id=account_id).all()
+    return [
+        {
+            "name": row.name,
+            "phones": {row.phone} if row.phone else set(),
+            "store_ids": {row.store_id} if row.store_id else set(),
+            "header_key": row.header_key or "",
+        }
+        for row in rows
+    ]
+
+
+def _apply_scan_fingerprint(pending: models.PendingUpload, fingerprint: dict, store_name: str) -> None:
+    pending.ocr_store_name = (store_name or "")[:150]
+    pending.ocr_phones = ",".join((fingerprint or {}).get("phones") or [])[:200]
+    pending.ocr_store_ids = ",".join((fingerprint or {}).get("store_ids") or [])[:80]
+    pending.ocr_header_key = ((fingerprint or {}).get("header_key") or "")[:200]
+
+
+def _upsert_account_vendor(
+    db: Session,
+    account_id: int,
+    name: str,
+    *,
+    phone: str = "",
+    store_id: str = "",
+    header_key: str = "",
+) -> None:
+    q = db.query(models.AccountVendor).filter_by(account_id=account_id)
+    if phone:
+        row = q.filter_by(phone=phone).first()
+    elif store_id:
+        row = q.filter_by(store_id=store_id).first()
+    elif header_key:
+        row = q.filter_by(header_key=header_key).first()
+    else:
+        return
+    if row:
+        row.name = name
+        return
+    db.add(
+        models.AccountVendor(
+            account_id=account_id,
+            name=name,
+            phone=phone or "",
+            store_id=store_id or "",
+            header_key=header_key or "",
+        )
+    )
+
+
+def _remember_vendor_correction(
+    db: Session,
+    account_id: int,
+    pending: models.PendingUpload | None,
+    chosen_name: str,
+) -> None:
+    if not pending or not account_id:
+        return
+    chosen = (chosen_name or "").strip()[:150]
+    if not chosen or chosen.lower().startswith("unknown"):
+        return
+    guessed = (pending.ocr_store_name or "").strip()
+    if guessed and guessed.lower() == chosen.lower():
+        return
+    phones = [p for p in (pending.ocr_phones or "").split(",") if len(p) >= 10]
+    store_ids = [s for s in (pending.ocr_store_ids or "").split(",") if s]
+    header_key = (pending.ocr_header_key or "").strip()
+    if not phones and not store_ids and len(header_key) < 8:
+        return
+    for phone in phones:
+        _upsert_account_vendor(db, account_id, chosen, phone=phone)
+    for sid in store_ids:
+        _upsert_account_vendor(db, account_id, chosen, store_id=sid)
+    if len(header_key) >= 8:
+        _upsert_account_vendor(db, account_id, chosen, header_key=header_key)
+
+
 # ---------------------------------------------------------------------------
 # Receipt Upload & VLM Extraction
 # ---------------------------------------------------------------------------
@@ -1171,14 +1258,19 @@ async def upload_receipt(
     with open(tmp_path, "wb") as f:
         f.write(contents)
 
-    pending = models.PendingUpload(id=upload_id, group_id=group_id, file_path=tmp_path)
+    pending = models.PendingUpload(id=upload_id, group_id=group_id, account_id=account.id, file_path=tmp_path)
     db.add(pending)
     db.commit()
 
     mime = file.content_type or "image/jpeg"
     vlm_config = resolve_vlm_config(db, account.id, group_id)
-    extraction, source, message = extract_receipt_data(contents, mime, vlm_config)
+    extraction, source, message, fingerprint = extract_receipt_data(
+        contents, mime, vlm_config, learned_vendors=_learned_vendors_for(db, account.id),
+    )
     message = _public_scan_message(message)
+    _apply_scan_fingerprint(pending, fingerprint, extraction.store_name)
+    db.add(pending)
+    db.commit()
 
     return schemas.ExtractionResponse(
         upload_id=upload_id,
@@ -1299,6 +1391,7 @@ def create_expense(
         )
         if not pending or not os.path.exists(pending.file_path):
             raise HTTPException(400, "Upload not found or already used. Re-upload the receipt.")
+        _remember_vendor_correction(db, account.id, pending, payload.store_name)
         ext = os.path.splitext(pending.file_path)[1]
         final_filename = f"{uuid.uuid4().hex}{ext}"
         group_uploads = _group_uploads_dir(group_id)
@@ -1595,7 +1688,9 @@ def download_group_report(
 # ---------------------------------------------------------------------------
 # Personal Expenses Endpoints
 # ---------------------------------------------------------------------------
-def _claim_personal_upload(db: Session, account_id: int, upload_id: str) -> str:
+def _claim_personal_upload(
+    db: Session, account_id: int, upload_id: str, chosen_name: str | None = None,
+) -> str:
     pending = (
         db.query(models.PendingUpload)
         .filter_by(id=upload_id, account_id=account_id)
@@ -1611,6 +1706,8 @@ def _claim_personal_upload(db: Session, account_id: int, upload_id: str) -> str:
                     break
         except FileNotFoundError:
             src = None
+    if pending and chosen_name:
+        _remember_vendor_correction(db, account_id, pending, chosen_name)
     if pending:
         db.delete(pending)
     if not src or not os.path.exists(src):
@@ -1677,7 +1774,7 @@ def create_personal_expense(
 ):
     final_path = None
     if payload.upload_id:
-        final_path = _claim_personal_upload(db, account.id, payload.upload_id)
+        final_path = _claim_personal_upload(db, account.id, payload.upload_id, payload.store_name)
 
     expense = models.PersonalExpense(
         account_id=account.id,
@@ -1771,8 +1868,17 @@ async def upload_personal_receipt(
 
     mime = file.content_type or "image/jpeg"
     vlm_config = resolve_vlm_config(db, account.id)
-    extraction, source, message = extract_receipt_data(contents, mime, vlm_config)
+    extraction, source, message, fingerprint = extract_receipt_data(
+        contents, mime, vlm_config, learned_vendors=_learned_vendors_for(db, account.id),
+    )
     message = _public_scan_message(message)
+    _apply_scan_fingerprint(pending, fingerprint, extraction.store_name)
+    try:
+        db.add(pending)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Could not store OCR fingerprint on personal upload")
 
     return schemas.ExtractionResponse(
         upload_id=upload_id,

@@ -81,7 +81,8 @@ def extract_receipt_data(
     image_bytes: bytes,
     mime_type: str,
     config: ResolvedVlmConfig,
-) -> tuple[ReceiptExtraction, str, str | None]:
+    learned_vendors: list | None = None,
+) -> tuple[ReceiptExtraction, str, str | None, dict]:
     """
     Two-tier extraction:
       1. Always try local OCR + regex first — free, offline, instant.
@@ -90,13 +91,15 @@ def extract_receipt_data(
     """
     from .ocr_extractor import extract_receipt_data_ocr
 
-    ocr_result, ocr_confident = extract_receipt_data_ocr(image_bytes)
+    ocr_result, ocr_confident, fingerprint = extract_receipt_data_ocr(
+        image_bytes, learned_vendors=learned_vendors,
+    )
 
     if ocr_confident:
-        return ocr_result, "ocr", _message_for_extraction(ocr_result)
+        return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
     if not config.api_key:
-        return ocr_result, "ocr", _message_for_extraction(ocr_result)
+        return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
     try:
         if config.provider == "google":
@@ -119,13 +122,13 @@ def extract_receipt_data(
                 "https://api.groq.com/openai/v1/chat/completions",
             )
         else:
-            return ocr_result, "ocr", _message_for_extraction(ocr_result)
+            return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
         result = _to_extraction(data)
-        return result, "vlm", _message_for_extraction(result)
+        return result, "vlm", _message_for_extraction(result), fingerprint
     except Exception as exc:
         logger.exception("VLM extraction failed (%s/%s): %s", config.provider, config.model, exc)
-        return ocr_result, "ocr", _message_for_extraction(ocr_result)
+        return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
 
 def _parse_json_response(text: str) -> dict:

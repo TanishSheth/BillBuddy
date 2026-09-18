@@ -25,6 +25,7 @@ class Account(Base):
     settings = relationship("AccountSettings", back_populates="account", uselist=False)
     password_reset_tokens = relationship("PasswordResetToken", back_populates="account")
     personal_expenses = relationship("PersonalExpense", back_populates="account", cascade="all, delete-orphan")
+    vendors = relationship("AccountVendor", back_populates="account", cascade="all, delete-orphan")
 
 
 class PasswordResetToken(Base):
@@ -128,6 +129,10 @@ class PendingUpload(Base):
     group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
     account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
     file_path = Column(String, nullable=False)
+    ocr_store_name = Column(String(150), nullable=True)
+    ocr_phones = Column(String(200), nullable=True)
+    ocr_store_ids = Column(String(80), nullable=True)
+    ocr_header_key = Column(String(200), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     group = relationship("Group", back_populates="pending_uploads")
@@ -200,3 +205,18 @@ class PersonalExpense(Base):
     created_at = Column(DateTime, server_default=func.now())
 
     account = relationship("Account", back_populates="personal_expenses")
+
+
+class AccountVendor(Base):
+    """Per-account store name learned from a user's correction on a receipt."""
+    __tablename__ = "account_vendors"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(150), nullable=False)
+    phone = Column(String(20), nullable=False, default="")
+    store_id = Column(String(20), nullable=False, default="")
+    header_key = Column(String(200), nullable=False, default="")
+    created_at = Column(DateTime, server_default=func.now())
+
+    account = relationship("Account", back_populates="vendors")

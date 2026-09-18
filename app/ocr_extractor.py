@@ -409,7 +409,7 @@ def _prepare_variants(image_bytes: bytes):
     return _prepare_paper_variants(bgr)
 
 
-def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float, list[int]]:
+def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float, list[int], list[int]]:
     """Join Tesseract tokens that share a horizontal band so labels stay with prices."""
     n = len(data.get("text") or [])
     tokens = []
@@ -437,6 +437,7 @@ def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float, list[in
     tokens.sort(key=lambda t: (t["top"], t["left"]))
     rows: list[dict] = []
     lefts: list[int] = []
+    heights: list[int] = []
     for tok in tokens:
         cy = tok["top"] + tok["h"] / 2.0
         matched = None
@@ -459,20 +460,21 @@ def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float, list[in
         if line:
             lines.append(line)
             lefts.append(row["tokens"][0]["left"])
+            heights.append(int(round(row["h"])))
     mean = sum(confs) / len(confs) if confs else 0.0
-    return lines, len(tokens), mean, lefts
+    return lines, len(tokens), mean, lefts, heights
 
 
-def _tesseract_pass(image) -> tuple[str, float, list[str], int, list[int]]:
-    empty = ("", 0.0, [], 0, [])
+def _tesseract_pass(image) -> tuple[str, float, list[str], int, list[int], list[int]]:
+    empty = ("", 0.0, [], 0, [], [])
     if not TESSERACT_AVAILABLE:
         return empty
     try:
         data = pytesseract.image_to_data(image, config=_TESSERACT_PSM, output_type=pytesseract.Output.DICT)
-        lines, token_count, mean, lefts = _group_tokens_into_lines(data)
+        lines, token_count, mean, lefts, heights = _group_tokens_into_lines(data)
         lines = [_repair_ocr_digits(l) for l in lines]
         text = _repair_ocr_digits("\n".join(lines))
-        return text, mean, lines, token_count, lefts
+        return text, mean, lines, token_count, lefts, heights
     except Exception as exc:
         logger.warning("Tesseract failed: %s", exc)
         return empty
@@ -503,24 +505,24 @@ def _variant_score(text: str, mean_conf: float, token_count: int) -> float:
     )
 
 
-def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int]]:
-    """Return (text, mean Tesseract word confidence 0-100, layout lines, line x-offsets)."""
-    empty = ("", 0.0, [], [])
+def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list[int]]:
+    """Return (text, mean Tesseract word confidence 0-100, layout lines, x-offsets, line heights)."""
+    empty = ("", 0.0, [], [], [])
     if not TESSERACT_AVAILABLE:
         logger.warning("pytesseract not installed — local OCR extraction unavailable.")
         return empty
 
     if CV2_AVAILABLE:
         try:
-            best = ("", -1.0, [], [], -1.0)
+            best = ("", -1.0, [], [], [], -1.0)
             for name, variant in _prepare_variants(image_bytes):
-                text, conf, lines, ntok, lefts = _tesseract_pass(variant)
+                text, conf, lines, ntok, lefts, heights = _tesseract_pass(variant)
                 score = _variant_score(text, conf, ntok)
                 logger.info("OCR variant %s mean confidence %.1f score %.1f", name, conf, score)
-                if score > best[4]:
-                    best = (text, conf, lines, lefts, score)
-            if best[4] >= 0:
-                return best[0], max(best[1], 0.0), best[2], best[3]
+                if score > best[5]:
+                    best = (text, conf, lines, lefts, heights, score)
+            if best[5] >= 0:
+                return best[0], max(best[1], 0.0), best[2], best[3], best[4]
         except Exception as exc:
             logger.warning("OpenCV cleanup failed, using basic OCR: %s", exc)
 
@@ -532,8 +534,8 @@ def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int]]:
         if img.width < 1500:
             scale = 1500 / img.width
             img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
-        text, conf, lines, _ntok, lefts = _tesseract_pass(img)
-        return text, conf, lines, lefts
+        text, conf, lines, _ntok, lefts, heights = _tesseract_pass(img)
+        return text, conf, lines, lefts, heights
     except Exception as exc:
         logger.warning("Local OCR failed: %s", exc)
         return empty
@@ -944,23 +946,10 @@ def _drop_child_promo_lines(lines: list[str], lefts: list[int] | None) -> list[s
     return out
 
 
-def _partial_ratio(needle: str, haystack: str) -> int:
-    needle = (needle or "").lower().strip()
-    haystack = (haystack or "").lower()
-    if not needle or not haystack:
-        return 0
-    if needle in haystack:
-        return 100
-    n = len(needle)
-    if len(haystack) < n:
-        return int(SequenceMatcher(None, needle, haystack).ratio() * 100)
-    best = 0.0
-    for i in range(len(haystack) - n + 1):
-        best = max(best, SequenceMatcher(None, needle, haystack[i:i + n]).ratio())
-        if best >= 0.99:
-            return 100
-    return int(best * 100)
-
+_HEADER_LINE_COUNT = 8
+_SHORT_ALIAS_MAX = 5
+_NEAR_EXACT_RATIO = 90
+_WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)?", re.I)
 
 _KNOWN_VENDORS = [
     {"name": "Publix", "phones": {"5613625305"}, "stores": {"0553", "1708", "553"}, "aliases": ["publix"]},
@@ -994,21 +983,135 @@ def _store_ids_in_text(text: str) -> set[str]:
     return found
 
 
-def _vendor_from_directory(text: str) -> str | None:
+def _word_tokens(text: str) -> list[str]:
+    return [m.group(0).lower() for m in _WORD_RE.finditer(text or "")]
+
+
+def _compact_alnum(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _header_lines(lines: list[str]) -> list[str]:
+    return list(lines[:_HEADER_LINE_COUNT])
+
+
+def _header_fingerprint(lines: list[str]) -> str:
+    return _norm_label_text(" ".join(_header_lines(lines)))[:120]
+
+
+def receipt_store_fingerprint(lines: list[str], text: str | None = None) -> dict:
+    blob = text or "\n".join(lines)
+    return {
+        "phones": sorted(_phones_in_text(blob)),
+        "store_ids": sorted(_store_ids_in_text(blob)),
+        "header_key": _header_fingerprint(lines),
+    }
+
+
+def _token_ratio(a: str, b: str) -> int:
+    if not a or not b:
+        return 0
+    if a == b:
+        return 100
+    return int(SequenceMatcher(None, a, b).ratio() * 100)
+
+
+def _best_token_match(alias: str, tokens: list[str]) -> int:
+    """Compare alias to whole tokens / consecutive token phrases — never mid-word slices."""
+    parts = _word_tokens(alias)
+    if not parts or not tokens:
+        return 0
+    n = len(parts)
+    target = " ".join(parts)
+    if n == 1:
+        needle = parts[0]
+        return max((_token_ratio(needle, tok) for tok in tokens), default=0)
+    best = 0
+    for i in range(len(tokens) - n + 1):
+        window = " ".join(tokens[i:i + n])
+        best = max(best, _token_ratio(target, window))
+        if best >= 99:
+            return 100
+    return best
+
+
+def _exact_alias_in_tokens(alias: str, tokens: list[str]) -> bool:
+    parts = _word_tokens(alias)
+    if not parts:
+        return False
+    n = len(parts)
+    for i in range(len(tokens) - n + 1):
+        if tokens[i:i + n] == parts:
+            return True
+    return False
+
+
+def _hard_vendor_from_directory(text: str) -> str | None:
     phones = _phones_in_text(text)
     store_ids = _store_ids_in_text(text)
-    blob = text.lower()
     for vendor in _KNOWN_VENDORS:
         if phones & vendor.get("phones", set()):
             return vendor["name"]
         if store_ids & vendor.get("stores", set()):
             return vendor["name"]
+    return None
+
+
+def _canonicalize_from_header(header_text: str) -> str | None:
+    """Map a header-zone string to a directory name. Never searches the receipt body."""
+    tokens = _word_tokens(header_text)
+    header_l = (header_text or "").lower()
+    for vendor in _KNOWN_VENDORS:
         for alias in vendor.get("aliases", []):
-            if _partial_ratio(alias, blob) >= 75:
+            compact = _compact_alnum(alias)
+            if len(compact) <= _SHORT_ALIAS_MAX:
+                if _exact_alias_in_tokens(alias, tokens):
+                    return vendor["name"]
+                continue
+            if _exact_alias_in_tokens(alias, tokens):
+                return vendor["name"]
+            if _best_token_match(alias, tokens) >= _NEAR_EXACT_RATIO:
                 return vendor["name"]
         for label in vendor.get("labels", []):
-            if label in blob:
+            if len(_compact_alnum(label)) >= 6 and label in header_l:
                 return vendor["name"]
+    return None
+
+
+def _learned_vendor_match(text: str, lines: list[str], learned_vendors: list[dict] | None) -> str | None:
+    if not learned_vendors:
+        return None
+    phones = _phones_in_text(text)
+    store_ids = _store_ids_in_text(text)
+    header_key = _header_fingerprint(lines)
+    for vendor in learned_vendors:
+        name = (vendor.get("name") or "").strip()
+        if not name:
+            continue
+        if phones & set(vendor.get("phones") or []):
+            return name
+        if store_ids & set(vendor.get("store_ids") or []):
+            return name
+        key = (vendor.get("header_key") or "").strip()
+        if key and header_key and key == header_key:
+            return name
+    return None
+
+
+def _service_from_context(lines: list[str], blob: str) -> str | None:
+    header = "\n".join(_header_lines(lines)).lower()
+    header_tokens = set(_word_tokens(header))
+    low = (blob or "").lower()
+    if "uber eats" in low or ("delivery fee" in low and ("uber" in header_tokens or "eats" in header_tokens)):
+        return "Uber Eats"
+    if "fare breakdown" in low or "your trip" in low:
+        return "Uber"
+    if "your lyft" in low or "lyft ride" in low:
+        return "Lyft"
+    if "tracking number" in low and ("ups" in header_tokens or "ups.com" in low):
+        return "UPS"
+    if "usps.com" in low or "united states postal" in low:
+        return "USPS"
     return None
 
 
@@ -1017,47 +1120,76 @@ _GENERIC_HEADER_PHRASES = {
     "return receipt", "invoice", "tax invoice", "bill", "order summary",
     "order receipt", "welcome", "thank you", "thank you for your visit",
     "thank you for shopping", "customer copy", "merchant copy", "duplicate",
-    "original", "guest check", "order confirmation",
+    "original", "guest check", "order confirmation", "your trip",
+    "thanks for riding", "fare breakdown", "tracking number",
 }
 
 
-def _header_store_candidate(lines: list[str]) -> str | None:
-    for line in lines[:8]:
-        cleaned = line.strip()
-        if not (2 <= len(cleaned) <= 48):
-            continue
-        letters = sum(c.isalpha() for c in cleaned)
-        if letters / max(len(cleaned), 1) < 0.5:
-            continue
-        if re.search(r"\d{3,}", cleaned):
-            continue
-        if _ADDRESSY_RE.search(cleaned):
-            continue
-        if _norm_label_text(cleaned) in _GENERIC_HEADER_PHRASES:
-            continue
-        return cleaned
-    return None
+def _plausible_header_line(line: str) -> bool:
+    cleaned = line.strip()
+    if not (2 <= len(cleaned) <= 48):
+        return False
+    letters = sum(c.isalpha() for c in cleaned)
+    if letters / max(len(cleaned), 1) < 0.5:
+        return False
+    if re.search(r"\d{3,}", cleaned):
+        return False
+    if _ADDRESSY_RE.search(cleaned):
+        return False
+    if _norm_label_text(cleaned) in _GENERIC_HEADER_PHRASES:
+        return False
+    return True
 
 
-def _find_store_name(lines: list[str], text: str | None = None) -> tuple[str | None, bool]:
+def _header_store_candidate(lines: list[str], heights: list[int] | None = None) -> str | None:
+    """Prefer the tallest plausible line in the header (logo-sized type)."""
+    candidates: list[tuple[int, int, str]] = []
+    for i, line in enumerate(_header_lines(lines)):
+        if not _plausible_header_line(line):
+            continue
+        h = heights[i] if heights and i < len(heights) else 0
+        candidates.append((h, -i, line.strip()))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][2]
+
+
+def _find_store_name(
+    lines: list[str],
+    text: str | None = None,
+    *,
+    heights: list[int] | None = None,
+    learned_vendors: list[dict] | None = None,
+) -> tuple[str | None, bool]:
     """Return (name, confident).
 
-    Only a hit against the known-vendor directory (phone/store#/alias/
-    private-label match) counts as confident. A bare "top header line"
-    guess is frequently a slogan, a misread logo, or a receipt-type banner
-    ("TAX INVOICE") rather than the merchant name — so it's still returned
-    as a best-effort guess for the user to see/edit, but it no longer
-    counts toward all_fields_confident, letting a wrong header line
-    correctly trigger the vision-API fallback instead of being trusted
-    at face value.
+    Confident is reserved for hard identifiers: directory phone/store#, or a
+    vendor the user previously confirmed for this fingerprint. Header guesses,
+    short exact aliases, and near-exact canonicalization are returned for the
+    form but do not suppress vision-API escalation.
     """
     blob = text or "\n".join(lines)
-    known = _vendor_from_directory(blob)
-    if known:
-        return known, True
-    header = _header_store_candidate(lines)
+    header_zone = "\n".join(_header_lines(lines))
+
+    learned = _learned_vendor_match(blob, lines, learned_vendors)
+    if learned:
+        return learned, True
+
+    hard = _hard_vendor_from_directory(blob)
+    if hard:
+        return hard, True
+
+    header = _header_store_candidate(lines, heights)
+    canonical = _canonicalize_from_header(header_zone)
+    service = _service_from_context(lines, blob)
+
+    if canonical:
+        return canonical, False
     if header:
         return header, False
+    if service:
+        return service, False
     return None, False
 
 
@@ -1093,19 +1225,25 @@ def _guess_category(text: str, store_name: str | None) -> str:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def extract_receipt_data_ocr(image_bytes: bytes) -> tuple[ReceiptExtraction, bool]:
+def extract_receipt_data_ocr(
+    image_bytes: bytes,
+    learned_vendors: list[dict] | None = None,
+) -> tuple[ReceiptExtraction, bool, dict]:
     """
-    Returns (extraction, all_fields_confident).
+    Returns (extraction, all_fields_confident, store_fingerprint).
 
     all_fields_confident=False means at least one field is a low-confidence
     guess (or missing) — the caller can decide to escalate to a VLM if one
     is configured, or just hand the guess to the user to confirm/edit.
     """
-    text, mean_conf, boxed_lines, line_lefts = _run_ocr(image_bytes)
+    text, mean_conf, boxed_lines, line_lefts, line_heights = _run_ocr(image_bytes)
     lines = boxed_lines or [l for l in text.splitlines() if l.strip()]
     total_lines = _drop_child_promo_lines(lines, line_lefts)
+    fingerprint = receipt_store_fingerprint(lines, text)
 
-    store_name, store_confident = _find_store_name(lines, text)
+    store_name, store_confident = _find_store_name(
+        lines, text, heights=line_heights, learned_vendors=learned_vendors,
+    )
     bill_date, date_confident = _find_date(text)
     total_amount, total_confident = _find_total(total_lines)
 
@@ -1117,6 +1255,7 @@ def extract_receipt_data_ocr(image_bytes: bytes) -> tuple[ReceiptExtraction, boo
         category=_guess_category(text, store_name),
         currency_confidence=0,
     )
+    fingerprint["guessed_name"] = extraction.store_name
     all_confident = (
         store_confident
         and date_confident
@@ -1125,4 +1264,4 @@ def extract_receipt_data_ocr(image_bytes: bytes) -> tuple[ReceiptExtraction, boo
         and mean_conf >= _MIN_TESSERACT_CONF
         and not _looks_implausible(extraction)
     )
-    return extraction, all_confident
+    return extraction, all_confident, fingerprint

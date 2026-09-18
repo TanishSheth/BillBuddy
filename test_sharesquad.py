@@ -236,13 +236,14 @@ def test_ocr_receipt_parsing():
         "width": [60, 40, 40, 50, 40, 40],
         "height": [12, 10, 12, 12, 10, 12],
     }
-    grouped, ntok, mean, lefts = _group_tokens_into_lines(data)
+    grouped, ntok, mean, lefts, heights = _group_tokens_into_lines(data)
     assert ntok == 6
     assert mean == 80.0
     assert len(grouped) == 2
     assert grouped[0].startswith("SUBTOTAL") and "20.00" in grouped[0]
     assert grouped[1].startswith("TOTAL") and "22.25" in grouped[1]
     assert len(lefts) == 2
+    assert heights == [12, 12]
 
     pub, pub_ok = _find_store_name(
         ["Palmetto Park Square"],
@@ -250,8 +251,61 @@ def test_ocr_receipt_parsing():
     )
     assert pub_ok and pub == "Publix", pub
 
-    fuzzy, _ = _find_store_name(["o u b l i x"], "Publix Milk Whole Red Ga\nfor shopping at store 1708")
-    assert fuzzy == "Publix", fuzzy
+    store_num, store_ok = _find_store_name(
+        ["o u b l i x"], "Publix Milk Whole Red Ga\nfor shopping at store 1708",
+    )
+    assert store_ok and store_num == "Publix", store_num
+
+    milk_only, milk_ok = _find_store_name(
+        ["Cafe Luna"], "Cafe Luna\nPublix Milk Whole Red Ga\nTOTAL 10.00",
+    )
+    assert milk_only == "Cafe Luna" and milk_ok is False, milk_only
+
+    aldi_false, aldi_false_ok = _find_store_name(
+        ["Cafe Luna"],
+        "Cafe Luna\nvalid thru 12/26\nQUALITY GUARANTEED\nthank you\nTOTAL 10.00",
+    )
+    assert aldi_false == "Cafe Luna" and aldi_false_ok is False, aldi_false
+
+    cvs_false, cvs_false_ok = _find_store_name(
+        ["Joe's Deli"],
+        "Joe's Deli\nvalid thru 12/26\nTOTAL 4.00",
+    )
+    assert cvs_false == "Joe's Deli" and cvs_false_ok is False
+
+    aldi_header, aldi_ok = _find_store_name(["ALDI"], "ALDI\nThank you\nTOTAL 10.00")
+    assert aldi_header == "Aldi" and aldi_ok is False
+
+    logo, logo_ok = _find_store_name(
+        ["small print", "Premium Wine"],
+        "small print\nPremium Wine\nTOTAL 10.00",
+        heights=[8, 28],
+    )
+    assert logo == "Premium Wine" and logo_ok is False, logo
+
+    local_shop, local_ok = _find_store_name(
+        ["Premium Wine and Liquor"],
+        "Premium Wine and Liquor\n(561) 555-1212\nTOTAL 40.00",
+        learned_vendors=[{
+            "name": "Premium Wine and Liquor",
+            "phones": {"5615551212"},
+            "store_ids": set(),
+            "header_key": "",
+        }],
+    )
+    assert local_ok and local_shop == "Premium Wine and Liquor"
+
+    trip, trip_ok = _find_store_name(
+        ["Your trip"],
+        "Your trip\nfare breakdown\nTotal 12.40",
+    )
+    assert trip == "Uber" and trip_ok is False
+
+    ups_false, _ = _find_store_name(
+        ["Shipping Label"],
+        "Shipping Label\ntracking number 1Z999\nTOTAL 8.00",
+    )
+    assert ups_false != "UPS"
 
     sav_lines = [
         "SUBTOTAL 11.77",
