@@ -17,7 +17,7 @@ def _normalize_database_url(url: str) -> str:
     return url
 
 
-APP_VERSION = os.environ.get("APP_VERSION", "20260918l")
+APP_VERSION = os.environ.get("APP_VERSION", "20260919a")
 IS_DEVELOPMENT = os.environ.get("BILLBUDDY_ENV", "").lower() == "development"
 DISABLE_SCHEDULER = _is_truthy(os.environ.get("DISABLE_SCHEDULER"))
 

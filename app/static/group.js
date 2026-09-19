@@ -1012,6 +1012,9 @@ async function handleReceiptUpload(file) {
 
   $("#manualEntryBtn").addEventListener("click", () => {
     state.editingExpenseId = null;
+    // Manual entries deliberately have no receipt. Clear a previous scan so
+    // its already-consumed upload id is never sent with this new expense.
+    state.currentUploadId = null;
     $("#extractionPanel").classList.remove("hidden");
     $("#previewImg").classList.add("hidden");
     $("#receiptPreviewWrap")?.classList.add("hidden");
