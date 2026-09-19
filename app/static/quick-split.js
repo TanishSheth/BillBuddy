@@ -2,6 +2,7 @@ let activeType = "EQUAL";
 let editing = null;
 const $money = (v, c) => ShareSquad.formatMoney(v, c);
 const splitId = () => new URLSearchParams(location.search).get("id");
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 const people = () => {
   if ($("#qsInviteMode").value === "links") return [{ key: "person", label: "The other person", email: null }];
   const email = $("#qsEmails").value.trim().toLowerCase();
@@ -46,4 +47,4 @@ $$("#qsSplitType .split-type-pill").forEach((b) => b.onclick = () => chooseType(
 $("#quickSplitForm")?.addEventListener("submit", async (event) => { event.preventDefault(); const msg = $("#qsMsg"); try { const split = editing ? await ShareSquad.api(`/quick-splits/${editing.id}`, { method: "PUT", body: JSON.stringify(payload()) }) : await ShareSquad.api("/quick-splits", { method: "POST", body: JSON.stringify(payload()) }); history.replaceState({}, "", `/quick-split.html?id=${split.id}`); render(split); ShareSquad.showToast("Quick split saved", "success"); } catch (err) { msg.textContent = err.message; msg.className = "text-xs font-mono balance-negative"; } });
 $("#copyShareLink")?.addEventListener("click", async () => { await navigator.clipboard.writeText($("#shareLink").value); ShareSquad.showToast("Private invite link copied", "success"); });
 $("#createGroupFromSplit")?.addEventListener("click", async () => { const name = prompt("Name this group", "Shared expenses"); if (!name?.trim()) return; try { const group = await ShareSquad.api("/groups", { method: "POST", body: JSON.stringify({ name: name.trim(), currency: $("#qsCurrency").value || "USD" }) }); ShareSquad.setStoredGroupId(group.id); location.href = "/group.html"; } catch (err) { $("#qsMsg").textContent = err.message; $("#qsMsg").className = "text-xs font-mono balance-negative"; } });
-(async () => { if (!ShareSquad.getToken()) { location.href = "/login.html"; return; } ShareSquad.fillAllCurrencySelects(); $("#qsDate") && ($("#qsDate").value = new Date().toISOString().slice(0, 10)); toggleInviteMode(); await load(); })();
+(async () => { if (!ShareSquad.getToken()) { location.href = "/login.html"; return; } ShareSquad.fillAllCurrencySelects(); if ($("#qsDate")) { $("#qsDate").max = todayISO(); $("#qsDate").value = todayISO(); } toggleInviteMode(); await load(); })();

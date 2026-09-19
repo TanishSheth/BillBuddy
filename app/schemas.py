@@ -184,6 +184,22 @@ class QuickSplitOut(BaseModel):
     participants: List[QuickSplitParticipantOut]
 
 
+class FriendSettlementOut(BaseModel):
+    month_key: str
+    payer_account_id: int
+    recipient_account_id: int
+    amount: float
+    currency: str
+    payer_confirmed: bool
+    recipient_confirmed: bool
+    status: str
+
+
+class FriendSettlementConfirm(BaseModel):
+    month_key: str = Field(pattern=r"^\d{4}-\d{2}$")
+    action: str = Field(pattern=r"^(paid|received)$")
+
+
 # ---------- VLM Extraction ----------
 class ReceiptExtraction(BaseModel):
     store_name: str = Field(description="Name of the store/merchant on the receipt")

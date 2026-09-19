@@ -1,16 +1,18 @@
 let me; let friends = []; let activeFriend = null; let activeLedger = "current";
 const money = (value, currency) => ShareSquad.formatMoney(Math.abs(value), currency);
 const cents = (value) => Math.round((Number(value) || 0) * 100) / 100;
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 
 function splitRow(split) {
   const person = split.participants[0]; if (!person) return null;
   let friend; let balance;
   if (split.is_payer) {
     friend = { id: person.account_id || null, name: person.display_name || person.email || "Friend" };
-    balance = person.payment_status === "CONFIRMED" ? 0 : person.share_amount;
+    // A Friends balance stays open until the month is confirmed by both people.
+    balance = person.share_amount;
   } else if (person.is_me) {
     friend = { id: split.payer_account_id, name: split.payer_name || "Friend" };
-    balance = person.payment_status === "CONFIRMED" ? 0 : -person.share_amount;
+    balance = -person.share_amount;
   }
   return friend && friend.id !== me.account.id ? { split, person, friend, balance } : null;
 }
@@ -64,6 +66,7 @@ function renderLedger(friend) {
   const currentMonth = new Date().toISOString().slice(0, 7);
   const selectedMonth = activeLedger === "current" ? currentMonth : $("#historyMonth").value;
   const rows = friend.rows.filter((row) => String(row.split.bill_date).slice(0, 7) === selectedMonth).sort((a, b) => String(b.split.bill_date).localeCompare(String(a.split.bill_date)));
+  const monthBalance = cents(rows.reduce((sum, row) => sum + row.balance, 0));
   $("#ledgerTitle").textContent = activeLedger === "current" ? `This month · ${monthName(currentMonth)}` : `History · ${monthName(selectedMonth)}`;
   $("#historyMonth").classList.toggle("hidden", activeLedger !== "history");
   [["#currentBillsTab", activeLedger === "current"], ["#historyBillsTab", activeLedger === "history"]].forEach(([selector, isActive]) => {
@@ -72,6 +75,23 @@ function renderLedger(friend) {
     tab.classList.toggle("bb-btn-secondary", !isActive);
   });
   $("#friendLedger").innerHTML = rows.length ? rows.map((row) => { const bill = statusForBill(row); return `<div class="member-row"><div><p class="font-semibold text-sm">${ShareSquad.escapeHtml(row.split.title)}</p><p class="text-xs text-ink/55">${ShareSquad.formatDate(row.split.bill_date)} · ${row.split.is_payer ? "You paid" : `${ShareSquad.escapeHtml(friend.friend.name)} paid`} ${money(row.split.total_amount, row.split.currency)}</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${bill.tone}">${bill.text}</p><p class="text-[10px] text-ink/50">${bill.hint}</p></div></div>`; }).join("") : '<p class="text-sm text-ink/55 py-3">No bills in this month.</p>';
+  const settlement = friend.settlements?.get(selectedMonth);
+  const panel = $("#monthlySettlement");
+  if (!rows.length || monthBalance === 0) {
+    panel.innerHTML = '<p class="text-xs text-ink/55">No settlement is needed for this month.</p>';
+  } else if (settlement?.status === "SETTLED") {
+    panel.innerHTML = '<p class="text-xs font-mono text-ink/55">✓ This month is settled by both people.</p>';
+  } else {
+    const payerId = settlement?.payer_account_id || (monthBalance < 0 ? me.account.id : friend.friend.id);
+    const iOwe = payerId === me.account.id;
+    const confirmed = iOwe ? settlement?.payer_confirmed : settlement?.recipient_confirmed;
+    const otherConfirmed = iOwe ? settlement?.recipient_confirmed : settlement?.payer_confirmed;
+    const action = iOwe ? "paid" : "received";
+    const label = iOwe ? "Confirm I paid" : "Settle this month (payment received)";
+    const note = confirmed ? (otherConfirmed ? "Settlement is being finalized…" : "Your payment confirmation is saved. Waiting for the receiver to settle the month.") : iOwe ? "Your confirmation waits for the receiver to confirm payment." : "As the receiver, you can settle this month once payment is received.";
+    panel.innerHTML = `<div class="flex flex-wrap items-center justify-between gap-3"><p class="text-xs text-ink/60 max-w-sm">${note}</p>${confirmed ? '<span class="text-[10px] font-mono text-brand">Confirmed by you</span>' : `<button type="button" class="bb-btn-primary !py-1.5 !px-3 text-[10px] confirm-month-settlement" data-month="${selectedMonth}" data-action="${action}">${label}</button>`}</div>`;
+    panel.querySelector(".confirm-month-settlement")?.addEventListener("click", () => confirmMonthSettlement(friend, selectedMonth, action));
+  }
 }
 
 function setupHistory(friend) {
@@ -93,7 +113,27 @@ function openFriend(key) {
   $("#friendExpensePanel").classList.toggle("hidden", !friend.friend.id); $("#friendExpenseForm").dataset.friendId = friend.friend.id || ""; $("#friendPaidBy").options[1].textContent = `${friend.friend.name} paid`; ShareSquad.fillCurrencySelect($("#friendExpenseCurrency"), friend.currency); renderValues();
 }
 
-async function refresh() { me = await ShareSquad.api("/auth/me"); friends = groupByFriend(await ShareSquad.api("/quick-splits")); renderList(); }
+async function refresh() {
+  me = await ShareSquad.api("/auth/me");
+  friends = groupByFriend(await ShareSquad.api("/quick-splits"));
+  await Promise.all(friends.filter((friend) => friend.friend.id).map(async (friend) => {
+    const settlements = await ShareSquad.api(`/friends/${friend.friend.id}/settlements`);
+    friend.settlements = new Map(settlements.map((settlement) => [settlement.month_key, settlement]));
+    friend.balance = friend.rows.filter((row) => friend.settlements.get(String(row.split.bill_date).slice(0, 7))?.status !== "SETTLED").reduce((sum, row) => sum + row.balance, 0);
+  }));
+  renderList();
+}
+
+async function confirmMonthSettlement(friend, month, action) {
+  try {
+    await ShareSquad.api(`/friends/${friend.friend.id}/settlements/confirm`, { method: "POST", body: JSON.stringify({ month_key: month, action }) });
+    ShareSquad.showToast(action === "paid" ? "Your payment confirmation is saved" : "Your receipt confirmation is saved", "success");
+    await refresh();
+    openFriend(friend.key);
+  } catch (err) {
+    ShareSquad.showToast(err.message || "Could not confirm settlement", "error");
+  }
+}
 $("#backFriends").onclick = () => { $("#friendDetailPane").classList.add("hidden"); $("#friendsListPane").classList.remove("hidden"); };
 $("#currentBillsTab").onclick = () => { activeLedger = "current"; if (activeFriend) renderLedger(activeFriend); };
 $("#historyBillsTab").onclick = () => { activeLedger = "history"; if (activeFriend) renderLedger(activeFriend); };
@@ -101,5 +141,5 @@ $("#historyMonth").onchange = () => { if (activeFriend) renderLedger(activeFrien
 $("#openAddBill").onclick = () => { const panel = $("#friendExpensePanel"); if (panel.classList.contains("hidden")) return; panel.scrollIntoView({ behavior: "smooth", block: "start" }); setTimeout(() => $("#friendExpenseTitle").focus(), 350); };
 $("#friendExpenseType").onchange = renderValues;
 $("#friendPaidBy").onchange = renderValues;
-$("#friendExpenseForm").onsubmit = async (event) => { event.preventDefault(); const friendId = Number(event.currentTarget.dataset.friendId); const type = $("#friendExpenseType").value; const friendPaid = $("#friendPaidBy").value === "friend"; try { await ShareSquad.api("/quick-splits", { method: "POST", body: JSON.stringify({ title: $("#friendExpenseTitle").value.trim(), total_amount: Number($("#friendExpenseAmount").value), currency: $("#friendExpenseCurrency").value, bill_date: $("#friendExpenseDate").value, category: "General", split_type: type, payer_value: type === "EQUAL" ? null : Number($("#friendPayerValue").value), payer_account_id: friendPaid ? friendId : null, silent_invite: true, participants: [{ account_id: friendPaid ? me.account.id : friendId, value: type === "EQUAL" ? null : Number($("#friendOtherValue").value) }] }) }); ShareSquad.showToast("Added to this friend’s history", "success"); $("#friendExpenseForm").reset(); $("#friendExpenseDate").value = new Date().toISOString().slice(0, 10); await refresh(); openFriend(`account-${friendId}`); } catch (err) { $("#friendMsg").textContent = err.message; $("#friendMsg").className = "text-xs font-mono balance-negative"; } };
-(async () => { if (!ShareSquad.getToken()) { location.href = "/login.html"; return; } ShareSquad.fillAllCurrencySelects(); $("#friendExpenseDate").value = new Date().toISOString().slice(0, 10); renderValues(); await refresh(); if (window.lucide) lucide.createIcons(); })();
+$("#friendExpenseForm").onsubmit = async (event) => { event.preventDefault(); const friendId = Number(event.currentTarget.dataset.friendId); const type = $("#friendExpenseType").value; const friendPaid = $("#friendPaidBy").value === "friend"; try { await ShareSquad.api("/quick-splits", { method: "POST", body: JSON.stringify({ title: $("#friendExpenseTitle").value.trim(), total_amount: Number($("#friendExpenseAmount").value), currency: $("#friendExpenseCurrency").value, bill_date: $("#friendExpenseDate").value, category: "General", split_type: type, payer_value: type === "EQUAL" ? null : Number($("#friendPayerValue").value), payer_account_id: friendPaid ? friendId : null, silent_invite: true, participants: [{ account_id: friendPaid ? me.account.id : friendId, value: type === "EQUAL" ? null : Number($("#friendOtherValue").value) }] }) }); ShareSquad.showToast("Added to this friend’s history", "success"); $("#friendExpenseForm").reset(); $("#friendExpenseDate").value = todayISO(); await refresh(); openFriend(`account-${friendId}`); } catch (err) { $("#friendMsg").textContent = err.message; $("#friendMsg").className = "text-xs font-mono balance-negative"; } };
+(async () => { if (!ShareSquad.getToken()) { location.href = "/login.html"; return; } ShareSquad.fillAllCurrencySelects(); $("#friendExpenseDate").max = todayISO(); $("#friendExpenseDate").value = todayISO(); renderValues(); await refresh(); if (window.lucide) lucide.createIcons(); })();

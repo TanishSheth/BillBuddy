@@ -184,7 +184,7 @@ def test_quick_split_create_join_and_confirm_payment():
             "title": "Friend paid for lunch",
             "total_amount": 20,
             "currency": "USD",
-            "bill_date": "2026-09-19",
+                "bill_date": "2026-09-18",
             "payer_account_id": friend_account_id,
             "participants": [{"account_id": owner_account_id}],
         },
@@ -193,6 +193,44 @@ def test_quick_split_create_join_and_confirm_payment():
     assert friend_paid.json()["is_payer"] is False
     assert friend_paid.json()["is_owner"] is True
     assert friend_paid.json()["participants"][0]["is_me"] is True
+
+    month_splits = client.get("/api/quick-splits", headers=owner_headers).json()
+    month_balance = sum(
+        row["participants"][0]["share_amount"] if row["is_payer"] else -row["participants"][0]["share_amount"]
+        for row in month_splits
+        if row["participants"] and row["participants"][0]["account_id"] == friend_account_id
+    )
+    owner_action = "paid" if month_balance < 0 else "received"
+    owner_confirm = client.post(
+        f"/api/friends/{friend_account_id}/settlements/confirm",
+        headers=owner_headers,
+        json={"month_key": "2026-09", "action": owner_action},
+    )
+    assert owner_confirm.status_code == 200, owner_confirm.text
+    if owner_action == "paid":
+        assert owner_confirm.json()["status"] == "PENDING"
+        friend_confirm = client.post(
+            f"/api/friends/{owner_account_id}/settlements/confirm",
+            headers=friend_headers,
+            json={"month_key": "2026-09", "action": "received"},
+        )
+        assert friend_confirm.status_code == 200, friend_confirm.text
+        assert friend_confirm.json()["status"] == "SETTLED"
+    else:
+        assert owner_confirm.json()["status"] == "SETTLED"
+
+    future_dated = client.post(
+        "/api/quick-splits",
+        headers=owner_headers,
+        json={
+            "title": "Future bill",
+            "total_amount": 10,
+            "currency": "USD",
+            "bill_date": "2099-01-01",
+            "participants": [{"account_id": friend_account_id}],
+        },
+    )
+    assert future_dated.status_code == 400
 
     forbidden_delete = client.delete(f"/api/quick-splits/{link_split['id']}", headers=friend_headers)
     assert forbidden_delete.status_code == 403

@@ -250,6 +250,26 @@ class QuickSplitParticipant(Base):
     account = relationship("Account", foreign_keys=[account_id])
 
 
+class FriendMonthlySettlement(Base):
+    """A two-person monthly settlement that needs confirmation from both sides."""
+    __tablename__ = "friend_monthly_settlements"
+    __table_args__ = (UniqueConstraint("account_one_id", "account_two_id", "month_key", name="uq_friend_month"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_one_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    account_two_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    month_key = Column(String(7), nullable=False)
+    payer_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    recipient_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    amount = Column(Numeric(10, 2), nullable=False)
+    currency = Column(String(10), nullable=False, default="USD")
+    payer_confirmed = Column(Boolean, default=False, nullable=False)
+    recipient_confirmed = Column(Boolean, default=False, nullable=False)
+    status = Column(String(20), default="PENDING", nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    settled_at = Column(DateTime, nullable=True)
+
+
 class AccountVendor(Base):
     """Per-account gazetteer: trusted store names learned from saved bills."""
     __tablename__ = "account_vendors"

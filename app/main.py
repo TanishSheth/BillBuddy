@@ -928,6 +928,8 @@ def create_quick_split(
 ):
     if len(payload.participants) != 1:
         raise HTTPException(400, "A one-to-one split needs exactly one other person. Create a group for 3 or more people.")
+    if payload.bill_date > date.today():
+        raise HTTPException(400, "A bill date cannot be in the future")
     invitees = []
     for index, raw in enumerate(payload.participants, start=1):
         token = secrets.token_urlsafe(16)
@@ -997,6 +999,8 @@ def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account
         raise HTTPException(400, "This split cannot be edited after someone has marked payment")
     if len(payload.participants) != 1:
         raise HTTPException(400, "A one-to-one split needs exactly one other person. Create a group for 3 or more people.")
+    if payload.bill_date > date.today():
+        raise HTTPException(400, "A bill date cannot be in the future")
     invitees = []
     for index, raw in enumerate(payload.participants, start=1):
         token = secrets.token_urlsafe(16)
@@ -1049,6 +1053,84 @@ def delete_quick_split(split_id: int, account: models.Account = Depends(get_curr
     db.delete(split)
     db.commit()
     return {"ok": True, "message": "Split deleted"}
+
+
+def _friend_month_balance(db: Session, account_id: int, friend_id: int, month_key: str):
+    try:
+        start = date.fromisoformat(f"{month_key}-01")
+    except ValueError as err:
+        raise HTTPException(400, "Use a month in YYYY-MM format") from err
+    end = date(start.year + (start.month == 12), 1 if start.month == 12 else start.month + 1, 1)
+    rows = (
+        db.query(models.QuickSplit, models.QuickSplitParticipant)
+        .join(models.QuickSplitParticipant)
+        .filter(
+            models.QuickSplit.bill_date >= start,
+            models.QuickSplit.bill_date < end,
+            or_(
+                (models.QuickSplit.payer_account_id == account_id) & (models.QuickSplitParticipant.account_id == friend_id),
+                (models.QuickSplit.payer_account_id == friend_id) & (models.QuickSplitParticipant.account_id == account_id),
+            ),
+        )
+        .all()
+    )
+    balance = Decimal("0.00")
+    currency = "USD"
+    for split, participant in rows:
+        currency = split.currency or currency
+        balance += Decimal(str(participant.share_amount)) if split.payer_account_id == account_id else -Decimal(str(participant.share_amount))
+    return balance.quantize(Decimal("0.01")), currency
+
+
+def _friend_settlement_out(row: models.FriendMonthlySettlement) -> schemas.FriendSettlementOut:
+    return schemas.FriendSettlementOut(
+        month_key=row.month_key, payer_account_id=row.payer_account_id, recipient_account_id=row.recipient_account_id,
+        amount=float(row.amount), currency=row.currency, payer_confirmed=row.payer_confirmed,
+        recipient_confirmed=row.recipient_confirmed, status=row.status,
+    )
+
+
+@app.get("/api/friends/{friend_id}/settlements", response_model=list[schemas.FriendSettlementOut])
+def list_friend_settlements(friend_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    one, two = sorted((account.id, friend_id))
+    rows = db.query(models.FriendMonthlySettlement).filter_by(account_one_id=one, account_two_id=two).order_by(models.FriendMonthlySettlement.month_key.desc()).all()
+    return [_friend_settlement_out(row) for row in rows]
+
+
+@app.post("/api/friends/{friend_id}/settlements/confirm", response_model=schemas.FriendSettlementOut)
+def confirm_friend_settlement(friend_id: int, payload: schemas.FriendSettlementConfirm, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    if friend_id == account.id or not db.query(models.Account).get(friend_id):
+        raise HTTPException(404, "Friend not found")
+    balance, currency = _friend_month_balance(db, account.id, friend_id, payload.month_key)
+    if not balance:
+        raise HTTPException(400, "There is no balance to settle for this month")
+    payer_id = account.id if balance < 0 else friend_id
+    recipient_id = friend_id if balance < 0 else account.id
+    one, two = sorted((account.id, friend_id))
+    settlement = db.query(models.FriendMonthlySettlement).filter_by(account_one_id=one, account_two_id=two, month_key=payload.month_key).first()
+    if settlement is None:
+        settlement = models.FriendMonthlySettlement(
+            account_one_id=one, account_two_id=two, month_key=payload.month_key,
+            payer_account_id=payer_id, recipient_account_id=recipient_id,
+            amount=abs(balance), currency=currency,
+        )
+        db.add(settlement)
+    if payload.action == "paid":
+        if account.id != settlement.payer_account_id:
+            raise HTTPException(403, "Only the person who owes can confirm payment")
+        settlement.payer_confirmed = True
+    else:
+        if account.id != settlement.recipient_account_id:
+            raise HTTPException(403, "Only the person receiving payment can confirm receipt")
+        settlement.recipient_confirmed = True
+    # Receipt is the final authority: the recipient may settle immediately,
+    # while a payer's confirmation alone remains pending for their approval.
+    if settlement.recipient_confirmed:
+        settlement.status = "SETTLED"
+        settlement.settled_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(settlement)
+    return _friend_settlement_out(settlement)
 
 
 @app.get("/api/quick-splits/{split_id}", response_model=schemas.QuickSplitOut)
