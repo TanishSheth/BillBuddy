@@ -57,6 +57,7 @@
   <script>
     const PENDING_INVITE_KEY = "sharesquad_pending_invite";
     const PENDING_QUICK_SPLIT_KEY = "sharesquad_pending_quick_split";
+    const PENDING_QUICK_SPLIT_SLOT_KEY = "sharesquad_pending_quick_split_slot";
 
     if (ShareSquad.getToken()) {
       window.location.href = "/";
@@ -175,11 +176,13 @@
 
         const quickCode = localStorage.getItem(PENDING_QUICK_SPLIT_KEY);
         if (quickCode) {
+          const quickSlot = localStorage.getItem(PENDING_QUICK_SPLIT_SLOT_KEY);
           localStorage.removeItem(PENDING_QUICK_SPLIT_KEY);
+          localStorage.removeItem(PENDING_QUICK_SPLIT_SLOT_KEY);
           const quickRes = await fetch("/api/quick-splits/join", {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${data.access_token}` },
-            body: JSON.stringify({ invite_code: quickCode }),
+            body: JSON.stringify({ invite_code: quickCode, participant_token: quickSlot }),
           });
           if (quickRes.ok) {
             const quickSplit = await quickRes.json();

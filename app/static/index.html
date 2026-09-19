@@ -32,6 +32,9 @@
         <a href="/personal.html" class="nav-tab">
           <i data-lucide="wallet" class="w-3.5 h-3.5"></i> <span>Personal Tracker</span>
         </a>
+        <a href="/friends.html" class="nav-tab">
+          <i data-lucide="handshake" class="w-3.5 h-3.5"></i> <span>Friends</span>
+        </a>
       </nav>
 
       <div class="header-actions flex items-center gap-1.5 sm:gap-2 shrink-0">
@@ -56,20 +59,12 @@
         <h2 class="font-mono font-bold text-xl text-ink">Shared Expense Groups</h2>
         <p class="text-xs text-ink/60 mt-0.5">Split bills, track balances, and settle up with people you travel or live with.</p>
       </div>
-      <button id="quickSplitBtn" type="button" class="bb-btn-secondary !py-2 !px-3 text-[11px] shrink-0">
-        <i data-lucide="receipt-text" class="w-3.5 h-3.5"></i> Split a Bill
-      </button>
     </div>
     <div class="how-it-works mb-5">
       <p><strong>Start here:</strong> Create a group → invite people from Members → scan a receipt on Add / Scan → check Balances to see who pays whom. Open the gear icon for your photo, name, email, and receipt API key.</p>
     </div>
 
     <div id="groupsGrid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
-    <section id="quickSplitsSection" class="hidden mt-8">
-      <h2 class="font-mono font-bold text-base text-ink">Quick Splits</h2>
-      <p class="text-xs text-ink/60 mt-0.5 mb-3">One-off bills shared directly with people.</p>
-      <div id="quickSplitsGrid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
-    </section>
     
     <div id="emptyGroups" class="hidden bb-card max-w-md mx-auto text-center py-10">
       <div class="stamp-mark mx-auto mb-3">$</div>

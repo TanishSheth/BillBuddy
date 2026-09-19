@@ -175,7 +175,9 @@ function formatMoney(amount, currency = "USD") {
 
 function formatDate(iso) {
   if (!iso) return "";
-  const d = new Date(iso);
+  // Date-only values are calendar dates. Parsing them as UTC shifts them
+  // back a day for users west of UTC.
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso}T00:00:00` : iso);
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 

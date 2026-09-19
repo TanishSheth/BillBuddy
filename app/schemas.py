@@ -121,7 +121,9 @@ class JoinGroupRequest(BaseModel):
 
 # ---------- Quick Splits ----------
 class QuickSplitParticipantInput(BaseModel):
-    email: EmailStr
+    email: Optional[EmailStr] = None
+    account_id: Optional[int] = None
+    label: Optional[str] = Field(default=None, max_length=100)
     value: Optional[float] = None
 
 
@@ -133,7 +135,11 @@ class QuickSplitCreate(BaseModel):
     category: str = Field(default="General", max_length=50)
     split_type: str = Field(default="EQUAL", max_length=20)
     payer_value: Optional[float] = None
-    participants: List[QuickSplitParticipantInput] = Field(min_length=1, max_length=20)
+    payer_account_id: Optional[int] = None
+    silent_invite: bool = False
+    # A quick split is deliberately a one-to-one expense.  Shared expenses
+    # with two or more other people belong in a group.
+    participants: List[QuickSplitParticipantInput] = Field(min_length=1, max_length=1)
 
 
 class QuickSplitUpdate(QuickSplitCreate):
@@ -142,13 +148,20 @@ class QuickSplitUpdate(QuickSplitCreate):
 
 class QuickSplitParticipantOut(BaseModel):
     id: int
-    email: str
+    account_id: Optional[int] = None
+    email: Optional[str] = None
     display_name: Optional[str] = None
     share_amount: float
     split_value: Optional[float] = None
     payment_status: str
     payment_marked_at: Optional[datetime] = None
     is_me: bool = False
+    invite_token: Optional[str] = None
+
+
+class QuickSplitJoinRequest(BaseModel):
+    invite_code: str
+    participant_token: Optional[str] = None
 
 
 class QuickSplitOut(BaseModel):
@@ -162,10 +175,12 @@ class QuickSplitOut(BaseModel):
     payer_share_amount: float
     payer_name: str
     payer_account_id: int
+    payer_email: Optional[str] = None
     invite_code: str
     status: str
     created_at: datetime
     is_payer: bool
+    is_owner: bool
     participants: List[QuickSplitParticipantOut]
 
 

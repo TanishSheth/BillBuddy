@@ -220,11 +220,13 @@ class QuickSplit(Base):
     category = Column(String(50), default="General")
     split_type = Column(String(20), default="EQUAL", nullable=False)
     payer_share_amount = Column(Numeric(10, 2), default=0, nullable=False)
+    created_by_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
     payer_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     invite_code = Column(String(64), unique=True, nullable=False, default=generate_invite_code)
     status = Column(String(20), default="OPEN", nullable=False)
     created_at = Column(DateTime, server_default=func.now())
 
+    creator = relationship("Account", foreign_keys=[created_by_account_id])
     payer = relationship("Account", foreign_keys=[payer_account_id])
     participants = relationship("QuickSplitParticipant", back_populates="quick_split", cascade="all, delete-orphan")
 
@@ -242,6 +244,7 @@ class QuickSplitParticipant(Base):
     split_value = Column(Numeric(10, 2), nullable=True)
     payment_status = Column(String(20), default="PENDING", nullable=False)
     payment_marked_at = Column(DateTime, nullable=True)
+    invite_token = Column(String(64), unique=True, nullable=True, default=generate_invite_code)
 
     quick_split = relationship("QuickSplit", back_populates="participants")
     account = relationship("Account", foreign_keys=[account_id])
