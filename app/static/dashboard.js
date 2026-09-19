@@ -101,7 +101,7 @@ function renderGroups(groups) {
     btn.addEventListener("click", async () => {
       const name = btn.dataset.name;
       const id = Number(btn.dataset.id);
-      if (!confirm(`Leave "${name}"?\n\nYou will lose access to this group's expenses and reports.`)) return;
+      if (!confirm(`Leave "${name}"?\n\nYour expenses in this group will be deleted, and you will lose access to the group.`)) return;
       try {
         await ShareSquad.api(`/groups/${id}/leave`, { method: "POST" });
         ShareSquad.showToast(`Left group "${name}"`, "info");

@@ -953,7 +953,7 @@ async function loadMembers() {
 
   list.querySelectorAll(".remove-member").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      if (!confirm(`Remove ${btn.dataset.name} from this group?\n\nTheir past expenses stay in the history. They will not be included on new bills.`)) return;
+      if (!confirm(`Remove ${btn.dataset.name} from this group?\n\nTheir expenses and balances in this group will be deleted permanently.`)) return;
       try {
         await ShareSquad.api(`/groups/${gid()}/members/${btn.dataset.id}`, { method: "DELETE" });
         ShareSquad.showToast(`${btn.dataset.name} was removed`, "success");

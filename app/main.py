@@ -1536,6 +1536,52 @@ def get_group_member_avatar(group_id: int, member_id: int, account: models.Accou
     return FileResponse(path)
 
 
+def _purge_member_group_history(db: Session, group_id: int, member: models.GroupMember) -> int:
+    """Delete group expenses involving this member, then remove their membership row."""
+    period_ids = [
+        pid for (pid,) in db.query(models.MonthlyPeriod.id).filter_by(group_id=group_id).all()
+    ]
+    expense_ids: set[int] = set()
+    if period_ids:
+        expense_ids.update(
+            eid
+            for (eid,) in db.query(models.Expense.id)
+            .filter(
+                models.Expense.period_id.in_(period_ids),
+                models.Expense.payer_member_id == member.id,
+            )
+            .all()
+        )
+        expense_ids.update(
+            eid
+            for (eid,) in db.query(models.Expense.id)
+            .join(models.ExpenseSplit)
+            .filter(
+                models.Expense.period_id.in_(period_ids),
+                models.ExpenseSplit.member_id == member.id,
+            )
+            .all()
+        )
+
+    deleted = 0
+    if expense_ids:
+        expenses = db.query(models.Expense).filter(models.Expense.id.in_(expense_ids)).all()
+        for expense in expenses:
+            if expense.image_path and os.path.exists(expense.image_path):
+                try:
+                    os.remove(expense.image_path)
+                except OSError:
+                    pass
+            db.delete(expense)
+            deleted += 1
+
+    db.query(models.GroupMemberSettings).filter_by(
+        group_id=group_id, account_id=member.account_id,
+    ).delete(synchronize_session=False)
+    db.delete(member)
+    return deleted
+
+
 @app.delete("/api/groups/{group_id}/members/{member_id}")
 def remove_group_member(
     group_id: int,
@@ -1561,9 +1607,14 @@ def remove_group_member(
         )
         if owner_count <= 1:
             raise HTTPException(400, "Cannot remove the only owner")
-    target.is_active = False
+    name = target.display_name
+    removed_expenses = _purge_member_group_history(db, group_id, target)
     db.commit()
-    return {"ok": True, "message": f"{target.display_name} was removed from the group"}
+    notify_group_change(group_id, "member-removed")
+    msg = f"{name} was removed from the group"
+    if removed_expenses:
+        msg += f" and {removed_expenses} related expense{'s' if removed_expenses != 1 else ''} were deleted"
+    return {"ok": True, "message": msg}
 
 
 @app.delete("/api/groups/{group_id}")
@@ -1606,8 +1657,9 @@ def leave_group(
         if owner_count <= 1:
             raise HTTPException(400, "You are the sole owner of this group. Delete the group instead or transfer ownership first.")
 
-    db.delete(member)
+    _purge_member_group_history(db, group_id, member)
     db.commit()
+    notify_group_change(group_id, "member-left")
     return {"ok": True, "message": "Left group successfully"}
 
 
