@@ -37,7 +37,9 @@ except ImportError:
     CV2_AVAILABLE = False
 
 # PSM 11: sparse text. PSM 4 merges receipt columns; PSM 6 assumes one uniform block.
-_TESSERACT_PSM = "--oem 3 --psm 11"
+# Receipts vary between a sparse collection of fields and a single long column.
+# We run both layouts below and keep the more complete read.
+_TESSERACT_PSMS = ("--oem 3 --psm 11", "--oem 3 --psm 6")
 
 # ---------------------------------------------------------------------------
 # OCR letter/digit confusion repair
@@ -465,12 +467,12 @@ def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float, list[in
     return lines, len(tokens), mean, lefts, heights
 
 
-def _tesseract_pass(image) -> tuple[str, float, list[str], int, list[int], list[int]]:
+def _tesseract_pass(image, psm: str) -> tuple[str, float, list[str], int, list[int], list[int]]:
     empty = ("", 0.0, [], 0, [], [])
     if not TESSERACT_AVAILABLE:
         return empty
     try:
-        data = pytesseract.image_to_data(image, config=_TESSERACT_PSM, output_type=pytesseract.Output.DICT)
+        data = pytesseract.image_to_data(image, config=psm, output_type=pytesseract.Output.DICT)
         lines, token_count, mean, lefts, heights = _group_tokens_into_lines(data)
         lines = [_repair_ocr_digits(l) for l in lines]
         text = _repair_ocr_digits("\n".join(lines))
@@ -516,11 +518,12 @@ def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list
         try:
             best = ("", -1.0, [], [], [], -1.0)
             for name, variant in _prepare_variants(image_bytes):
-                text, conf, lines, ntok, lefts, heights = _tesseract_pass(variant)
-                score = _variant_score(text, conf, ntok)
-                logger.info("OCR variant %s mean confidence %.1f score %.1f", name, conf, score)
-                if score > best[5]:
-                    best = (text, conf, lines, lefts, heights, score)
+                for psm in _TESSERACT_PSMS:
+                    text, conf, lines, ntok, lefts, heights = _tesseract_pass(variant, psm)
+                    score = _variant_score(text, conf, ntok)
+                    logger.info("OCR variant %s (%s) mean confidence %.1f score %.1f", name, psm, conf, score)
+                    if score > best[5]:
+                        best = (text, conf, lines, lefts, heights, score)
             if best[5] >= 0:
                 return best[0], max(best[1], 0.0), best[2], best[3], best[4]
         except Exception as exc:
@@ -534,7 +537,11 @@ def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list
         if img.width < 1500:
             scale = 1500 / img.width
             img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
-        text, conf, lines, _ntok, lefts, heights = _tesseract_pass(img)
+        candidates = []
+        for psm in _TESSERACT_PSMS:
+            text, conf, lines, ntok, lefts, heights = _tesseract_pass(img, psm)
+            candidates.append((text, conf, lines, lefts, heights, _variant_score(text, conf, ntok)))
+        text, conf, lines, lefts, heights, _score = max(candidates, key=lambda item: item[5])
         return text, conf, lines, lefts, heights
     except Exception as exc:
         logger.warning("Local OCR failed: %s", exc)
@@ -829,7 +836,7 @@ def _amount_on_same_row(line: str) -> float | None:
 def _find_total(lines: list[str]) -> tuple[float | None, bool]:
     """Use only a Total-labeled row. Ignore tax / subtotal / savings / payment rows."""
     found = None
-    for line in lines:
+    for index, line in enumerate(lines):
         if _is_register_line(line):
             continue
         if _classify_amount_line(line) != "total":
@@ -837,6 +844,16 @@ def _find_total(lines: list[str]) -> tuple[float | None, bool]:
         amount = _amount_on_same_row(line)
         if amount is not None and _plausible_receipt_total(amount):
             found = amount
+            continue
+        # Narrow receipts occasionally put "TOTAL" and its right-column amount
+        # on separate OCR rows. Only accept the immediately following bare amount
+        # and never override a real same-row TOTAL found later.
+        if index + 1 < len(lines):
+            next_line = lines[index + 1]
+            if _classify_amount_line(next_line) is None and not _is_register_line(next_line):
+                amounts = _parse_amounts(next_line)
+                if len(amounts) == 1 and _plausible_receipt_total(amounts[0]):
+                    found = amounts[0]
     if found is not None:
         return found, True
     return None, False
@@ -946,7 +963,7 @@ def _drop_child_promo_lines(lines: list[str], lefts: list[int] | None) -> list[s
     return out
 
 
-_HEADER_LINE_COUNT = 8
+_HEADER_LINE_COUNT = 12
 _SHORT_ALIAS_MAX = 5
 _NEAR_EXACT_RATIO = 90
 _WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)?", re.I)
@@ -1112,6 +1129,17 @@ def _canonicalize_from_header(header_text: str) -> str | None:
         for label in vendor.get("labels", []):
             if len(_compact_alnum(label)) >= 6 and label in header_l:
                 return vendor["name"]
+
+    # Costco's large stylised logo is commonly read with one wrong character
+    # (for example C0STCO), especially on wrinkled thermal paper. It is safe
+    # to accept a close match only in the header and only when the nearby
+    # WHOLESALE / MEMBER wording confirms the receipt family.
+    has_costco_context = any(
+        _best_token_match(word, tokens) >= 78
+        for word in ("wholesale", "member")
+    )
+    if has_costco_context and _best_token_match("costco", tokens) >= 72:
+        return "Costco"
     return None
 
 

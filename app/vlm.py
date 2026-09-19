@@ -48,6 +48,11 @@ EXTRACTION_PROMPT = (
     "paid / grand total due — never savings, discounts, tax-only, or subtotal), "
     "currency (ISO code like USD or INR), and category (short label like "
     "Groceries or Food & Dining). "
+    "For Costco receipts, return store_name exactly as Costco even if the "
+    "large logo is stylised, creased, partly faint, or reads imperfectly. "
+    "For any receipt, prefer the final row labelled TOTAL (including forms "
+    "such as **** TOTAL) and ignore SUBTOTAL, TAX, savings, and duplicated "
+    "card-approval amounts. "
     "Respond with JSON only."
 )
 
