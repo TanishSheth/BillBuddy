@@ -38,7 +38,8 @@
             <label class="bb-label">Password</label>
             <button type="button" id="forgotPasswordBtn" class="auth-toggle text-[10px] normal-case tracking-normal">Forgot password?</button>
           </div>
-          <input id="password" type="password" class="bb-input" placeholder="••••••" minlength="6" />
+          <input id="password" type="password" class="bb-input" placeholder="••••••••" minlength="8" autocomplete="current-password" />
+          <p id="passwordHint" class="hidden text-[10px] text-ink/55 mt-1.5 leading-snug">At least 8 characters, 1 uppercase letter, 2 numbers, and 1 special character (!@#$…).</p>
         </div>
         <p id="authMsg" class="text-xs font-mono"></p>
         <button type="submit" id="submitBtn" class="bb-btn-primary w-full">Sign In</button>
@@ -60,7 +61,7 @@
     const PENDING_QUICK_SPLIT_SLOT_KEY = "sharesquad_pending_quick_split_slot";
 
     if (ShareSquad.getToken()) {
-      window.location.href = "/";
+      window.location.href = "/index.html";
     }
 
     let mode = "signin"; // signin | register | forgot
@@ -73,6 +74,9 @@
       $("#formTitle").textContent = isRegister ? "Create Account" : isForgot ? "Reset Password" : "Sign In";
       $("#nameField").classList.toggle("hidden", !isRegister);
       $("#passwordField").classList.toggle("hidden", isForgot);
+      $("#passwordHint").classList.toggle("hidden", !isRegister);
+      $("#password").minLength = isRegister ? 8 : 1;
+      $("#password").autocomplete = isRegister ? "new-password" : "current-password";
       $("#toggleRow").classList.toggle("hidden", isForgot);
       $("#backToSignInRow").classList.toggle("hidden", !isForgot);
       $("#submitBtn").textContent = isRegister ? "Create Account" : isForgot ? "Send reset link" : "Sign In";
@@ -80,6 +84,18 @@
       $("#password").required = !isForgot;
       $("#authMsg").textContent = "";
     }
+
+    function passwordLooksStrong(value) {
+      const password = (value || "").trim();
+      return (
+        password.length >= 8 &&
+        /[A-Z]/.test(password) &&
+        (password.match(/\d/g) || []).length >= 2 &&
+        /[^A-Za-z0-9]/.test(password)
+      );
+    }
+
+    if (new URLSearchParams(window.location.search).get("mode") === "signup") setMode("register");
 
     $("#toggleMode").addEventListener("click", () => {
       setMode(mode === "register" ? "signin" : "register");
@@ -131,6 +147,11 @@
 
       if (isRegister && !displayName) {
         msg.textContent = "Enter your display name.";
+        msg.className = "text-xs font-mono balance-negative";
+        return;
+      }
+      if (isRegister && !passwordLooksStrong(password)) {
+        msg.textContent = "Password must be at least 8 characters and include 1 uppercase letter, 2 numbers, and 1 special character.";
         msg.className = "text-xs font-mono balance-negative";
         return;
       }

@@ -16,10 +16,10 @@
   <header class="page-header border-b-2 border-ink/10 sticky top-0 z-30 bb-bg/95 backdrop-blur">
     <div class="max-w-3xl mx-auto px-4 sm:px-5 py-2.5 sm:py-3 flex items-center justify-between gap-3">
       <div class="flex items-center gap-2 sm:gap-3 min-w-0">
-        <a href="/" id="backLink" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] shrink-0" title="Back">
+        <a href="/index.html" id="backLink" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] shrink-0" title="Back">
           <i data-lucide="arrow-left" class="w-3.5 h-3.5"></i>
         </a>
-        <a href="/" class="flex items-center gap-2">
+        <a href="/index.html" class="flex items-center gap-2">
           <img src="/logo.png" alt="ShareSquad" class="app-logo" onerror="this.style.display='none'">
         </a>
         <div class="min-w-0">
@@ -66,7 +66,8 @@
         </div>
         <div>
           <label class="bb-label">New password</label>
-          <input id="profileNewPassword" type="password" class="bb-input" autocomplete="new-password" placeholder="Leave blank to keep the current password">
+          <input id="profileNewPassword" type="password" class="bb-input" autocomplete="new-password" minlength="8" placeholder="Leave blank to keep the current password">
+          <p class="text-[10px] text-ink/55 mt-1.5 leading-snug">If set: at least 8 characters, 1 uppercase letter, 2 numbers, and 1 special character.</p>
         </div>
         <button type="button" id="saveProfileBtn" class="bb-btn-primary text-[11px]">Save profile</button>
         <p id="profileMsg" class="text-xs font-mono"></p>

@@ -12,7 +12,7 @@ client = TestClient(app)
 def _register(email, name):
     response = client.post(
         "/api/auth/register",
-        json={"email": email, "password": "password123", "display_name": name},
+        json={"email": email, "password": "Password12!", "display_name": name},
     )
     assert response.status_code == 200, response.text
     return {"Authorization": f"Bearer {response.json()['access_token']}"}

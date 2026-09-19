@@ -12,7 +12,7 @@ except ImportError:
 # ---------- Auth ----------
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=6, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
     display_name: str = Field(min_length=1, max_length=100)
 
 
@@ -27,7 +27,7 @@ class ForgotPasswordRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     token: str = Field(min_length=10)
-    password: str = Field(min_length=6, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
 
 
 class MessageResponse(BaseModel):
@@ -52,7 +52,7 @@ class AccountProfileUpdate(BaseModel):
     display_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     email: Optional[EmailStr] = None
     current_password: Optional[str] = None
-    new_password: Optional[str] = Field(default=None, min_length=6, max_length=128)
+    new_password: Optional[str] = Field(default=None, min_length=8, max_length=128)
 
 
 class MeOut(BaseModel):

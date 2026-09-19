@@ -19,9 +19,9 @@ def test_full_flow():
 
     # 2. Register / Login
     email = f"user_{os.getpid()}@example.com"
-    r = client.post("/api/auth/register", json={"email": email, "password": "password123", "display_name": "Tanish"})
+    r = client.post("/api/auth/register", json={"email": email, "password": "Password12!", "display_name": "Tanish"})
     if r.status_code == 409:
-        r = client.post("/api/auth/login", json={"email": email, "password": "password123"})
+        r = client.post("/api/auth/login", json={"email": email, "password": "Password12!"})
     assert r.status_code == 200, f"Auth failed: {r.text}"
     token = r.json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}

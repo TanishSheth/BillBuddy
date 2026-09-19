@@ -39,6 +39,7 @@ from .auth import (
     get_current_account,
     hash_password,
     verify_password,
+    validate_password_strength,
     create_access_token,
     process_pending_invites,
 )
@@ -350,6 +351,12 @@ def health():
     }
 
 
+@app.get("/", include_in_schema=False)
+def public_landing_page():
+    """Public, indexable ShareSquad introduction; the signed-in app is /index.html."""
+    return FileResponse(os.path.join(STATIC_DIR, "landing.html"))
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -594,8 +601,9 @@ def build_balances_and_settlements(
 def register(payload: schemas.RegisterRequest, request: Request, db: Session = Depends(get_db)):
     check_rate_limit(request, limit=10, window_seconds=60)
     email_clean = payload.email.lower().strip()
-    if len(payload.password.strip()) < 6:
-        raise HTTPException(400, "Password must be at least 6 characters")
+    weak = validate_password_strength(payload.password)
+    if weak:
+        raise HTTPException(400, weak)
     
     existing = db.query(models.Account).filter_by(email=email_clean).first()
     if existing:
@@ -690,6 +698,9 @@ def update_profile(
     if payload.new_password:
         if not payload.current_password or not verify_password(payload.current_password, account.password_hash):
             raise HTTPException(400, "Current password is required to change password")
+        weak = validate_password_strength(payload.new_password)
+        if weak:
+            raise HTTPException(400, weak)
         account.password_hash = hash_password(payload.new_password.strip())
 
     db.commit()
@@ -798,8 +809,9 @@ def reset_password(payload: schemas.ResetPasswordRequest, request: Request, db: 
     if not token_rec or token_rec.expires_at < datetime.now():
         raise HTTPException(400, "Reset token is invalid or has expired")
 
-    if len(payload.password.strip()) < 6:
-        raise HTTPException(400, "Password must be at least 6 characters")
+    weak = validate_password_strength(payload.password)
+    if weak:
+        raise HTTPException(400, weak)
 
     account = token_rec.account
     account.password_hash = hash_password(payload.password)

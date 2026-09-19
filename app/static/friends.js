@@ -1,3 +1,4 @@
+document.querySelectorAll('a[href="/"]').forEach((link) => { link.href = "/index.html"; });
 let me; let friends = []; let activeFriend = null; let activeLedger = "current";
 const money = (value, currency) => ShareSquad.formatMoney(Math.abs(value), currency);
 const cents = (value) => Math.round((Number(value) || 0) * 100) / 100;

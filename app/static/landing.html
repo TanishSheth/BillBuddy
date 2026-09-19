@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="description" content="ShareSquad is a simple expense splitter for groups, friends, and personal spending. Scan receipts, track balances, and settle shared bills.">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://sharesquad.tanishsheth.com/">
+  <meta property="og:title" content="ShareSquad — Simple Expense Splitting">
+  <meta property="og:description" content="Split bills, scan receipts, track balances, and settle up together.">
+  <meta name="theme-color" content="#F6F3EC">
+  <title>ShareSquad — Free Expense Splitter for Groups and Friends</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/styles.css?v=20260919j">
+</head>
+<body class="bb-bg text-ink min-h-screen">
+  <header class="page-header border-b-2 border-ink/10 bb-bg/95 backdrop-blur sticky top-0 z-30">
+    <div class="max-w-5xl mx-auto px-4 sm:px-5 py-3 flex items-center justify-between gap-3">
+      <a href="/" class="flex items-center gap-2.5 min-w-0"><img src="/logo.png" alt="ShareSquad logo" class="app-logo"><span class="font-mono font-bold text-lg text-brand">ShareSquad</span></a>
+      <nav class="hidden sm:flex items-center gap-4 text-xs font-mono text-ink/65"><a href="#features">Features</a><a href="#how-it-works">How it works</a><a href="#faq">FAQ</a></nav>
+      <div class="flex items-center gap-2 shrink-0"><a href="/login.html" class="bb-btn-secondary !py-1.5 !px-3 text-[11px]">Log in</a><a id="signupLink" href="/login.html?mode=signup" class="bb-btn-primary !py-1.5 !px-3 text-[11px]">Sign up free</a></div>
+    </div>
+  </header>
+
+  <main>
+    <section class="max-w-5xl mx-auto px-4 sm:px-5 pt-14 pb-12 sm:pt-20 sm:pb-16 text-center">
+      <p class="landing-kicker">SHARED MONEY, MADE CLEAR</p>
+      <h1 class="landing-title mt-4">Split the bill.<br><span>Keep the friendship.</span></h1>
+      <p class="max-w-2xl mx-auto mt-5 text-base sm:text-lg text-ink/70">ShareSquad makes shared expenses easy to record, understand, and settle—whether you live together, travel together, or simply split a meal.</p>
+      <div class="flex flex-wrap justify-center gap-3 mt-7"><a id="heroSignup" href="/login.html?mode=signup" class="bb-btn-primary">Create a free account</a><a href="#how-it-works" class="bb-btn-secondary">See how it works</a></div>
+      <div class="landing-stat-grid mt-12">
+        <a href="/shared-groups.html"><strong>Shared groups</strong><span>Roommates, trips, teams</span></a>
+        <a href="/receipt-scanning.html"><strong>Receipt scanning</strong><span>Review before saving</span></a>
+        <a href="/clear-balances.html"><strong>Clear balances</strong><span>Know who owes whom</span></a>
+      </div>
+    </section>
+
+    <section id="features" class="border-y border-ink/10 bg-white/40"><div class="max-w-5xl mx-auto px-4 sm:px-5 py-14"><div class="max-w-2xl"><p class="landing-kicker">ONE APP, THREE WAYS TO TRACK</p><h2 class="landing-heading mt-3">Use the space that fits the expense.</h2></div><div class="grid md:grid-cols-3 gap-4 mt-8">
+      <article class="bb-card landing-feature"><p class="landing-number">01</p><h3>Shared groups</h3><p>Create a group for a household, trip, event, or project. Invite members, add bills, choose who paid, and choose exactly who shares each expense.</p><ul><li>Equal, percentage, exact, or share splits</li><li>Monthly periods and settlement records</li><li>Balances and downloadable PDF reports</li></ul></article>
+      <article class="bb-card landing-feature"><p class="landing-number">02</p><h3>Personal tracker</h3><p>Keep personal spending separate from shared money. Add expenses manually or scan a receipt, then review category totals by month.</p><ul><li>Monthly spending overview</li><li>Categories and original currencies</li><li>Personal PDF reports</li></ul></article>
+      <article class="bb-card landing-feature"><p class="landing-number">03</p><h3>Friends</h3><p>Track private one-to-one bills with a friend without creating a full group. Every friend has one clear history and balance.</p><ul><li>See whether you owe or are owed</li><li>Monthly history and settlement confirmation</li><li>Invite an existing group member directly</li></ul></article>
+    </div></div></section>
+
+    <section id="how-it-works" class="max-w-5xl mx-auto px-4 sm:px-5 py-14"><p class="landing-kicker">HOW IT WORKS</p><h2 class="landing-heading mt-3">From receipt to settlement in four steps.</h2><div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-8"><div class="landing-step"><b>1</b><h3>Create a space</h3><p>Start a shared group, add a personal expense, or split a private bill with a friend.</p></div><div class="landing-step"><b>2</b><h3>Add an expense</h3><p>Enter it manually or scan a receipt, then confirm the store, date, amount, and category.</p></div><div class="landing-step"><b>3</b><h3>Choose who paid</h3><p>Set the payer and the people sharing the bill. ShareSquad calculates each person’s portion.</p></div><div class="landing-step"><b>4</b><h3>Settle clearly</h3><p>Review balances, record settlement when payment is received, and keep the monthly history.</p></div></div></section>
+
+    <section class="border-y border-ink/10 landing-on-dark"><div class="max-w-5xl mx-auto px-4 sm:px-5 py-14 grid lg:grid-cols-[1fr_1.2fr] gap-8"><div><p class="landing-kicker landing-kicker-on-dark">RECEIPT SCANNING</p><h2 class="landing-heading mt-3">Use Google AI Studio when you need extra receipt help.</h2></div><div class="text-sm leading-6"><p>ShareSquad first tries local receipt reading. If the receipt is unclear, you can optionally connect your own Google AI Studio API key for Gemini-powered extraction.</p><ol class="landing-list mt-4"><li>Open <strong>Settings → Receipt scanning</strong>.</li><li>Turn on <strong>Use my own AI API key</strong>.</li><li>Select <strong>Google</strong> and a Gemini model.</li><li>Create an API key in <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a>, then paste it into ShareSquad and save.</li></ol><p class="landing-note mt-4 text-xs">Google controls its own free-tier availability and limits. Your key is only used when receipt fields need help, and receipt details are always shown for you to review before saving.</p></div></div></section>
+
+    <section id="faq" class="max-w-4xl mx-auto px-4 sm:px-5 py-14"><p class="landing-kicker">FAQ</p><h2 class="landing-heading mt-3">Questions people usually ask.</h2><div class="mt-7 space-y-3"><details class="landing-faq"><summary>Does everyone need an account?</summary><p>Yes — everyone needs a ShareSquad account to use the app. You can still invite people to a group before they have one. They need an account to open the group, add expenses (when allowed), and see their own balances. Guests without an account cannot use the group dashboard.</p></details><details class="landing-faq"><summary>Can I add an expense without a receipt?</summary><p>Yes. Choose manual entry, enter the details, select the payer and participants, then save. A receipt is optional.</p></details><details class="landing-faq"><summary>How does ShareSquad decide who owes whom?</summary><p>Each expense records who paid and each participant’s share. The group balance is calculated from every saved expense in that period.</p></details><details class="landing-faq"><summary>Can different currencies be used?</summary><p>Yes. Expenses can be recorded in supported currencies. Groups can use a chosen settlement currency when reviewing balances.</p></details><details class="landing-faq"><summary>Will an expense appear for everyone?</summary><p>Group members viewing the same group receive live updates after a saved change. A fallback refresh check also keeps pages current.</p></details><details class="landing-faq"><summary>Is receipt scanning automatic?</summary><p>ShareSquad suggests details from a receipt, but you confirm or correct the information before the expense is saved.</p></details><details class="landing-faq"><summary>How are passwords and API keys stored?</summary><p>Passwords are never stored in plain text. They are saved as a one-way bcrypt hash, so ShareSquad can check a sign-in without being able to recover the original password. Optional AI receipt-scanning API keys are encrypted at rest on the server and are not shown again in Settings after you save them. New passwords must include at least 8 characters, 1 uppercase letter, 2 numbers, and 1 special character. More detail is in the <a href="/privacy.html">Privacy Policy</a>.</p></details></div></section>
+
+    <section class="max-w-5xl mx-auto px-4 sm:px-5 pb-16"><div class="landing-cta"><div><p class="landing-kicker">READY WHEN YOU ARE</p><h2 class="landing-heading mt-2">Make shared money less awkward.</h2></div><a href="/login.html?mode=signup" class="bb-btn-primary">Create your account</a></div></section>
+  </main>
+
+  <footer class="border-t border-ink/10"><div class="max-w-5xl mx-auto px-4 sm:px-5 py-8 flex flex-col sm:flex-row justify-between gap-4 text-xs text-ink/60"><div><strong class="text-brand">ShareSquad</strong><p class="mt-1">Simple shared expense tracking by Tanish Sheth.</p></div><nav class="flex flex-wrap gap-x-4 gap-y-2"><a href="/about.html">About</a><a href="/help.html">Help</a><a href="/contact.html">Contact</a><a href="/privacy.html">Privacy</a><a href="/terms.html">Terms</a></nav></div></footer>
+  <script src="/api.js?v=20260919g"></script><script>if (ShareSquad.getToken()) { document.querySelectorAll('#signupLink,#heroSignup').forEach((el) => { el.href='/index.html'; el.textContent='Open my dashboard'; }); }</script>
+</body>
+</html>

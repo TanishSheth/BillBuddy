@@ -55,7 +55,19 @@ async function saveProfile() {
   const current = $("#profileCurrentPassword").value;
   const next = $("#profileNewPassword").value;
   if (current) body.current_password = current;
-  if (next) body.new_password = next;
+  if (next) {
+    const strong =
+      next.trim().length >= 8 &&
+      /[A-Z]/.test(next) &&
+      (next.match(/\d/g) || []).length >= 2 &&
+      /[^A-Za-z0-9]/.test(next);
+    if (!strong) {
+      msg.textContent = "New password must be at least 8 characters and include 1 uppercase letter, 2 numbers, and 1 special character.";
+      msg.className = "text-xs font-mono balance-negative";
+      return;
+    }
+    body.new_password = next;
+  }
   try {
     await ShareSquad.api("/auth/me", { method: "PATCH", body: JSON.stringify(body) });
     $("#profileCurrentPassword").value = "";

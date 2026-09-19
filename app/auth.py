@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -18,7 +19,29 @@ from . import models
 
 ALGORITHM = "HS256"
 
+# New / changed passwords must meet this policy. Existing weaker passwords
+# can still sign in until the user resets or updates them.
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_HINT = (
+    "Password must be at least 8 characters and include 1 uppercase letter, "
+    "2 numbers, and 1 special character."
+)
+
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def validate_password_strength(password: str) -> str | None:
+    """Return an error message if the password is too weak, else None."""
+    value = (password or "").strip()
+    if len(value) < PASSWORD_MIN_LENGTH:
+        return PASSWORD_HINT
+    if not re.search(r"[A-Z]", value):
+        return PASSWORD_HINT
+    if len(re.findall(r"\d", value)) < 2:
+        return PASSWORD_HINT
+    if not re.search(r"[^A-Za-z0-9]", value):
+        return PASSWORD_HINT
+    return None
 
 
 def hash_password(password: str) -> str:

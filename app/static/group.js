@@ -1038,7 +1038,7 @@ async function handleReceiptUpload(file) {
 
   const storedGid = ShareSquad.getStoredGroupId();
   if (!storedGid) {
-    window.location.href = "/";
+    window.location.href = "/index.html";
     return;
   }
   state.currentGroupId = Number(storedGid);
