@@ -11,3 +11,6 @@ api/*
 !api/.gitignore
 .DS_Store
 *.log
+
+# Personal notes — never push (DB access / secrets workflow)
+LOCAL_DB_ACCESS.md
