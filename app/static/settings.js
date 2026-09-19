@@ -41,6 +41,7 @@ async function loadProfile() {
   if (me.account.has_avatar) {
     ShareSquad.setAuthImage($("#profileAvatar"), "/auth/me/avatar");
   }
+  $("#removeProfileAvatarBtn")?.classList.toggle("hidden", !me.account.has_avatar);
 }
 
 async function saveProfile() {
@@ -300,10 +301,21 @@ async function clearGroupKey() {
     try {
       await ShareSquad.api("/auth/me/avatar", { method: "POST", body: fd });
       ShareSquad.setAuthImage($("#profileAvatar"), "/auth/me/avatar");
+      $("#removeProfileAvatarBtn")?.classList.remove("hidden");
       ShareSquad.showToast("Photo updated", "success");
     } catch (err) {
       ShareSquad.showToast(err.message, "error");
     }
+  });
+  $("#removeProfileAvatarBtn")?.addEventListener("click", async () => {
+    if (!confirm("Remove your profile photo?")) return;
+    try {
+      await ShareSquad.api("/auth/me/avatar", { method: "DELETE" });
+      const avatar = $("#profileAvatar");
+      avatar.removeAttribute("src"); avatar.classList.add("hidden");
+      $("#removeProfileAvatarBtn").classList.add("hidden");
+      ShareSquad.showToast("Profile photo removed", "success");
+    } catch (err) { ShareSquad.showToast(err.message, "error"); }
   });
 
   await loadProfile();

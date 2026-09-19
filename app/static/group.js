@@ -21,6 +21,10 @@ const state = {
   syncVersion: null,
   syncTimer: null,
   syncBusy: false,
+  eventAbort: null,
+  eventRetryTimer: null,
+  eventRefreshTimer: null,
+  eventsStopped: false,
 };
 
 function gid() {
@@ -74,6 +78,7 @@ async function loadGroup() {
 
   const isOwner = state.myRole === "owner";
   $("#ownerTools")?.classList.toggle("hidden", !isOwner);
+  $("#removeGroupPhotoBtn")?.classList.toggle("hidden", !isOwner || !group.has_cover);
   $("#currentGroupName").textContent = group.name;
   if (group.has_cover) {
     ShareSquad.setAuthImage($("#groupCoverImg"), `/groups/${gid()}/cover`);
@@ -246,21 +251,83 @@ async function pollGroupSync() {
 
 function startGroupSync() {
   stopGroupSync();
+  state.eventsStopped = false;
   pollGroupSync();
-  state.syncTimer = setInterval(pollGroupSync, 2000);
+  // The event stream is immediate. This backup covers a dropped stream and
+  // servers running in more than one process.
+  state.syncTimer = setInterval(pollGroupSync, 5000);
+  connectGroupEvents();
   document.addEventListener("visibilitychange", onSyncVisibility);
 }
 
 function stopGroupSync() {
+  state.eventsStopped = true;
   if (state.syncTimer) {
     clearInterval(state.syncTimer);
     state.syncTimer = null;
   }
+  if (state.eventRetryTimer) {
+    clearTimeout(state.eventRetryTimer);
+    state.eventRetryTimer = null;
+  }
+  state.eventAbort?.abort();
+  state.eventAbort = null;
   document.removeEventListener("visibilitychange", onSyncVisibility);
 }
 
 function onSyncVisibility() {
   if (!document.hidden) pollGroupSync();
+}
+
+function scheduleLiveRefresh() {
+  if (isExpenseFormOpen()) {
+    ShareSquad.showToast("This group changed. Finish or cancel your entry to refresh.", "info");
+    return;
+  }
+  clearTimeout(state.eventRefreshTimer);
+  state.eventRefreshTimer = setTimeout(async () => {
+    if (state.syncBusy) return;
+    state.syncBusy = true;
+    try {
+      await refreshFromServer();
+      ShareSquad.showToast("Group updated just now", "info", 1800);
+    } catch (_) {
+      // The periodic backup will retry if a transient network issue occurs.
+    } finally {
+      state.syncBusy = false;
+    }
+  }, 180);
+}
+
+async function connectGroupEvents() {
+  if (state.eventsStopped || !gid()) return;
+  const controller = new AbortController();
+  state.eventAbort = controller;
+  try {
+    const response = await fetch(`/api/groups/${gid()}/events`, {
+      headers: { Authorization: `Bearer ${ShareSquad.getToken()}` },
+      signal: controller.signal,
+    });
+    if (!response.ok || !response.body) throw new Error("Live updates unavailable");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (!state.eventsStopped) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop() || "";
+      chunks.forEach((chunk) => {
+        if (chunk.startsWith("event: group-change")) scheduleLiveRefresh();
+      });
+    }
+  } catch (_) {
+    // Reconnect below; polling remains active in the meantime.
+  } finally {
+    if (state.eventAbort === controller) state.eventAbort = null;
+    if (!state.eventsStopped) state.eventRetryTimer = setTimeout(connectGroupEvents, 3000);
+  }
 }
 
 function updatePeriodStatus() {
@@ -863,16 +930,26 @@ async function loadMembers() {
       const canRemove = isOwner && !inactive && Number(m.id) !== Number(state.myMemberId);
       return `
       <div class="member-row ${inactive ? "opacity-50" : ""}">
-        <div>
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="avatar-initials">${ShareSquad.initials(m.display_name)}</span>
+          ${m.has_avatar ? `<img class="person-avatar hidden" data-member-avatar="${m.id}" alt="${ShareSquad.escapeHtml(m.display_name)}">` : ""}
+          <div>
           <span class="font-bold text-ink">${ShareSquad.escapeHtml(m.display_name)}</span>
           ${m.role === "owner" ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-brand/10 text-brand font-bold ml-1.5 uppercase">Owner</span>' : ""}
           ${inactive ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-ink/10 text-ink/50 font-bold ml-1.5 uppercase">Removed</span>' : ""}
           <span class="member-email">${ShareSquad.escapeHtml(m.email)}</span>
+          </div>
         </div>
         ${canRemove ? `<button type="button" class="remove-member bb-btn-secondary !py-1 !px-2 text-[10px] text-stamp border-stamp/30" data-id="${m.id}" data-name="${ShareSquad.escapeHtml(m.display_name)}">Remove</button>` : ""}
       </div>`;
     })
     .join("");
+
+  list.querySelectorAll("[data-member-avatar]").forEach((img) => {
+    ShareSquad.setAuthImage(img, `/groups/${gid()}/members/${img.dataset.memberAvatar}/avatar`).then(() => {
+      if (!img.classList.contains("hidden")) img.previousElementSibling?.classList.add("hidden");
+    });
+  });
 
   list.querySelectorAll(".remove-member").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -1027,6 +1104,7 @@ async function handleReceiptUpload(file) {
     syncExpenseCurrencyUI();
     applyDefaultSplit();
     renderSplitOptions();
+    requestAnimationFrame(() => { $("#extractionPanel").scrollIntoView({ behavior: "smooth", block: "start" }); setTimeout(() => $("#f_store").focus(), 300); });
   });
 
   $("#cancelEditBtn").addEventListener("click", cancelEdit);
@@ -1059,6 +1137,17 @@ async function handleReceiptUpload(file) {
     e.preventDefault();
     e.stopPropagation();
     $("#groupCoverInput")?.click();
+  });
+  $("#removeGroupPhotoBtn")?.addEventListener("click", async () => {
+    if (!confirm("Remove this group photo?")) return;
+    try {
+      const updated = await ShareSquad.api(`/groups/${gid()}/cover`, { method: "DELETE" });
+      state.group = updated;
+      $("#groupCoverImg").removeAttribute("src");
+      $("#groupCoverImg").classList.add("hidden");
+      $("#removeGroupPhotoBtn").classList.add("hidden");
+      ShareSquad.showToast("Group photo removed", "success");
+    } catch (err) { ShareSquad.showToast(err.message, "error"); }
   });
   $("#renameGroupForm")?.addEventListener("submit", submitRenameGroup);
   $("#cancelRenameGroupBtn")?.addEventListener("click", closeRenameGroupModal);
@@ -1163,6 +1252,7 @@ async function handleReceiptUpload(file) {
     ShareSquad.removeStoredGroupId();
     window.location.href = "/login.html";
   });
+
 
   await loadGroupSettings();
   await loadGroup();

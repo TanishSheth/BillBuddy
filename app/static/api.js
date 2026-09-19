@@ -44,6 +44,10 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function initials(name) {
+  return String(name || "?").trim().split(/\s+/).slice(0, 2).map((part) => part[0] || "").join("").toUpperCase() || "?";
+}
+
 function showToast(msg, type = "info", duration = 3500) {
   let container = $("#toastContainer");
   if (!container) {
@@ -258,12 +262,24 @@ async function setAuthImage(imgEl, path) {
     const url = URL.createObjectURL(blob);
     imgEl.dataset.blobUrl = url;
     imgEl.src = url;
+    imgEl.draggable = false;
+    imgEl.classList.add("protected-image");
     imgEl.classList.remove("hidden");
   } catch (err) {
     imgEl.removeAttribute("src");
     imgEl.classList.add("hidden");
   }
 }
+
+// This blocks ordinary browser save, drag, and mobile callout affordances for
+// private profile/group photos. It cannot and should not claim to stop a
+// screenshot or a determined user using developer tools.
+document.addEventListener("contextmenu", (event) => {
+  if (event.target.closest("img.protected-image")) event.preventDefault();
+});
+document.addEventListener("dragstart", (event) => {
+  if (event.target.closest("img.protected-image")) event.preventDefault();
+});
 
 function bindReceiptCamera(opts) {
   const modal = $(opts.modalId || "#liveCameraModal");
@@ -363,6 +379,7 @@ window.ShareSquad = {
   formatMoney,
   formatDate,
   escapeHtml,
+  initials,
   CURRENCIES,
   CURRENCY_SYMBOLS,
   currencySymbol,

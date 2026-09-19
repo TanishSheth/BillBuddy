@@ -40,6 +40,7 @@ body {
   padding-bottom: var(--safe-bottom);
 }
 
+
 .bb-bg { background-color: var(--paper); }
 .text-ink { color: var(--ink); }
 .text-brand { color: var(--brand); }
@@ -72,6 +73,20 @@ body {
   font-weight: 700;
   box-shadow: 0 1px 3px rgba(15, 118, 110, 0.25);
 }
+
+/* Match the Group tab strip: navigation remains one row and can be swiped or
+   horizontally scrolled when a smaller screen cannot fit every destination. */
+.site-nav {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  scroll-behavior: smooth;
+  overscroll-behavior-x: contain;
+}
+.site-nav::-webkit-scrollbar { display: none; }
+.site-nav .nav-tab { flex: 0 0 auto; }
 
 .font-mono { font-family: 'Space Mono', monospace; }
 
@@ -589,6 +604,33 @@ label.receipt-source-btn {
   height: 22px;
   border-radius: 999px;
 }
+.avatar-initials,
+.person-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.avatar-initials {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--brand);
+  color: #fff;
+  font-family: 'Space Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+.person-avatar { object-fit: cover; border: 1px solid var(--line); }
+.avatar-initials-small { width: 22px; height: 22px; font-size: 8px; }
+
+/* Display-only private photos: discourage casual copying in desktop and mobile browsers. */
+img.protected-image {
+  -webkit-touch-callout: none;
+  -webkit-user-drag: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
 
 .owner-tools {
   display: flex;
@@ -645,16 +687,20 @@ label.receipt-source-btn {
   .site-nav {
     order: 3;
     width: 100%;
-    justify-content: stretch;
+    justify-content: flex-start;
     margin-top: 2px;
   }
   .site-nav .nav-tab {
-    flex: 1;
+    /* Keep the original equal-width look when there is room, but do not let
+       labels shrink below a usable button width on narrow displays. */
+    flex: 1 0 175px;
     justify-content: center;
     padding: 8px 8px;
   }
   .site-nav .nav-tab span {
-    display: none;
+    display: inline;
+    font-size: 9px;
+    white-space: nowrap;
   }
   .modal-overlay {
     align-items: flex-end;

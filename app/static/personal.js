@@ -374,5 +374,15 @@ async function submitExpenseForm(e) {
     window.location.href = "/login.html";
   });
 
+
+  try {
+    const me = await ShareSquad.api("/auth/me");
+    $("#headerInitials").textContent = ShareSquad.initials(me.account.display_name);
+    if (me.account.has_avatar) {
+      ShareSquad.setAuthImage($("#headerAvatar"), "/auth/me/avatar");
+      $("#headerInitials").classList.add("hidden");
+    }
+  } catch (_err) { /* Page data still provides the useful error state. */ }
+
   await loadPersonalSummary(initialMonth);
 })();

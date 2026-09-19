@@ -96,6 +96,8 @@ class MemberOut(BaseModel):
     email: str
     role: str
     is_active: bool = True
+    account_id: Optional[int] = None
+    has_avatar: bool = False
 
 
 class InviteByEmailRequest(BaseModel):
@@ -157,6 +159,7 @@ class QuickSplitParticipantOut(BaseModel):
     payment_marked_at: Optional[datetime] = None
     is_me: bool = False
     invite_token: Optional[str] = None
+    has_avatar: bool = False
 
 
 class QuickSplitJoinRequest(BaseModel):
@@ -176,6 +179,7 @@ class QuickSplitOut(BaseModel):
     payer_name: str
     payer_account_id: int
     payer_email: Optional[str] = None
+    payer_has_avatar: bool = False
     invite_code: str
     status: str
     created_at: datetime

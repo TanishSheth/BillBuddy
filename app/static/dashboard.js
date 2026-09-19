@@ -120,7 +120,9 @@ async function loadDashboard() {
     if (greeting) greeting.textContent = me.account.display_name;
     if (me.account.has_avatar) {
       ShareSquad.setAuthImage($("#headerAvatar"), "/auth/me/avatar");
+      $("#headerInitials")?.classList.add("hidden");
     }
+    if ($("#headerInitials")) $("#headerInitials").textContent = ShareSquad.initials(me.account.display_name);
     const [groups, quickSplits] = await Promise.all([ShareSquad.api("/groups"), ShareSquad.api("/quick-splits")]);
     renderGroups(groups);
     renderQuickSplits(quickSplits);
@@ -182,4 +184,8 @@ async function submitCreateGroup(e) {
 
   ShareSquad.fillAllCurrencySelects();
   await loadDashboard();
+  if (new URLSearchParams(location.search).get("createGroup") === "1") {
+    history.replaceState({}, "", "/");
+    showCreateGroupModal();
+  }
 })();

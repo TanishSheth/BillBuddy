@@ -5,13 +5,17 @@ import logging
 import secrets
 import time
 import hashlib
+import asyncio
+import threading
+import io
 from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal
 from calendar import monthrange
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Query, status
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from PIL import Image, ImageOps
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -72,6 +76,24 @@ ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "im
 
 # Simple in-memory rate limiter for auth endpoints: { "ip:endpoint": [timestamps] }
 _RATE_LIMIT_BUCKET: Dict[str, List[float]] = {}
+
+# Per-process live update subscribers. The existing version polling remains as
+# a fallback for disconnected clients and multi-process deployments.
+_GROUP_EVENT_SUBSCRIBERS: Dict[int, List[tuple[asyncio.AbstractEventLoop, asyncio.Queue]]] = {}
+_GROUP_EVENT_LOCK = threading.Lock()
+
+
+def notify_group_change(group_id: int, kind: str = "updated") -> None:
+    """Tell open group pages to refresh after a committed change."""
+    with _GROUP_EVENT_LOCK:
+        subscribers = list(_GROUP_EVENT_SUBSCRIBERS.get(group_id, []))
+    for loop, queue in subscribers:
+        if loop.is_closed():
+            continue
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, kind)
+        except RuntimeError:
+            pass
 
 
 def check_rate_limit(request: Request, limit: int = 15, window_seconds: int = 60) -> None:
@@ -372,9 +394,16 @@ def _save_profile_image(upload: UploadFile, dest_path: str) -> None:
         (".jpg", ".jpeg", ".png", ".webp")
     ):
         raise HTTPException(400, "Use a JPEG, PNG, or WEBP image")
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    with open(dest_path, "wb") as fh:
-        fh.write(contents)
+    # Keep only a display-sized JPEG, never the original upload. This reduces
+    # accidental sharing of high-resolution originals and strips EXIF metadata.
+    try:
+        image = Image.open(io.BytesIO(contents))
+        image = ImageOps.exif_transpose(image).convert("RGB")
+        image.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        image.save(dest_path, format="JPEG", quality=86, optimize=True)
+    except Exception as exc:
+        raise HTTPException(400, "Use a readable JPEG, PNG, or WEBP image") from exc
 
 
 def _public_scan_message(message: Optional[str]) -> Optional[str]:
@@ -706,6 +735,19 @@ def get_my_avatar(account: models.Account = Depends(get_current_account)):
     return FileResponse(path)
 
 
+@app.delete("/api/auth/me/avatar", response_model=schemas.AccountOut)
+def remove_my_avatar(account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    path = getattr(account, "avatar_path", None)
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    account.avatar_path = None
+    db.commit()
+    return schemas.AccountOut(id=account.id, email=account.email, display_name=account.display_name, has_avatar=False)
+
+
 @app.post("/api/auth/forgot-password", response_model=schemas.MessageResponse)
 def forgot_password(
     payload: schemas.ForgotPasswordRequest,
@@ -835,6 +877,7 @@ def _quick_split_out(split: models.QuickSplit, account: models.Account) -> schem
         payer_name=split.payer.display_name if split.payer else "Someone",
         payer_account_id=split.payer_account_id,
         payer_email=split.payer.email if split.payer else None,
+        payer_has_avatar=bool(split.payer and getattr(split.payer, "avatar_path", None) and os.path.exists(split.payer.avatar_path or "")),
         invite_code=split.invite_code,
         status=split.status,
         created_at=split.created_at,
@@ -852,6 +895,7 @@ def _quick_split_out(split: models.QuickSplit, account: models.Account) -> schem
                 payment_marked_at=p.payment_marked_at,
                 is_me=(p.account_id == account.id or p.email.lower() == account.email.lower()),
                 invite_token=p.invite_token,
+                has_avatar=bool(p.account and getattr(p.account, "avatar_path", None) and os.path.exists(p.account.avatar_path or "")),
             )
             for p in split.participants
         ],
@@ -1097,6 +1141,26 @@ def list_friend_settlements(friend_id: int, account: models.Account = Depends(ge
     return [_friend_settlement_out(row) for row in rows]
 
 
+@app.get("/api/friends/{friend_id}/avatar")
+def get_friend_avatar(friend_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    if friend_id == account.id:
+        target = account
+    else:
+        related = db.query(models.QuickSplit).outerjoin(models.QuickSplitParticipant).filter(
+            or_(
+                (models.QuickSplit.payer_account_id == account.id) & (models.QuickSplitParticipant.account_id == friend_id),
+                (models.QuickSplit.payer_account_id == friend_id) & (models.QuickSplitParticipant.account_id == account.id),
+            )
+        ).first()
+        if not related:
+            raise HTTPException(403, "You do not have access to this friend's profile photo")
+        target = db.query(models.Account).get(friend_id)
+    path = getattr(target, "avatar_path", None)
+    if not path or not os.path.exists(path):
+        raise HTTPException(404, "No profile photo")
+    return FileResponse(path)
+
+
 @app.post("/api/friends/{friend_id}/settlements/confirm", response_model=schemas.FriendSettlementOut)
 def confirm_friend_settlement(friend_id: int, payload: schemas.FriendSettlementConfirm, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
     if friend_id == account.id or not db.query(models.Account).get(friend_id):
@@ -1306,6 +1370,44 @@ def get_group_sync(
     return schemas.GroupSyncOut(version=version)
 
 
+@app.get("/api/groups/{group_id}/events")
+async def stream_group_events(
+    group_id: int,
+    request: Request,
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """Authenticated server-sent events for an open group's live updates."""
+    require_group_member(group_id, account, db)
+    queue: asyncio.Queue[str] = asyncio.Queue(maxsize=20)
+    loop = asyncio.get_running_loop()
+    subscription = (loop, queue)
+    with _GROUP_EVENT_LOCK:
+        _GROUP_EVENT_SUBSCRIBERS.setdefault(group_id, []).append(subscription)
+
+    async def events():
+        try:
+            yield "event: connected\ndata: ready\n\n"
+            while not await request.is_disconnected():
+                try:
+                    kind = await asyncio.wait_for(queue.get(), timeout=25)
+                    yield f"event: group-change\ndata: {kind}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            with _GROUP_EVENT_LOCK:
+                listeners = _GROUP_EVENT_SUBSCRIBERS.get(group_id, [])
+                if subscription in listeners:
+                    listeners.remove(subscription)
+                if not listeners:
+                    _GROUP_EVENT_SUBSCRIBERS.pop(group_id, None)
+
+    return StreamingResponse(
+        events(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/api/groups/{group_id}", response_model=schemas.GroupDetailOut)
 def get_group(
     group_id: int,
@@ -1326,10 +1428,12 @@ def get_group(
     members_out = [
         schemas.MemberOut(
             id=m.id,
+            account_id=m.account_id,
             display_name=m.display_name,
             email=m.account.email,
             role=m.role,
             is_active=_member_is_active(m),
+            has_avatar=bool(getattr(m.account, "avatar_path", None) and os.path.exists(m.account.avatar_path or "")),
         )
         for m in members
     ]
@@ -1391,6 +1495,32 @@ def get_group_cover(
     path = getattr(group, "cover_image_path", None) if group else None
     if not path or not os.path.exists(path):
         raise HTTPException(404, "No group photo")
+    return FileResponse(path)
+
+
+@app.delete("/api/groups/{group_id}/cover", response_model=schemas.GroupDetailOut)
+def remove_group_cover(group_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    require_group_owner(group_id, account, db)
+    group = db.query(models.Group).get(group_id)
+    path = getattr(group, "cover_image_path", None) if group else None
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    if group:
+        group.cover_image_path = None
+        db.commit()
+    return get_group(group_id, account, db)
+
+
+@app.get("/api/groups/{group_id}/members/{member_id}/avatar")
+def get_group_member_avatar(group_id: int, member_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    require_group_member(group_id, account, db)
+    member = db.query(models.GroupMember).filter_by(id=member_id, group_id=group_id).first()
+    path = getattr(getattr(member, "account", None), "avatar_path", None)
+    if not path or not os.path.exists(path):
+        raise HTTPException(404, "No profile photo")
     return FileResponse(path)
 
 
@@ -1954,6 +2084,7 @@ def create_expense(
 
     db.commit()
     db.refresh(expense)
+    notify_group_change(group_id, "expense-created")
     return expense
 
 
@@ -2005,6 +2136,7 @@ def update_expense(
 
     db.commit()
     db.refresh(expense)
+    notify_group_change(group_id, "expense-updated")
     return expense
 
 
@@ -2030,6 +2162,7 @@ def delete_expense(
 
     db.delete(expense)
     db.commit()
+    notify_group_change(group_id, "expense-deleted")
     return {"ok": True, "message": "Expense deleted"}
 
 
@@ -2128,6 +2261,7 @@ def reopen_period(
     period.settled_at = None
     db.commit()
     db.refresh(period)
+    notify_group_change(group_id, "period-reopened")
     return period
 
 
@@ -2182,6 +2316,7 @@ def generate_report(
     period.status = "SETTLED"
     period.settled_at = datetime.now()
     db.commit()
+    notify_group_change(group_id, "period-settled")
 
     return {"ok": True, "filename": filename, "pdf_url": f"/api/groups/{group_id}/reports/{filename}"}
 

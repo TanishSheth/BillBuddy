@@ -1,9 +1,14 @@
 let activeType = "EQUAL";
 let editing = null;
+let groupPeople = [];
 const $money = (v, c) => ShareSquad.formatMoney(v, c);
 const splitId = () => new URLSearchParams(location.search).get("id");
 const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
 const people = () => {
+  if ($("#qsInviteMode").value === "group") {
+    const chosen = groupPeople.find((person) => String(person.accountId) === $("#qsGroupPerson").value);
+    return chosen ? [{ key: `account-${chosen.accountId}`, label: chosen.name, account_id: chosen.accountId }] : [];
+  }
   if ($("#qsInviteMode").value === "links") return [{ key: "person", label: "The other person", email: null }];
   const email = $("#qsEmails").value.trim().toLowerCase();
   return email ? [{ key: email, label: email, email }] : [];
@@ -23,7 +28,7 @@ function renderValues(saved = {}) {
 function chooseType(type, saved = {}) { activeType = type; $$("#qsSplitType .split-type-pill").forEach((b) => b.classList.toggle("active", b.dataset.type === type)); renderValues(saved); }
 function payload() {
   const values = Object.fromEntries($$(".split-value").map((el) => [el.dataset.key, el.value === "" ? null : Number(el.value)]));
-  return { title: $("#qsTitle").value.trim(), total_amount: Number($("#qsAmount").value), currency: $("#qsCurrency").value, bill_date: $("#qsDate").value, category: $("#qsCategory").value, split_type: activeType, payer_value: activeType === "EQUAL" ? null : values.payer, participants: people().map((person) => ({ email: person.email, label: person.label, value: activeType === "EQUAL" ? null : values[person.key] })) };
+  return { title: $("#qsTitle").value.trim(), total_amount: Number($("#qsAmount").value), currency: $("#qsCurrency").value, bill_date: $("#qsDate").value, category: $("#qsCategory").value, split_type: activeType, payer_value: activeType === "EQUAL" ? null : values.payer, silent_invite: $("#qsInviteMode").value === "group", participants: people().map((person) => ({ email: person.email, account_id: person.account_id, label: person.label, value: activeType === "EQUAL" ? null : values[person.key] })) };
 }
 function render(split) {
   editing = null; showCreate(false); $("#detailTitle").textContent = split.title; $("#detailMeta").textContent = `${ShareSquad.formatDate(split.bill_date)} · ${split.category} · ${split.split_type.toLowerCase()} split`; $("#detailStatus").textContent = split.status === "SETTLED" ? "Settled" : "Open"; $("#detailPayer").innerHTML = `${ShareSquad.escapeHtml(split.payer_name)} paid · their share ${$money(split.payer_share_amount, split.currency)}`; $("#detailTotal").innerHTML = $money(split.total_amount, split.currency);
@@ -40,11 +45,21 @@ function openEdit(split) {
 }
 async function load() { if (!splitId()) return showCreate(true); try { render(await ShareSquad.api(`/quick-splits/${splitId()}`)); } catch (err) { ShareSquad.showToast(err.message, "error"); } }
 
-function toggleInviteMode() { const byLinks = $("#qsInviteMode").value === "links"; $("#qsEmailsWrap").classList.toggle("hidden", byLinks); renderValues(); }
+function toggleInviteMode() { const mode = $("#qsInviteMode").value; $("#qsEmailsWrap").classList.toggle("hidden", mode !== "email"); $("#qsGroupPeopleWrap").classList.toggle("hidden", mode !== "group"); $("#qsInviteHelp").textContent = mode === "group" ? "Choose an existing group member to add them directly." : mode === "email" ? "We will send them an invitation by email." : "A private link is easiest when you do not know their email address."; renderValues(); }
+async function loadGroupPeople() {
+  const [me, groups] = await Promise.all([ShareSquad.api("/auth/me"), ShareSquad.api("/groups")]);
+  const details = await Promise.all(groups.map((group) => ShareSquad.api(`/groups/${group.id}`).catch(() => null)));
+  const seen = new Set();
+  groupPeople = details.flatMap((group) => (group?.members || []).filter((member) => member.account_id && member.account_id !== me.account.id && !seen.has(member.account_id) && (seen.add(member.account_id) || true)).map((member) => ({ accountId: member.account_id, name: member.display_name, groupName: group.name })));
+  const select = $("#qsGroupPerson");
+  select.innerHTML = `<option value="">Choose a person</option>${groupPeople.map((person) => `<option value="${person.accountId}">${ShareSquad.escapeHtml(person.name)} · ${ShareSquad.escapeHtml(person.groupName)}</option>`).join("")}`;
+  if (!groupPeople.length) { select.innerHTML = '<option value="">No other group members yet</option>'; }
+}
 $("#qsInviteMode")?.addEventListener("change", toggleInviteMode);
+$("#qsGroupPerson")?.addEventListener("change", () => renderValues());
 $("#qsEmails")?.addEventListener("input", () => renderValues());
 $$("#qsSplitType .split-type-pill").forEach((b) => b.onclick = () => chooseType(b.dataset.type));
 $("#quickSplitForm")?.addEventListener("submit", async (event) => { event.preventDefault(); const msg = $("#qsMsg"); try { const split = editing ? await ShareSquad.api(`/quick-splits/${editing.id}`, { method: "PUT", body: JSON.stringify(payload()) }) : await ShareSquad.api("/quick-splits", { method: "POST", body: JSON.stringify(payload()) }); history.replaceState({}, "", `/quick-split.html?id=${split.id}`); render(split); ShareSquad.showToast("Quick split saved", "success"); } catch (err) { msg.textContent = err.message; msg.className = "text-xs font-mono balance-negative"; } });
 $("#copyShareLink")?.addEventListener("click", async () => { await navigator.clipboard.writeText($("#shareLink").value); ShareSquad.showToast("Private invite link copied", "success"); });
-$("#createGroupFromSplit")?.addEventListener("click", async () => { const name = prompt("Name this group", "Shared expenses"); if (!name?.trim()) return; try { const group = await ShareSquad.api("/groups", { method: "POST", body: JSON.stringify({ name: name.trim(), currency: $("#qsCurrency").value || "USD" }) }); ShareSquad.setStoredGroupId(group.id); location.href = "/group.html"; } catch (err) { $("#qsMsg").textContent = err.message; $("#qsMsg").className = "text-xs font-mono balance-negative"; } });
-(async () => { if (!ShareSquad.getToken()) { location.href = "/login.html"; return; } ShareSquad.fillAllCurrencySelects(); if ($("#qsDate")) { $("#qsDate").max = todayISO(); $("#qsDate").value = todayISO(); } toggleInviteMode(); await load(); })();
+$("#createGroupFromSplit")?.addEventListener("click", () => { location.href = "/?createGroup=1"; });
+(async () => { if (!ShareSquad.getToken()) { location.href = "/login.html"; return; } ShareSquad.fillAllCurrencySelects(); if ($("#qsDate")) { $("#qsDate").max = todayISO(); $("#qsDate").value = todayISO(); } await loadGroupPeople(); toggleInviteMode(); await load(); })();
