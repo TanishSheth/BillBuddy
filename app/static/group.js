@@ -25,6 +25,7 @@ const state = {
   eventRetryTimer: null,
   eventRefreshTimer: null,
   eventsStopped: false,
+  isDraft: false,
 };
 
 function gid() {
@@ -61,6 +62,21 @@ function switchTab(tabName) {
   if (tabName === "members") loadMembers();
 }
 
+function applyDraftGroupState() {
+  const activeCount = (state.members || []).filter((member) => member.is_active !== false).length;
+  state.isDraft = activeCount < 2;
+  $("#draftGroupNotice")?.classList.toggle("hidden", !state.isDraft);
+  ["#fileInputGallery", "#fileInputCamera", "#pickCameraBtn", "#manualEntryBtn"].forEach((selector) => {
+    const control = $(selector);
+    if (control) control.disabled = state.isDraft;
+  });
+  const galleryButton = $("#pickGalleryBtn");
+  galleryButton?.classList.toggle("pointer-events-none", state.isDraft);
+  galleryButton?.classList.toggle("opacity-50", state.isDraft);
+  $("#dropzone")?.classList.toggle("opacity-50", state.isDraft);
+  $("#dropzone")?.classList.toggle("pointer-events-none", state.isDraft);
+}
+
 // ---------------------------------------------------------------------------
 // Group & Period Loading
 // ---------------------------------------------------------------------------
@@ -68,6 +84,7 @@ async function loadGroup() {
   const group = await ShareSquad.api(`/groups/${gid()}`);
   state.group = group;
   state.members = group.members;
+  applyDraftGroupState();
 
   const me = state.account;
   const myMem = group.members.find((m) => m.email === me.email);
@@ -600,6 +617,12 @@ function cancelEdit() {
 // Save Expense
 // ---------------------------------------------------------------------------
 async function saveExpense() {
+  if (state.isDraft) {
+    const draftMessage = $("#saveMsg");
+    draftMessage.textContent = "Invite at least one member before adding shared expenses.";
+    draftMessage.className = "text-xs mt-2 font-mono balance-negative";
+    return;
+  }
   const store = $("#f_store").value.trim();
   const billDate = $("#f_date").value;
   const totalAmount = parseFloat($("#f_amount").value);
@@ -983,6 +1006,7 @@ function setScanBusy(on) {
 }
 
 async function handleReceiptUpload(file) {
+  if (state.isDraft) { ShareSquad.showToast("Invite at least one member before adding shared expenses", "info"); return; }
   if (!file) return;
   if (!ShareSquad.isReceiptImageFile(file)) {
     ShareSquad.showToast("Please choose a photo or image file.", "error");

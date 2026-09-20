@@ -270,6 +270,30 @@ class FriendMonthlySettlement(Base):
     settled_at = Column(DateTime, nullable=True)
 
 
+class FriendConnection(Base):
+    """A durable, mutual friendship; REMOVED prevents a group re-adding it."""
+    __tablename__ = "friend_connections"
+    __table_args__ = (UniqueConstraint("account_one_id", "account_two_id", name="uq_friend_connection"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_one_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    account_two_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(20), default="ACTIVE", nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class FriendInvite(Base):
+    __tablename__ = "friend_invites"
+    __table_args__ = (UniqueConstraint("invite_code", name="uq_friend_invite_code"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    inviter_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    email = Column(String(255), nullable=True, index=True)
+    invite_code = Column(String(64), nullable=False, default=generate_invite_code)
+    status = Column(String(20), default="PENDING", nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
 class AccountVendor(Base):
     """Per-account gazetteer: trusted store names learned from saved bills."""
     __tablename__ = "account_vendors"

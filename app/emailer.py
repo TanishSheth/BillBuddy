@@ -135,6 +135,38 @@ If you don't have an account yet, sign up with this email address ({to_email}) a
         raise
 
 
+def send_friend_invite_email(to_email: str, invite_url: str, inviter_name: str) -> bool:
+    """Send a durable Friends-list invitation when SMTP is configured."""
+    if not is_email_configured():
+        return False
+    subject = f"{inviter_name} wants to connect on ShareSquad"
+    text_body = f"""Hi,
+
+{inviter_name} invited you to become Friends on ShareSquad. Once you accept, either of you can start a private one-to-one expense without sending a new invite each time.
+
+Accept the friend invite:
+{invite_url}
+
+— ShareSquad
+"""
+    html_body = f"""<html><body style="font-family:sans-serif;color:#18221B;max-width:560px;">
+<p>Hi,</p><p><strong>{inviter_name}</strong> invited you to become Friends on ShareSquad. Once you accept, either of you can start a private one-to-one expense without sending a new invite each time.</p>
+<p><a href="{invite_url}" style="display:inline-block;padding:10px 18px;background:#0F766E;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold;">Accept friend invite</a></p>
+<p>Or copy this link: <a href="{invite_url}">{invite_url}</a></p>
+<p style="color:#0F766E;font-size:13px;font-weight:bold;">— ShareSquad</p></body></html>"""
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+    try:
+        _send_message(msg, to_email)
+        logger.info("Friend invite email sent to %s", to_email)
+        return True
+    except Exception:
+        logger.exception("Failed to email friend invite to %s", to_email)
+        raise
+
+
 def send_quick_split_email(to_email: str, title: str, amount: str, invite_url: str, inviter_name: str) -> bool:
     """Invite someone to a one-off bill, without describing it as a group."""
     if not is_email_configured():

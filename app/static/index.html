@@ -27,10 +27,10 @@
 
       <nav class="site-nav flex items-center bg-ink/5 p-1 rounded-lg">
         <a href="/index.html" class="nav-tab active">
-          <i data-lucide="users" class="w-3.5 h-3.5"></i> <span>Shared Groups</span>
+          <i data-lucide="layout-dashboard" class="w-3.5 h-3.5"></i> <span>Expenses</span>
         </a>
         <a href="/personal.html" class="nav-tab">
-          <i data-lucide="wallet" class="w-3.5 h-3.5"></i> <span>Personal Tracker</span>
+          <i data-lucide="wallet" class="w-3.5 h-3.5"></i> <span>Personal</span>
         </a>
         <a href="/friends.html" class="nav-tab">
           <i data-lucide="handshake" class="w-3.5 h-3.5"></i> <span>Friends</span>
@@ -54,14 +54,14 @@
   </header>
 
   <main class="page-main max-w-5xl mx-auto px-4 sm:px-5 py-6 sm:py-8 flex-1 w-full">
-    <div class="flex items-center justify-between mb-6 gap-3">
-      <div>
-        <h2 class="font-mono font-bold text-xl text-ink">Shared Expense Groups</h2>
-        <p class="text-xs text-ink/60 mt-0.5">Split bills, track balances, and settle up with people you travel or live with.</p>
+    <div class="flex justify-center mb-6 gap-3">
+      <div class="flex flex-wrap gap-2">
+        <a href="/friends.html" class="bb-btn-secondary !py-2 !px-3 text-[11px]"><i data-lucide="handshake" class="w-3.5 h-3.5"></i> Split with a friend</a>
+        <button id="splitGroupBtn" type="button" class="bb-btn-primary !py-2 !px-3 text-[11px]"><i data-lucide="users" class="w-3.5 h-3.5"></i> Split with a group</button>
       </div>
     </div>
     <div class="how-it-works mb-5">
-      <p><strong>Start here:</strong> Create a group → invite people from Members → scan a receipt on Add / Scan → check Balances to see who pays whom. Open the gear icon for your photo, name, email, and receipt API key.</p>
+      <p><strong>Choose how to split:</strong> <strong>Split with a friend</strong> opens your reusable Friends list for private two-person bills. <strong>Split with a group</strong> creates or opens a multi-person shared group. Your personal spending stays separate in <a href="/personal.html" class="text-brand underline">Personal</a>.</p>
     </div>
 
     <div id="groupsGrid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
@@ -74,6 +74,15 @@
         <i data-lucide="plus" class="w-4 h-4"></i> Create First Group
       </button>
     </div>
+
+    <section class="mt-8 pt-6 border-t-2 border-ink/10">
+      <div id="friendSplitsGrid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+      <div id="emptyFriendSplits" class="hidden bb-card text-center py-7">
+        <p class="font-mono font-bold text-sm">No friend expenses yet</p>
+        <p class="text-xs text-ink/60 mt-1">Choose a friend first, then create a private bill.</p>
+        <a href="/friends.html" class="bb-btn-secondary inline-flex mt-3 !py-1.5 !px-3 text-[11px]">Choose a friend</a>
+      </div>
+    </section>
   </main>
 
   <div id="createGroupModal" class="modal-overlay hidden">

@@ -60,6 +60,7 @@ from .pdf_gen import generate_monthly_pdf, generate_personal_pdf, pdf_reports_av
 from .emailer import (
     is_email_configured,
     send_invite_email,
+    send_friend_invite_email,
     send_quick_split_email,
     send_monthly_report_email,
     send_password_reset_email,
@@ -390,6 +391,16 @@ def _personal_uploads_dir(account_id: int) -> str:
 
 def _member_is_active(member: models.GroupMember) -> bool:
     return getattr(member, "is_active", True) is not False
+
+
+def _require_shareable_group(db: Session, group_id: int) -> None:
+    """A shared expense needs an owner plus at least one active other member."""
+    active_members = db.query(models.GroupMember.id).filter(
+        models.GroupMember.group_id == group_id,
+        or_(models.GroupMember.is_active.is_(True), models.GroupMember.is_active.is_(None)),
+    ).count()
+    if active_members < 2:
+        raise HTTPException(400, "Invite at least one member before adding shared expenses")
 
 
 def _save_profile_image(upload: UploadFile, dest_path: str) -> None:
@@ -1008,6 +1019,11 @@ def create_quick_split(
             raise HTTPException(404, "Person who paid was not found")
         if not any(raw.account_id == account.id or (raw.email and str(raw.email).lower() == account.email.lower()) for raw in payload.participants):
             raise HTTPException(400, "When your friend paid, your own account must be the other person in the split")
+    # A direct split confirms an existing-account connection as a reusable
+    # Friend, so later bills never need another email invitation.
+    for raw in payload.participants:
+        if raw.account_id and raw.account_id != account.id:
+            _activate_friendship(db, account.id, raw.account_id)
     split = models.QuickSplit(
         title=payload.title.strip(), total_amount=total,
         currency=_normalize_currency(payload.currency, "USD"), bill_date=payload.bill_date,
@@ -1138,6 +1154,125 @@ def _friend_month_balance(db: Session, account_id: int, friend_id: int, month_ke
     return balance.quantize(Decimal("0.01")), currency
 
 
+def _friend_pair(first_id: int, second_id: int) -> tuple[int, int]:
+    if first_id == second_id:
+        raise HTTPException(400, "You cannot add yourself as a friend")
+    return tuple(sorted((first_id, second_id)))
+
+
+def _activate_friendship(db: Session, first_id: int, second_id: int) -> models.FriendConnection:
+    one, two = _friend_pair(first_id, second_id)
+    row = db.query(models.FriendConnection).filter_by(account_one_id=one, account_two_id=two).first()
+    if row is None:
+        row = models.FriendConnection(account_one_id=one, account_two_id=two, status="ACTIVE")
+        db.add(row)
+    elif row.status != "REMOVED":
+        row.status = "ACTIVE"
+    return row
+
+
+def _sync_group_friends(db: Session, account_id: int) -> None:
+    """Members become durable friends unless either side explicitly removed them."""
+    group_ids = [row[0] for row in db.query(models.GroupMember.group_id).filter_by(account_id=account_id, is_active=True).all()]
+    if not group_ids:
+        return
+    others = db.query(models.GroupMember.account_id).filter(
+        models.GroupMember.group_id.in_(group_ids), models.GroupMember.account_id != account_id,
+        models.GroupMember.is_active.is_(True),
+    ).distinct().all()
+    for (other_id,) in others:
+        _activate_friendship(db, account_id, other_id)
+    db.commit()
+
+
+def _sync_quick_split_friends(db: Session, account_id: int) -> None:
+    """Bring existing one-to-one split relationships into the durable list once."""
+    partner_ids = set()
+    payer_rows = db.query(models.QuickSplitParticipant.account_id).join(models.QuickSplit).filter(
+        models.QuickSplit.payer_account_id == account_id,
+        models.QuickSplitParticipant.account_id.isnot(None),
+    ).all()
+    partner_ids.update(row[0] for row in payer_rows if row[0] != account_id)
+    participant_rows = db.query(models.QuickSplit.payer_account_id).join(models.QuickSplitParticipant).filter(
+        models.QuickSplitParticipant.account_id == account_id,
+        models.QuickSplit.payer_account_id.isnot(None),
+    ).all()
+    partner_ids.update(row[0] for row in participant_rows if row[0] != account_id)
+    for partner_id in partner_ids:
+        _activate_friendship(db, account_id, partner_id)
+    if partner_ids:
+        db.commit()
+
+
+@app.get("/api/friends", response_model=list[schemas.FriendOut])
+def list_friends(account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    _sync_group_friends(db, account.id)
+    _sync_quick_split_friends(db, account.id)
+    rows = db.query(models.FriendConnection).filter(
+        or_(models.FriendConnection.account_one_id == account.id, models.FriendConnection.account_two_id == account.id),
+        models.FriendConnection.status == "ACTIVE",
+    ).all()
+    friend_ids = [row.account_two_id if row.account_one_id == account.id else row.account_one_id for row in rows]
+    people = db.query(models.Account).filter(models.Account.id.in_(friend_ids)).all() if friend_ids else []
+    return [schemas.FriendOut(
+        id=person.id, display_name=person.display_name, email=person.email,
+        has_avatar=bool(person.avatar_path and os.path.exists(person.avatar_path)), source="friend",
+    ) for person in sorted(people, key=lambda person: person.display_name.lower())]
+
+
+@app.delete("/api/friends/{friend_id}", response_model=schemas.MessageResponse)
+def remove_friend(friend_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    one, two = _friend_pair(account.id, friend_id)
+    row = db.query(models.FriendConnection).filter_by(account_one_id=one, account_two_id=two).first()
+    if not row:
+        raise HTTPException(404, "Friend not found")
+    row.status = "REMOVED"
+    db.commit()
+    return schemas.MessageResponse(message="Friend removed")
+
+
+@app.post("/api/friends/invites", response_model=schemas.FriendInviteOut)
+def invite_friend(
+    payload: schemas.FriendInviteRequest,
+    request: Request,
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    email = str(payload.email).lower().strip() if payload.email else None
+    if email == account.email.lower():
+        raise HTTPException(400, "You cannot add yourself as a friend")
+    existing = db.query(models.Account).filter_by(email=email).first() if email else None
+    if existing:
+        _activate_friendship(db, account.id, existing.id)
+        db.commit()
+        return schemas.FriendInviteOut(status="ACTIVE", email=email, message=f"{existing.display_name} was added as a friend")
+    invite = models.FriendInvite(inviter_account_id=account.id, email=email)
+    db.add(invite)
+    db.commit(); db.refresh(invite)
+    url = f"{str(request.base_url).rstrip('/')}/friend-join.html?code={invite.invite_code}"
+    email_sent = False
+    if email and is_email_configured():
+        try:
+            email_sent = bool(send_friend_invite_email(email, url, account.display_name))
+        except Exception:
+            logger.exception("Failed to send friend invite email to %s", email)
+    message = "Friend invite emailed." if email_sent else "Friend invite created. Copy the link or send it by email."
+    return schemas.FriendInviteOut(status="PENDING", email=email, invite_url=url, email_sent=email_sent, message=message)
+
+
+@app.post("/api/friends/invites/{invite_code}/accept", response_model=schemas.MessageResponse)
+def accept_friend_invite(invite_code: str, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    invite = db.query(models.FriendInvite).filter_by(invite_code=invite_code, status="PENDING").first()
+    if not invite:
+        raise HTTPException(404, "Friend invite not found or already used")
+    if invite.email and invite.email.lower() != account.email.lower():
+        raise HTTPException(403, "This friend invite was sent to another email address")
+    _activate_friendship(db, invite.inviter_account_id, account.id)
+    invite.status = "ACCEPTED"
+    db.commit()
+    return schemas.MessageResponse(message="You are now friends")
+
+
 def _friend_settlement_out(row: models.FriendMonthlySettlement) -> schemas.FriendSettlementOut:
     return schemas.FriendSettlementOut(
         month_key=row.month_key, payer_account_id=row.payer_account_id, recipient_account_id=row.recipient_account_id,
@@ -1158,12 +1293,8 @@ def get_friend_avatar(friend_id: int, account: models.Account = Depends(get_curr
     if friend_id == account.id:
         target = account
     else:
-        related = db.query(models.QuickSplit).outerjoin(models.QuickSplitParticipant).filter(
-            or_(
-                (models.QuickSplit.payer_account_id == account.id) & (models.QuickSplitParticipant.account_id == friend_id),
-                (models.QuickSplit.payer_account_id == friend_id) & (models.QuickSplitParticipant.account_id == account.id),
-            )
-        ).first()
+        one, two = _friend_pair(account.id, friend_id)
+        related = db.query(models.FriendConnection).filter_by(account_one_id=one, account_two_id=two, status="ACTIVE").first()
         if not related:
             raise HTTPException(403, "You do not have access to this friend's profile photo")
         target = db.query(models.Account).get(friend_id)
@@ -1946,6 +2077,7 @@ async def upload_receipt(
     db: Session = Depends(get_db),
 ):
     require_group_member(group_id, account, db)
+    _require_shareable_group(db, group_id)
 
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in [".jpg", ".jpeg", ".png", ".webp", ".heic"]:
@@ -2082,6 +2214,7 @@ def create_expense(
     db: Session = Depends(get_db),
 ):
     require_group_member(group_id, account, db)
+    _require_shareable_group(db, group_id)
     group = db.query(models.Group).get(group_id)
     if not group:
         raise HTTPException(404, "Group not found")
@@ -2161,6 +2294,7 @@ def update_expense(
     db: Session = Depends(get_db),
 ):
     require_group_member(group_id, account, db)
+    _require_shareable_group(db, group_id)
     expense = db.query(models.Expense).get(expense_id)
     if not expense or expense.period.group_id != group_id:
         raise HTTPException(404, "Expense not found")

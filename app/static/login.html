@@ -59,6 +59,7 @@
     const PENDING_INVITE_KEY = "sharesquad_pending_invite";
     const PENDING_QUICK_SPLIT_KEY = "sharesquad_pending_quick_split";
     const PENDING_QUICK_SPLIT_SLOT_KEY = "sharesquad_pending_quick_split_slot";
+    const PENDING_FRIEND_INVITE_KEY = "sharesquad_pending_friend_invite";
 
     if (ShareSquad.getToken()) {
       window.location.href = "/index.html";
@@ -218,6 +219,16 @@
             const quickSplit = await quickRes.json();
             redirect = `/quick-split.html?id=${quickSplit.id}`;
           }
+        }
+
+        const friendInviteCode = localStorage.getItem(PENDING_FRIEND_INVITE_KEY);
+        if (friendInviteCode) {
+          localStorage.removeItem(PENDING_FRIEND_INVITE_KEY);
+          const friendRes = await fetch(`/api/friends/invites/${encodeURIComponent(friendInviteCode)}/accept`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${data.access_token}` },
+          });
+          if (friendRes.ok) redirect = "/friends.html";
         }
 
         window.location.href = redirect;

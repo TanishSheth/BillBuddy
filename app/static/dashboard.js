@@ -20,8 +20,40 @@ function openQuickSplit(id) {
   window.location.href = `/quick-split.html?id=${encodeURIComponent(id)}`;
 }
 
-function renderQuickSplits(_splits) {
-  // One-to-one expenses live exclusively in the Friends tab.
+function renderQuickSplits(_splits, contacts = []) {
+  const grid = $("#friendSplitsGrid");
+  const empty = $("#emptyFriendSplits");
+  const activeFriendIds = new Set(contacts.map((person) => person.id));
+  const splits = (_splits || []).filter((split) => {
+    const otherId = split.is_payer ? split.participants?.find((person) => !person.is_me)?.account_id : split.payer_account_id;
+    return otherId && activeFriendIds.has(otherId);
+  });
+  if (!splits.length) { grid.innerHTML = ""; empty.classList.remove("hidden"); return; }
+  empty.classList.add("hidden");
+  const people = new Map();
+  splits.forEach((split) => {
+    const other = split.is_payer ? split.participants?.find((person) => !person.is_me) : { id: split.payer_account_id, display_name: split.payer_name || "Friend" };
+    const personName = other?.display_name || other?.email || "Friend";
+    const key = other?.account_id || other?.id || `split-${split.id}`;
+    const entry = people.get(key) || { id: other?.account_id || other?.id || null, name: personName, balance: 0, count: 0, currency: split.currency || "USD", splitId: split.id };
+    const share = Number(split.participants?.find((person) => split.is_payer ? !person.is_me : person.is_me)?.share_amount || 0);
+    entry.balance += split.is_payer ? share : -share;
+    entry.count += 1;
+    people.set(key, entry);
+  });
+  grid.innerHTML = [...people.values()].map((person) => {
+    const amount = ShareSquad.formatMoney(Math.abs(person.balance), person.currency);
+    const status = person.balance > 0 ? `${ShareSquad.escapeHtml(person.name)} owes you ${amount}` : person.balance < 0 ? `You owe ${ShareSquad.escapeHtml(person.name)} ${amount}` : "No one owes anything";
+    const tone = person.balance > 0 ? "bg-green-600/10 border-green-700/30" : person.balance < 0 ? "bg-red-600/10 border-red-700/30" : "bg-ink/5 border-ink/15";
+    const href = person.id ? `/friends.html?friend=${encodeURIComponent(person.id)}` : `/quick-split.html?id=${encodeURIComponent(person.splitId)}`;
+    return `<div class="bb-card friend-split-card flex flex-col justify-between gap-3 border-l-4 border-brand/60 cursor-pointer ${tone}" data-href="${href}" role="link" tabindex="0"><div><p class="font-mono text-[10px] tracking-widest text-brand">FRIEND SPLITS</p><h3 class="font-mono font-bold text-base leading-tight text-ink mt-1">${ShareSquad.escapeHtml(person.name)}</h3><p class="text-sm font-semibold mt-3">${status}</p><p class="text-[10px] font-mono mt-2 text-ink/55">${person.count} bill${person.count === 1 ? "" : "s"} in combined history</p></div><a class="bb-btn-secondary w-full !py-1.5 text-[11px]" href="${href}"><i data-lucide="receipt-text" class="w-3.5 h-3.5"></i> Open friend details</a></div>`;
+  }).join("");
+  grid.querySelectorAll(".friend-split-card").forEach((card) => {
+    const open = () => { window.location.href = card.dataset.href; };
+    card.addEventListener("click", (event) => { if (!event.target.closest("a, button")) open(); });
+    card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
+  });
+  lucide.createIcons();
 }
 
 function renderGroups(groups) {
@@ -38,7 +70,7 @@ function renderGroups(groups) {
   empty.classList.add("hidden");
   grid.innerHTML = groups
     .map(
-      (g) => `<div class="bb-card group-card flex flex-col justify-between gap-3">
+      (g) => `<div class="bb-card group-card flex flex-col justify-between gap-3 cursor-pointer" data-id="${g.id}" role="link" tabindex="0">
         <div>
           <div class="flex items-start justify-between gap-2">
             <div class="flex items-start gap-2 min-w-0">
@@ -51,6 +83,7 @@ function renderGroups(groups) {
             <span>${g.member_count} member${g.member_count === 1 ? "" : "s"}</span>
             ${g.role === "owner" ? ' &bull; <span class="text-brand font-bold">Owner</span>' : ""}
           </p>
+          ${g.member_count < 2 ? '<span class="inline-flex mt-2 text-[10px] font-mono font-bold text-amber-800 bg-amber-100 border border-amber-300 rounded px-1.5 py-0.5">DRAFT · INVITE A MEMBER TO START SPLITTING</span>' : ""}
           <p class="text-[10px] text-ink/40 mt-1.5 font-mono">Created ${ShareSquad.formatDate(g.created_at)}</p>
         </div>
         <div class="flex gap-2 pt-3 border-t border-ink/10">
@@ -80,6 +113,12 @@ function renderGroups(groups) {
 
   grid.querySelectorAll(".open-group").forEach((btn) => {
     btn.addEventListener("click", () => openGroup(Number(btn.dataset.id)));
+  });
+
+  grid.querySelectorAll(".group-card").forEach((card) => {
+    const open = () => openGroup(Number(card.dataset.id));
+    card.addEventListener("click", (event) => { if (!event.target.closest("button, a")) open(); });
+    card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
   });
 
   grid.querySelectorAll(".delete-group").forEach((btn) => {
@@ -123,9 +162,9 @@ async function loadDashboard() {
       $("#headerInitials")?.classList.add("hidden");
     }
     if ($("#headerInitials")) $("#headerInitials").textContent = ShareSquad.initials(me.account.display_name);
-    const [groups, quickSplits] = await Promise.all([ShareSquad.api("/groups"), ShareSquad.api("/quick-splits")]);
+    const [groups, quickSplits, friends] = await Promise.all([ShareSquad.api("/groups"), ShareSquad.api("/quick-splits"), ShareSquad.api("/friends")]);
     renderGroups(groups);
-    renderQuickSplits(quickSplits);
+    renderQuickSplits(quickSplits, friends);
   } catch (err) {
     console.error("Failed to load dashboard:", err);
     ShareSquad.showToast(err.message || "Could not load groups", "error");
@@ -167,6 +206,7 @@ async function submitCreateGroup(e) {
   }
 
   $("#newGroupBtn")?.addEventListener("click", showCreateGroupModal);
+  $("#splitGroupBtn")?.addEventListener("click", showCreateGroupModal);
   $("#quickSplitBtn")?.addEventListener("click", () => { window.location.href = "/quick-split.html"; });
   $("#settingsBtn")?.addEventListener("click", () => { window.location.href = "/settings.html"; });
   $("#createFirstGroupBtn")?.addEventListener("click", showCreateGroupModal);

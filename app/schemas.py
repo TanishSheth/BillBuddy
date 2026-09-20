@@ -204,6 +204,26 @@ class FriendSettlementConfirm(BaseModel):
     action: str = Field(pattern=r"^(paid|received)$")
 
 
+class FriendOut(BaseModel):
+    id: int
+    display_name: str
+    email: str
+    has_avatar: bool = False
+    source: str = "friend"
+
+
+class FriendInviteRequest(BaseModel):
+    email: Optional[EmailStr] = None
+
+
+class FriendInviteOut(BaseModel):
+    status: str
+    email: Optional[str] = None
+    invite_url: Optional[str] = None
+    email_sent: bool = False
+    message: str
+
+
 # ---------- VLM Extraction ----------
 class ReceiptExtraction(BaseModel):
     store_name: str = Field(description="Name of the store/merchant on the receipt")

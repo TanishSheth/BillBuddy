@@ -34,9 +34,18 @@ def test_full_flow():
     group_id = group["id"]
     print(f"  [PASS] Group created (ID: {group_id}, Currency: {group['currency']})!")
 
-    # 4. Add Group Expense with Percentage Split
+    # 4. Add a second active member. Draft groups cannot hold shared expenses.
+    friend_email = f"friend_{os.getpid()}@gmail.com"
+    r = client.post("/api/auth/register", json={"email": friend_email, "password": "Password12!", "display_name": "Friend"})
+    assert r.status_code == 200, f"Second account creation failed: {r.text}"
+    r = client.post(f"/api/groups/{group_id}/invites", json={"email": friend_email}, headers=headers)
+    assert r.status_code == 200, f"Group invite failed: {r.text}"
+
+    # 5. Add Group Expense with Percentage Split
     me = client.get("/api/auth/me", headers=headers).json()
-    my_member_id = client.get(f"/api/groups/{group_id}", headers=headers).json()["members"][0]["id"]
+    members = client.get(f"/api/groups/{group_id}", headers=headers).json()["members"]
+    my_member_id = next(member["id"] for member in members if member["email"] == email)
+    friend_member_id = next(member["id"] for member in members if member["email"] == friend_email)
 
     exp_payload = {
         "store_name": "Costco Wholesale",
@@ -46,7 +55,7 @@ def test_full_flow():
         "category": "Groceries",
         "split_type": "PERCENTAGE",
         "payer_member_id": my_member_id,
-        "split_details": [{"member_id": my_member_id, "value": 100.0}],
+        "split_details": [{"member_id": my_member_id, "value": 50.0}, {"member_id": friend_member_id, "value": 50.0}],
     }
     r = client.post(f"/api/groups/{group_id}/expenses", json=exp_payload, headers=headers)
     assert r.status_code == 200, f"Expense create failed: {r.text}"
