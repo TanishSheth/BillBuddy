@@ -20,7 +20,7 @@ function openQuickSplit(id) {
   window.location.href = `/quick-split.html?id=${encodeURIComponent(id)}`;
 }
 
-function renderQuickSplits(_splits, contacts = []) {
+function renderQuickSplits(_splits, contacts = [], settledMonthsByFriend = new Map()) {
   const grid = $("#friendSplitsGrid");
   const empty = $("#emptyFriendSplits");
   const activeFriendIds = new Set(contacts.map((person) => person.id));
@@ -37,14 +37,15 @@ function renderQuickSplits(_splits, contacts = []) {
     const key = other?.account_id || other?.id || `split-${split.id}`;
     const entry = people.get(key) || { id: other?.account_id || other?.id || null, name: personName, balance: 0, count: 0, currency: split.currency || "USD", splitId: split.id };
     const share = Number(split.participants?.find((person) => split.is_payer ? !person.is_me : person.is_me)?.share_amount || 0);
-    entry.balance += split.is_payer ? share : -share;
+    const monthKey = String(split.bill_date).slice(0, 7);
+    if (!settledMonthsByFriend.get(entry.id)?.has(monthKey)) entry.balance += split.is_payer ? share : -share;
     entry.count += 1;
     people.set(key, entry);
   });
   grid.innerHTML = [...people.values()].map((person) => {
     const amount = ShareSquad.formatMoney(Math.abs(person.balance), person.currency);
     const status = person.balance > 0 ? `${ShareSquad.escapeHtml(person.name)} owes you ${amount}` : person.balance < 0 ? `You owe ${ShareSquad.escapeHtml(person.name)} ${amount}` : "No one owes anything";
-    const tone = person.balance > 0 ? "bg-green-600/10 border-green-700/30" : person.balance < 0 ? "bg-red-600/10 border-red-700/30" : "bg-ink/5 border-ink/15";
+    const tone = person.balance > 0 ? "bg-green-600/10 border-green-700/30" : person.balance < 0 ? "bg-red-600/10 border-red-700/30" : "bg-slate-500/[0.04] border-slate-400/20";
     const href = person.id ? `/friends.html?friend=${encodeURIComponent(person.id)}` : `/quick-split.html?id=${encodeURIComponent(person.splitId)}`;
     return `<div class="bb-card friend-split-card flex flex-col justify-between gap-3 border-l-4 border-brand/60 cursor-pointer ${tone}" data-href="${href}" role="link" tabindex="0"><div><p class="font-mono text-[10px] tracking-widest text-brand">FRIEND SPLITS</p><h3 class="font-mono font-bold text-base leading-tight text-ink mt-1">${ShareSquad.escapeHtml(person.name)}</h3><p class="text-sm font-semibold mt-3">${status}</p><p class="text-[10px] font-mono mt-2 text-ink/55">${person.count} bill${person.count === 1 ? "" : "s"} in combined history</p></div><a class="bb-btn-secondary w-full !py-1.5 text-[11px]" href="${href}"><i data-lucide="receipt-text" class="w-3.5 h-3.5"></i> Open friend details</a></div>`;
   }).join("");
@@ -163,8 +164,10 @@ async function loadDashboard() {
     }
     if ($("#headerInitials")) $("#headerInitials").textContent = ShareSquad.initials(me.account.display_name);
     const [groups, quickSplits, friends] = await Promise.all([ShareSquad.api("/groups"), ShareSquad.api("/quick-splits"), ShareSquad.api("/friends")]);
+    const settlementResults = await Promise.all(friends.map(async (friend) => [friend.id, await ShareSquad.api(`/friends/${friend.id}/settlements`).catch(() => [])]));
+    const settledMonthsByFriend = new Map(settlementResults.map(([friendId, settlements]) => [friendId, new Set(settlements.filter((settlement) => settlement.status === "SETTLED").map((settlement) => settlement.month_key))]));
     renderGroups(groups);
-    renderQuickSplits(quickSplits, friends);
+    renderQuickSplits(quickSplits, friends, settledMonthsByFriend);
   } catch (err) {
     console.error("Failed to load dashboard:", err);
     ShareSquad.showToast(err.message || "Could not load groups", "error");
