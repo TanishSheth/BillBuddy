@@ -78,7 +78,20 @@ def test_full_flow():
     assert balances[0]["converted_currency"] == "INR"
     print(f"  [PASS] Converted balances verified (Net: {balances[0]['net_balance']} USD -> {balances[0]['converted_net_balance']} INR)!")
 
-    # 7. Personal Expense Create & Summary
+    # 7. Removing a member removes their group data from both the member list
+    # and balance calculations. This also protects upgraded databases that
+    # retain old inactive membership rows.
+    r = client.delete(f"/api/groups/{group_id}/members/{friend_member_id}", headers=headers)
+    assert r.status_code == 200, f"Member removal failed: {r.text}"
+    r = client.get(f"/api/groups/{group_id}", headers=headers)
+    assert r.status_code == 200
+    assert all(member["id"] != friend_member_id for member in r.json()["members"])
+    r = client.get(f"/api/groups/{group_id}/periods/2026-09/balances", headers=headers)
+    assert r.status_code == 200
+    assert len(r.json()) == 1 and r.json()[0]["net_balance"] == 0.0
+    print("  [PASS] Removed member and their calculations no longer appear!")
+
+    # 8. Personal Expense Create & Summary
     p_exp = {
         "store_name": "Starbucks Coffee",
         "bill_date": "2026-09-15",

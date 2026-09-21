@@ -12,6 +12,7 @@ ShareSquad Core Money-Splitting Math:
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 import heapq
+from collections import deque
 
 
 def equal_split(
@@ -285,20 +286,26 @@ def graph_constrained_settlements(
     expenses: List[dict],
     balances: Optional[Dict[int, dict]] = None,
 ) -> List[dict]:
-    """
-    Who-pays-whom: only debtor → original payer edges, pruned toward n-1
-    transfers, then a conservation solve. Unmatched leftover nets still
-    settle with the min-transfer matcher so the month always closes.
+    """Settle on original payer edges where possible, with exact cent totals.
+
+    The constrained portion is a max-flow problem: a debtor may pay only an
+    original payer, but no creditor can receive more than their balance.  The
+    previous least-squares approximation enforced only debtor totals, which
+    could overpay one creditor and then ask that creditor to pay another one.
+    Any amount with no valid original-payer path is settled normally.
     """
     if balances is None:
         balances = compute_balances(members, expenses)
 
     names = {m["id"]: m["name"] for m in members}
     user_ids = [m["id"] for m in members]
-    net = {mid: float(balances.get(mid, {}).get("net_balance", 0.0)) for mid in user_ids}
+    net_cents = {
+        mid: int(round(float(balances.get(mid, {}).get("net_balance", 0.0)) * 100))
+        for mid in user_ids
+    }
 
-    debtors = {u for u, v in net.items() if v < -EPS}
-    lenders = {u for u, v in net.items() if v > EPS}
+    debtors = {u for u, v in net_cents.items() if v < 0}
+    lenders = {u for u, v in net_cents.items() if v > 0}
     if not debtors or not lenders:
         return []
 
@@ -309,57 +316,64 @@ def graph_constrained_settlements(
             continue
         for split in exp.get("splits") or []:
             participant = split["user_id"]
-            owed = float(split.get("share_amount") or 0)
-            if participant in debtors and owed > EPS:
+            owed = int(round(float(split.get("share_amount") or 0) * 100))
+            if participant in debtors and owed > 0:
                 edges.add((participant, payer))
 
-    k = max(len(user_ids) - 1, 0)
-    edges = set(edges)
-    while len(edges) > k:
-        out_lenders: Dict[int, List[int]] = {}
-        for d, l in edges:
-            out_lenders.setdefault(d, []).append(l)
-        candidates = sorted(
-            [d for d in debtors if len(out_lenders.get(d, [])) > 1],
-            key=lambda d: (abs(net[d]), d),
-        )
-        if not candidates:
+    # Edmonds-Karp on source -> debtors -> eligible creditors -> sink.
+    source, sink = "source", "sink"
+    capacity: Dict[Tuple[object, object], int] = {}
+    adjacency: Dict[object, set] = {}
+
+    def add_edge(start: object, end: object, amount: int) -> None:
+        capacity[(start, end)] = amount
+        capacity.setdefault((end, start), 0)
+        adjacency.setdefault(start, set()).add(end)
+        adjacency.setdefault(end, set()).add(start)
+
+    for debtor in debtors:
+        add_edge(source, debtor, -net_cents[debtor])
+    for debtor, lender in sorted(edges):
+        add_edge(debtor, lender, min(-net_cents[debtor], net_cents[lender]))
+    for lender in lenders:
+        add_edge(lender, sink, net_cents[lender])
+
+    original_capacity = dict(capacity)
+    while True:
+        parent = {source: None}
+        queue = deque([source])
+        while queue and sink not in parent:
+            current = queue.popleft()
+            for neighbor in adjacency.get(current, set()):
+                if neighbor not in parent and capacity.get((current, neighbor), 0) > 0:
+                    parent[neighbor] = current
+                    queue.append(neighbor)
+        if sink not in parent:
             break
-        d_star = candidates[0]
-        lenders_of_d = out_lenders[d_star]
-        l_max = max(lenders_of_d, key=lambda l: (net[l], l))
-        others = [l for l in lenders_of_d if l != l_max]
-        l_drop = min(others, key=lambda l: (net[l], l))
-        edges.discard((d_star, l_drop))
+        path = []
+        node = sink
+        while node != source:
+            previous = parent[node]
+            path.append((previous, node))
+            node = previous
+        path_capacity = min(capacity[edge] for edge in path)
+        for start, end in path:
+            capacity[(start, end)] -= path_capacity
+            capacity[(end, start)] += path_capacity
 
-    transfers: Dict[Tuple[int, int], float] = {}
-    edge_list = sorted(edges)
-    if edge_list:
-        var_index = {edge: i for i, edge in enumerate(edge_list)}
-        equations: List[List[float]] = []
-        rhs: List[float] = []
-        num_vars = len(edge_list)
-        for d in sorted(debtors):
-            row = [0.0] * num_vars
-            for l in lenders:
-                if (d, l) in var_index:
-                    row[var_index[(d, l)]] = 1.0
-            if any(row):
-                equations.append(row)
-                rhs.append(abs(net[d]))
-        if equations:
-            solution = _lstsq(equations, rhs)
-            for edge, amount in zip(edge_list, solution):
-                if amount > EPS:
-                    transfers[edge] = round(float(amount), 2)
+    transfers: Dict[Tuple[int, int], int] = {
+        (debtor, lender): original_capacity[(debtor, lender)] - capacity[(debtor, lender)]
+        for debtor, lender in sorted(edges)
+        if original_capacity.get((debtor, lender), 0) > capacity.get((debtor, lender), 0)
+    }
 
-    remaining = {mid: val for mid, val in net.items()}
-    for (d, l), amount in transfers.items():
-        remaining[d] = remaining.get(d, 0.0) + amount
-        remaining[l] = remaining.get(l, 0.0) - amount
+    remaining_cents = dict(net_cents)
+    for (debtor, lender), amount in transfers.items():
+        remaining_cents[debtor] += amount
+        remaining_cents[lender] -= amount
 
     leftover_balances = {
-        mid: {**balances.get(mid, {"member_id": mid, "name": names.get(mid, str(mid))}), "net_balance": remaining.get(mid, 0.0)}
+        mid: {**balances.get(mid, {"member_id": mid, "name": names.get(mid, str(mid))}), "net_balance": remaining_cents.get(mid, 0) / 100}
         for mid in user_ids
     }
     extra = simplify_debts(leftover_balances)
@@ -367,16 +381,14 @@ def graph_constrained_settlements(
 
     settlements = []
     seen = set()
-    for (d, l), amount in transfers.items():
-        if amount <= EPS:
-            continue
+    for (d, l), amount_cents in transfers.items():
         seen.add((d, l))
         settlements.append({
             "from_member_id": d,
             "from_name": names.get(d, str(d)),
             "to_member_id": l,
             "to_name": names.get(l, str(l)),
-            "amount": amount,
+            "amount": round(amount_cents / 100, 2),
         })
     for (d, l), amount in extra_pairs.items():
         if (d, l) in seen:

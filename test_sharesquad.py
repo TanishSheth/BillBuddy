@@ -110,6 +110,24 @@ def test_debt_simplification():
     assert all(s["to_member_id"] == 1 for s in constrained)
     assert {s["from_member_id"] for s in constrained} == {2, 3}
 
+    # A debtor who owes two original payers must not overpay either creditor
+    # and create a follow-up transfer between the creditors.
+    three_way = [
+        {"id": 1, "name": "Tanish"},
+        {"id": 2, "name": "Kuku"},
+        {"id": 3, "name": "KP"},
+    ]
+    three_way_expenses = [
+        {"payer_id": 1, "total_amount": 17.00, "splits": [{"user_id": 1, "share_amount": 5.85}, {"user_id": 2, "share_amount": 11.15}]},
+        {"payer_id": 3, "total_amount": 17.53, "splits": [{"user_id": 2, "share_amount": 11.69}, {"user_id": 3, "share_amount": 5.84}]},
+    ]
+    three_way_balances = compute_balances(three_way, three_way_expenses)
+    three_way_settlements = graph_constrained_settlements(three_way, three_way_expenses, three_way_balances)
+    assert {
+        (row["from_member_id"], row["to_member_id"]): row["amount"]
+        for row in three_way_settlements
+    } == {(2, 1): 11.15, (2, 3): 11.69}
+
     # Kartavya only sits on Bhagu's receipt. Sanjivani's bill does not include him.
     trio = [
         {"id": 1, "name": "Bhagu"},
@@ -137,7 +155,11 @@ def test_debt_simplification():
     who_pays = graph_constrained_settlements(trio, mixed, mixed_balances)
     kartavya_pays = [s for s in who_pays if s["from_member_id"] == 3]
     assert kartavya_pays, "Kartavya should still have a payment"
-    assert all(s["to_member_id"] == 1 for s in kartavya_pays)
+    assert any(s["to_member_id"] == 1 for s in kartavya_pays)
+    assert not any(
+        s["from_member_id"] == 1 and s["to_member_id"] == 2
+        for s in who_pays
+    ), "A creditor should never need to forward an overpayment"
 
     print("  [PASS] Debt simplification tests passed!")
 

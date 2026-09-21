@@ -494,7 +494,14 @@ def _normalize_currency(code: Optional[str], default: str = "USD") -> str:
 
 
 def _members_as_dicts(db: Session, group_id: int) -> list[dict]:
-    members = db.query(models.GroupMember).filter_by(group_id=group_id).all()
+    members = (
+        db.query(models.GroupMember)
+        .filter(
+            models.GroupMember.group_id == group_id,
+            or_(models.GroupMember.is_active.is_(True), models.GroupMember.is_active.is_(None)),
+        )
+        .all()
+    )
     return [{"id": m.id, "name": m.display_name} for m in members]
 
 
@@ -547,12 +554,20 @@ def build_balances_and_settlements(
     base_currency = group.currency if group and group.currency else "USD"
 
     members = _members_as_dicts(db, group_id)
+    active_member_ids = {member["id"] for member in members}
     expenses = (
         db.query(models.Expense)
         .filter_by(period_id=period.id)
         .order_by(models.Expense.bill_date.asc(), models.Expense.id.asc())
         .all()
     )
+    # Legacy soft-removed memberships can remain in an upgraded database.
+    # Treat any expense involving one as removed, matching the delete action.
+    expenses = [
+        expense for expense in expenses
+        if expense.payer_member_id in active_member_ids
+        and all(split.member_id in active_member_ids for split in expense.splits)
+    ]
     expense_dicts = _expenses_as_dicts(expenses, base_currency, base_currency)
     raw_balances = compute_balances(members, expense_dicts)
     raw_settlements = graph_constrained_settlements(members, expense_dicts, raw_balances)
@@ -1565,7 +1580,10 @@ def get_group(
     members = (
         db.query(models.GroupMember)
         .join(models.Account)
-        .filter(models.GroupMember.group_id == group_id)
+        .filter(
+            models.GroupMember.group_id == group_id,
+            or_(models.GroupMember.is_active.is_(True), models.GroupMember.is_active.is_(None)),
+        )
         .all()
     )
     members_out = [
@@ -1575,7 +1593,7 @@ def get_group(
             display_name=m.display_name,
             email=m.account.email,
             role=m.role,
-            is_active=_member_is_active(m),
+            is_active=True,
             has_avatar=bool(getattr(m.account, "avatar_path", None) and os.path.exists(m.account.avatar_path or "")),
         )
         for m in members
@@ -2145,7 +2163,11 @@ def _validate_expense_members(db: Session, group_id: int, payer_id: int, partici
     existing = {
         m.id
         for m in db.query(models.GroupMember.id)
-        .filter(models.GroupMember.group_id == group_id, models.GroupMember.id.in_(member_ids))
+        .filter(
+            models.GroupMember.group_id == group_id,
+            models.GroupMember.id.in_(member_ids),
+            or_(models.GroupMember.is_active.is_(True), models.GroupMember.is_active.is_(None)),
+        )
         .all()
     }
     for mid in member_ids:
