@@ -51,6 +51,9 @@
       </nav>
 
       <div class="flex items-center gap-1.5 shrink-0">
+        <button id="notificationsBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] relative" title="Notifications">
+          <i data-lucide="bell" class="w-3.5 h-3.5"></i><span id="notificationCount" class="hidden notification-count">0</span>
+        </button>
         <a id="groupSettingsLink" href="/settings.html" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px]" title="Settings">
           <i data-lucide="settings" class="w-3.5 h-3.5"></i>
         </a>
@@ -65,6 +68,8 @@
         <button data-tab="upload" class="tab-btn active"><i data-lucide="camera" class="w-3.5 h-3.5 inline mr-1"></i> Add / Scan</button>
         <button data-tab="expenses" class="tab-btn"><i data-lucide="list" class="w-3.5 h-3.5 inline mr-1"></i> Expenses</button>
         <button data-tab="balances" class="tab-btn"><i data-lucide="scale" class="w-3.5 h-3.5 inline mr-1"></i> Balances & Settlement</button>
+        <button data-tab="insights" class="tab-btn"><i data-lucide="chart-no-axes-combined" class="w-3.5 h-3.5 inline mr-1"></i> Insights</button>
+        <button data-tab="activity" class="tab-btn"><i data-lucide="history" class="w-3.5 h-3.5 inline mr-1"></i> Activity</button>
         <button data-tab="reports" class="tab-btn"><i data-lucide="file-text" class="w-3.5 h-3.5 inline mr-1"></i> PDF Reports</button>
         <button data-tab="members" class="tab-btn"><i data-lucide="users" class="w-3.5 h-3.5 inline mr-1"></i> Members</button>
       </div>
@@ -94,7 +99,7 @@
       </div>
 
       <div class="how-it-works mb-5">
-        <p><strong>How this group works:</strong> Scan or enter a bill → pick who paid and who shares it → save. <strong>Balances</strong> shows who is owed money. <strong>Members</strong> is where the owner invites people, removes someone, or changes the group name and photo.</p>
+        <p id="groupPageHelp"><strong>Add / Scan:</strong> Upload a receipt or enter a bill, choose who paid and who shares it, then save it to this month.</p>
       </div>
 
       <!-- Add / Scan Expense Tab -->
@@ -219,8 +224,8 @@
         <div class="bb-card">
           <div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3 flex-wrap gap-2">
             <h3 class="font-mono uppercase text-xs tracking-widest text-muted font-bold">Group Expense Ledger</h3>
-            <div class="flex items-center gap-2">
-              <label class="text-[10px] font-mono text-muted uppercase">Filter Category:</label>
+          <div class="flex items-center gap-2 flex-wrap w-full sm:w-auto">
+              <input id="expenseSearch" class="text-xs font-mono border border-line rounded px-2 py-1 bg-transparent min-w-0 flex-1 sm:w-40" placeholder="Search expenses">
               <select id="groupCategoryFilter" class="text-xs font-mono border border-line rounded px-2 py-1 bg-transparent">
                 <option value="All">All Categories</option>
                 <option value="Food & Dining">Food & Dining</option>
@@ -234,6 +239,8 @@
                 <option value="Healthcare">Healthcare</option>
                 <option value="General">General / Other</option>
               </select>
+              <select id="expenseMemberFilter" class="text-xs font-mono border border-line rounded px-2 py-1 bg-transparent"><option value="">All members</option></select>
+              <label class="text-[10px] font-mono text-muted whitespace-nowrap"><input id="onlyMyExpenses" type="checkbox"> Involving me</label>
             </div>
           </div>
 
@@ -308,8 +315,18 @@
             </div>
             <div id="settlementList" class="space-y-2 font-mono text-sm"></div>
             <p id="settlementEmpty" class="hidden text-ink/40 text-sm font-mono py-4">Everyone's settled up — no transfers needed.</p>
+            <div id="paymentPendingNotice" class="hidden mt-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs font-mono text-amber-900"></div>
+            <div id="paymentHistory" class="mt-4 pt-3 border-t border-ink/10 space-y-2"></div>
           </div>
         </div>
+      </section>
+
+      <section id="tab-insights" class="tab-panel hidden">
+        <div id="insightsContent" class="space-y-4"></div>
+      </section>
+
+      <section id="tab-activity" class="tab-panel hidden">
+        <div class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Recent activity</h3><div id="activityList" class="space-y-3"></div></div>
       </section>
 
       <!-- PDF Reports Tab -->
@@ -427,6 +444,14 @@
     </div>
   </div>
 
+  <div id="notificationsModal" class="modal-overlay hidden">
+    <div class="bb-card modal-card"><div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3"><h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Notifications</h2><button type="button" id="closeNotificationsBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button></div><div id="notificationsList" class="space-y-2 max-h-[60vh] overflow-y-auto"></div></div>
+  </div>
+
+  <div id="commentsModal" class="modal-overlay hidden">
+    <div class="bb-card modal-card"><div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3"><h2 id="commentsTitle" class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Expense comments</h2><button type="button" id="closeCommentsBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button></div><div id="commentsList" class="space-y-3 max-h-[45vh] overflow-y-auto mb-4"></div><form id="commentForm" class="flex gap-2"><input id="commentInput" class="bb-input flex-1" maxlength="1000" placeholder="Optional note or question"><button class="bb-btn-primary !px-3" type="submit">Post</button></form></div>
+  </div>
+
   <div id="liveCameraModal" class="modal-overlay hidden">
     <div class="bb-card modal-card">
       <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Take photo</h2>
@@ -441,7 +466,7 @@
   </div>
 
   <script src="/api.js?v=20260919g"></script>
-  <script src="/group.js?v=20260919e"></script>
+  <script src="/group.js?v=20260921a"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

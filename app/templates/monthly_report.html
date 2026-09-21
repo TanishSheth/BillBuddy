@@ -100,6 +100,7 @@
         <th>Member</th>
         <th class="num">Total Paid</th>
         <th class="num">Total Share Owed</th>
+        <th class="num">Confirmed Settlement</th>
         <th class="num">Net Balance ({{ base_currency }})</th>
         {% if target_currency and target_currency != base_currency %}
         <th class="num">Net in {{ target_currency }}</th>
@@ -112,6 +113,11 @@
         <td><strong>{{ b.name }}</strong></td>
         <td class="num">{{ base_currency }} {{ "%.2f"|format(b.total_paid) }}</td>
         <td class="num">{{ base_currency }} {{ "%.2f"|format(b.total_share_owed) }}</td>
+        <td class="num">
+          {% if b.settlement_paid > 0 %}Paid {{ base_currency }} {{ "%.2f"|format(b.settlement_paid) }}
+          {% elif b.settlement_received > 0 %}Received {{ base_currency }} {{ "%.2f"|format(b.settlement_received) }}
+          {% else %}-{% endif %}
+        </td>
         <td class="num {{ 'positive' if b.net_balance >= 0 else 'negative' }}">
           {{ "+" if b.net_balance >= 0 else "" }}{{ base_currency }} {{ "%.2f"|format(b.net_balance) }}
         </td>

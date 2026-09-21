@@ -175,6 +175,7 @@ class Expense(Base):
     period = relationship("MonthlyPeriod", back_populates="expenses")
     payer = relationship("GroupMember", back_populates="expenses_paid")
     splits = relationship("ExpenseSplit", back_populates="expense", cascade="all, delete-orphan")
+    comments = relationship("ExpenseComment", back_populates="expense", cascade="all, delete-orphan")
 
 
 class ExpenseSplit(Base):
@@ -188,6 +189,72 @@ class ExpenseSplit(Base):
 
     expense = relationship("Expense", back_populates="splits")
     member = relationship("GroupMember", back_populates="splits")
+
+
+class ExpenseComment(Base):
+    __tablename__ = "expense_comments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    expense_id = Column(Integer, ForeignKey("expenses.id", ondelete="CASCADE"), nullable=False, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    body = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, nullable=True)
+
+    expense = relationship("Expense", back_populates="comments")
+    account = relationship("Account")
+
+
+class GroupPayment(Base):
+    """A recorded group transfer. Confirmed payments reduce live balances."""
+    __tablename__ = "group_payments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    period_id = Column(Integer, ForeignKey("monthly_periods.id", ondelete="CASCADE"), nullable=False, index=True)
+    payer_member_id = Column(Integer, ForeignKey("group_members.id", ondelete="RESTRICT"), nullable=False)
+    recipient_member_id = Column(Integer, ForeignKey("group_members.id", ondelete="RESTRICT"), nullable=False)
+    amount = Column(Numeric(10, 2), nullable=False)
+    currency = Column(String(10), nullable=False, default="USD")
+    status = Column(String(20), nullable=False, default="PENDING")  # PENDING, PAID, CONFIRMED, DECLINED
+    # Last expense in the ledger when this transfer was recorded. This keeps
+    # later expenses from being included in an earlier settlement.
+    expense_cutoff_id = Column(Integer, nullable=True)
+    marked_paid_at = Column(DateTime, nullable=True)
+    confirmed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    period = relationship("MonthlyPeriod")
+    payer = relationship("GroupMember", foreign_keys=[payer_member_id])
+    recipient = relationship("GroupMember", foreign_keys=[recipient_member_id])
+
+
+class GroupActivity(Base):
+    __tablename__ = "group_activities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    actor_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
+    event_type = Column(String(50), nullable=False)
+    summary = Column(String(300), nullable=False)
+    entity_type = Column(String(50), nullable=True)
+    entity_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+
+    actor = relationship("Account")
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=True, index=True)
+    message = Column(String(300), nullable=False)
+    link = Column(String(300), nullable=True)
+    read_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+
+    account = relationship("Account")
 
 
 class PersonalExpense(Base):

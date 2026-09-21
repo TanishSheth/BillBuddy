@@ -307,6 +307,8 @@ class BalanceOut(BaseModel):
     total_paid: float
     total_share_owed: float
     net_balance: float
+    settlement_paid: float = 0.0
+    settlement_received: float = 0.0
     currency: str = "USD"
     converted_total_paid: Optional[float] = None
     converted_total_share_owed: Optional[float] = None
@@ -324,6 +326,63 @@ class SettlementOut(BaseModel):
     converted_amount: Optional[float] = None
     converted_currency: Optional[str] = None
     exchange_rate: Optional[float] = None
+
+
+class GroupPaymentCreate(BaseModel):
+    payer_member_id: int
+    recipient_member_id: int
+    amount: float = Field(gt=0)
+    currency: str = Field(default="USD", min_length=3, max_length=10)
+
+
+class GroupPaymentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    payer_member_id: int
+    recipient_member_id: int
+    amount: float
+    currency: str
+    status: str
+    marked_paid_at: Optional[datetime] = None
+    confirmed_at: Optional[datetime] = None
+
+
+class ExpenseCommentCreate(BaseModel):
+    body: str = Field(min_length=1, max_length=1000)
+
+
+class ExpenseCommentOut(BaseModel):
+    id: int
+    body: str
+    author_name: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
+class GroupActivityOut(BaseModel):
+    id: int
+    event_type: str
+    summary: str
+    actor_name: Optional[str] = None
+    entity_type: Optional[str] = None
+    entity_id: Optional[int] = None
+    created_at: datetime
+
+
+class NotificationOut(BaseModel):
+    id: int
+    message: str
+    link: Optional[str] = None
+    read_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class GroupDashboardOut(BaseModel):
+    total_spent: float
+    currency: str
+    category_totals: Dict[str, float]
+    member_totals: List[BalanceOut]
+    largest_expenses: List[ExpenseOut]
 
 
 class ConvertCurrencyRequest(BaseModel):

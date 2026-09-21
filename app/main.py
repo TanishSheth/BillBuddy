@@ -98,6 +98,58 @@ def notify_group_change(group_id: int, kind: str = "updated") -> None:
             pass
 
 
+def _record_activity(
+    db: Session, group_id: int, actor: Optional[models.Account], event_type: str,
+    summary: str, entity_type: Optional[str] = None, entity_id: Optional[int] = None,
+) -> None:
+    db.add(models.GroupActivity(
+        group_id=group_id, actor_account_id=actor.id if actor else None,
+        event_type=event_type, summary=summary[:300], entity_type=entity_type, entity_id=entity_id,
+    ))
+
+
+def _notify_group_members(db: Session, group_id: int, message: str, link: str = "", *, exclude_account_id: Optional[int] = None) -> None:
+    members = db.query(models.GroupMember).filter(
+        models.GroupMember.group_id == group_id,
+        or_(models.GroupMember.is_active.is_(True), models.GroupMember.is_active.is_(None)),
+    ).all()
+    for member in members:
+        if member.account_id != exclude_account_id:
+            db.add(models.Notification(
+                account_id=member.account_id, group_id=group_id,
+                message=message[:300], link=link or None,
+            ))
+
+
+def _period_has_paid_transfer(db: Session, period_id: int) -> bool:
+    return db.query(models.GroupPayment.id).filter(
+        models.GroupPayment.period_id == period_id,
+        models.GroupPayment.status.in_(("PAID", "CONFIRMED")),
+    ).first() is not None
+
+
+def _period_history_is_protected(db: Session, period: models.MonthlyPeriod) -> bool:
+    """Whether removing a member must retain this period's original ledger."""
+    return period.status == "SETTLED" or _period_has_paid_transfer(db, period.id)
+
+
+def _require_expense_editable(
+    db: Session, period: models.MonthlyPeriod, account: models.Account, group_id: int,
+    owner_override: bool = False,
+) -> bool:
+    if period.status == "SETTLED":
+        raise HTTPException(400, "Cannot edit an expense from a settled period")
+    if not _period_has_paid_transfer(db, period.id):
+        return False
+    member = require_group_member(group_id, account, db)
+    if member.role != "owner" or not owner_override:
+        raise HTTPException(
+            409,
+            "A payment has been recorded for this period. Only the owner can correct expenses; balances will be recalculated and members notified.",
+        )
+    return True
+
+
 def check_rate_limit(request: Request, limit: int = 15, window_seconds: int = 60) -> None:
     client_ip = request.client.host if request.client else "unknown"
     path = request.url.path
@@ -230,6 +282,7 @@ def _ensure_schema():
         ("quick_splits", "created_by_account_id", "INTEGER"),
         ("quick_split_participants", "split_value", "NUMERIC(10,2)"),
         ("quick_split_participants", "invite_token", "VARCHAR(64)"),
+        ("group_payments", "expense_cutoff_id", "INTEGER"),
     ]
 
     for table, column, spec in statements:
@@ -493,15 +546,11 @@ def _normalize_currency(code: Optional[str], default: str = "USD") -> str:
     return curr
 
 
-def _members_as_dicts(db: Session, group_id: int) -> list[dict]:
-    members = (
-        db.query(models.GroupMember)
-        .filter(
-            models.GroupMember.group_id == group_id,
-            or_(models.GroupMember.is_active.is_(True), models.GroupMember.is_active.is_(None)),
-        )
-        .all()
-    )
+def _members_as_dicts(db: Session, group_id: int, include_inactive: bool = False) -> list[dict]:
+    query = db.query(models.GroupMember).filter(models.GroupMember.group_id == group_id)
+    if not include_inactive:
+        query = query.filter(or_(models.GroupMember.is_active.is_(True), models.GroupMember.is_active.is_(None)))
+    members = query.all()
     return [{"id": m.id, "name": m.display_name} for m in members]
 
 
@@ -540,11 +589,84 @@ def _expenses_as_dicts(
         rows.append(
             {
                 "payer_id": e.payer_member_id,
+                "expense_id": e.id,
                 "total_amount": float(converted_total),
                 "splits": splits,
+                "created_at": e.created_at,
             }
         )
     return rows
+
+
+def _apply_confirmed_payments(
+    db: Session,
+    period: models.MonthlyPeriod,
+    balances: dict,
+    expense_dicts: list[dict],
+    destination_currency: str,
+    base_currency: str,
+    custom_base_to_destination: Optional[float] = None,
+) -> None:
+    """Apply confirmed transfers without allowing them to create a reverse debt."""
+    for balance in balances.values():
+        balance.setdefault("settlement_paid", 0.0)
+        balance.setdefault("settlement_received", 0.0)
+    payments = db.query(models.GroupPayment).filter_by(period_id=period.id, status="CONFIRMED").all()
+    members = [{"id": member_id, "name": balance["name"]} for member_id, balance in balances.items()]
+    applied_history: list[tuple[int, int, float]] = []
+
+    def event_time(value):
+        if value is None:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    payments.sort(key=lambda payment: event_time(payment.marked_paid_at or payment.created_at))
+    for payment in payments:
+        if payment.payer_member_id not in balances or payment.recipient_member_id not in balances:
+            continue
+        amount = Decimal(str(payment.amount))
+        source_currency = (payment.currency or base_currency).upper()
+        target_currency = destination_currency.upper()
+        if source_currency != target_currency:
+            amount, _ = convert_amount(
+                amount, source_currency, target_currency,
+                custom_rate=_rate_to_dest(source_currency, target_currency, base_currency, custom_base_to_destination),
+            )
+        amount_f = float(amount)
+        # A payment only belongs to expenses that already existed when it was
+        # made. Later bills in a reopened period are new debt, not something an
+        # earlier settlement can silently clear.
+        cutoff = event_time(payment.marked_paid_at or payment.created_at)
+        historical_expenses = [
+            expense for expense in expense_dicts
+            if (payment.expense_cutoff_id is not None and expense.get("expense_id", 0) <= payment.expense_cutoff_id)
+            or (payment.expense_cutoff_id is None and event_time(expense.get("created_at")) <= cutoff)
+        ]
+        historical_balances = compute_balances(members, historical_expenses)
+        for payer_id, recipient_id, applied_amount in applied_history:
+            historical_balances[payer_id]["net_balance"] = round(historical_balances[payer_id]["net_balance"] + applied_amount, 2)
+            historical_balances[recipient_id]["net_balance"] = round(historical_balances[recipient_id]["net_balance"] - applied_amount, 2)
+
+        # A transfer can only settle the payer's historical debt to this
+        # recipient. This also protects legacy records with no retained bill.
+        payer_owed = max(-float(historical_balances[payment.payer_member_id]["net_balance"]), 0.0)
+        recipient_due = max(float(historical_balances[payment.recipient_member_id]["net_balance"]), 0.0)
+        amount_f = round(min(amount_f, payer_owed, recipient_due), 2)
+        if amount_f <= 0:
+            continue
+        applied_history.append((payment.payer_member_id, payment.recipient_member_id, amount_f))
+        balances[payment.payer_member_id]["net_balance"] = round(
+            balances[payment.payer_member_id]["net_balance"] + amount_f, 2
+        )
+        balances[payment.recipient_member_id]["net_balance"] = round(
+            balances[payment.recipient_member_id]["net_balance"] - amount_f, 2
+        )
+        balances[payment.payer_member_id]["settlement_paid"] = round(
+            balances[payment.payer_member_id]["settlement_paid"] + amount_f, 2
+        )
+        balances[payment.recipient_member_id]["settlement_received"] = round(
+            balances[payment.recipient_member_id]["settlement_received"] + amount_f, 2
+        )
 
 
 def build_balances_and_settlements(
@@ -553,7 +675,12 @@ def build_balances_and_settlements(
     group = db.query(models.Group).get(group_id)
     base_currency = group.currency if group and group.currency else "USD"
 
-    members = _members_as_dicts(db, group_id)
+    # Once a payment has been recorded, the original participants and their
+    # expenses are the accounting record behind that payment. Reopening the
+    # period only permits an owner correction; it must not make a later member
+    # removal rewrite the paid ledger.
+    preserve_history = _period_history_is_protected(db, period)
+    members = _members_as_dicts(db, group_id, include_inactive=preserve_history)
     active_member_ids = {member["id"] for member in members}
     expenses = (
         db.query(models.Expense)
@@ -563,13 +690,15 @@ def build_balances_and_settlements(
     )
     # Legacy soft-removed memberships can remain in an upgraded database.
     # Treat any expense involving one as removed, matching the delete action.
-    expenses = [
-        expense for expense in expenses
-        if expense.payer_member_id in active_member_ids
-        and all(split.member_id in active_member_ids for split in expense.splits)
-    ]
+    if not preserve_history:
+        expenses = [
+            expense for expense in expenses
+            if expense.payer_member_id in active_member_ids
+            and all(split.member_id in active_member_ids for split in expense.splits)
+        ]
     expense_dicts = _expenses_as_dicts(expenses, base_currency, base_currency)
     raw_balances = compute_balances(members, expense_dicts)
+    _apply_confirmed_payments(db, period, raw_balances, expense_dicts, base_currency, base_currency)
     raw_settlements = graph_constrained_settlements(members, expense_dicts, raw_balances)
 
     target_currency = (period.target_currency or "").upper() or None
@@ -587,6 +716,7 @@ def build_balances_and_settlements(
             custom_base_to_dest=fx_rate,
         )
         tgt_balances = compute_balances(members, tgt_expense_dicts)
+        _apply_confirmed_payments(db, period, tgt_balances, tgt_expense_dicts, target_currency, base_currency, fx_rate)
         converted_balances = tgt_balances
         for s in graph_constrained_settlements(members, tgt_expense_dicts, tgt_balances):
             converted_settlements[(s["from_member_id"], s["to_member_id"])] = s["amount"]
@@ -1686,9 +1816,11 @@ def get_group_member_avatar(group_id: int, member_id: int, account: models.Accou
 
 
 def _purge_member_group_history(db: Session, group_id: int, member: models.GroupMember) -> int:
-    """Delete group expenses involving this member, then remove their membership row."""
+    """Remove only unlocked activity; retain any ledger linked to a payment."""
+    candidate_periods = db.query(models.MonthlyPeriod).filter_by(group_id=group_id).all()
     period_ids = [
-        pid for (pid,) in db.query(models.MonthlyPeriod.id).filter_by(group_id=group_id).all()
+        period.id for period in candidate_periods
+        if not _period_history_is_protected(db, period)
     ]
     expense_ids: set[int] = set()
     if period_ids:
@@ -1724,10 +1856,10 @@ def _purge_member_group_history(db: Session, group_id: int, member: models.Group
             db.delete(expense)
             deleted += 1
 
-    db.query(models.GroupMemberSettings).filter_by(
-        group_id=group_id, account_id=member.account_id,
-    ).delete(synchronize_session=False)
-    db.delete(member)
+    # Keep the membership row as an archival reference. Protected periods load
+    # it into their historical balance view; new, unlocked group activity does
+    # not include it.
+    member.is_active = False
     return deleted
 
 
@@ -1758,11 +1890,13 @@ def remove_group_member(
             raise HTTPException(400, "Cannot remove the only owner")
     name = target.display_name
     removed_expenses = _purge_member_group_history(db, group_id, target)
+    _record_activity(db, group_id, account, "member_removed", f"{name} was removed from active group activity", "member", member_id)
+    _notify_group_members(db, group_id, f"{name} was removed from active group activity. Settled history is preserved.", f"/group.html?group={group_id}", exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "member-removed")
-    msg = f"{name} was removed from the group"
+    msg = f"{name} was removed from active group activity"
     if removed_expenses:
-        msg += f" and {removed_expenses} related expense{'s' if removed_expenses != 1 else ''} were deleted"
+        msg += f" and {removed_expenses} active expense{'s' if removed_expenses != 1 else ''} were removed"
     return {"ok": True, "message": msg}
 
 
@@ -2303,6 +2437,9 @@ def create_expense(
 
     db.commit()
     db.refresh(expense)
+    _record_activity(db, group_id, account, "expense_created", f"{account.display_name} added {expense.store_name}", "expense", expense.id)
+    _notify_group_members(db, group_id, f"{account.display_name} added {expense.store_name} to this group.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+    db.commit()
     notify_group_change(group_id, "expense-created")
     return expense
 
@@ -2314,14 +2451,14 @@ def update_expense(
     payload: schemas.ExpenseUpdate,
     account: models.Account = Depends(get_current_account),
     db: Session = Depends(get_db),
+    owner_override: bool = Query(False),
 ):
     require_group_member(group_id, account, db)
     _require_shareable_group(db, group_id)
     expense = db.query(models.Expense).get(expense_id)
     if not expense or expense.period.group_id != group_id:
         raise HTTPException(404, "Expense not found")
-    if expense.period.status == "SETTLED":
-        raise HTTPException(400, "Cannot edit an expense from a settled period")
+    was_locked = _require_expense_editable(db, expense.period, account, group_id, owner_override)
 
     participant_ids = []
     if payload.split_details:
@@ -2356,6 +2493,12 @@ def update_expense(
 
     db.commit()
     db.refresh(expense)
+    _record_activity(db, group_id, account, "expense_updated", f"{account.display_name} updated {expense.store_name}", "expense", expense.id)
+    if was_locked:
+        _notify_group_members(db, group_id, f"{account.display_name} corrected {expense.store_name}. Recorded payments remain applied; check your recalculated balance.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+    else:
+        _notify_group_members(db, group_id, f"{account.display_name} updated {expense.store_name}.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+    db.commit()
     notify_group_change(group_id, "expense-updated")
     return expense
 
@@ -2366,13 +2509,13 @@ def delete_expense(
     expense_id: int,
     account: models.Account = Depends(get_current_account),
     db: Session = Depends(get_db),
+    owner_override: bool = Query(False),
 ):
     require_group_member(group_id, account, db)
     expense = db.query(models.Expense).get(expense_id)
     if not expense or expense.period.group_id != group_id:
         raise HTTPException(404, "Expense not found")
-    if expense.period.status == "SETTLED":
-        raise HTTPException(400, "Cannot delete an expense from a settled period")
+    was_locked = _require_expense_editable(db, expense.period, account, group_id, owner_override)
 
     if expense.image_path and os.path.exists(expense.image_path):
         try:
@@ -2380,7 +2523,13 @@ def delete_expense(
         except OSError:
             pass
 
+    store_name = expense.store_name
     db.delete(expense)
+    _record_activity(db, group_id, account, "expense_deleted", f"{account.display_name} deleted {store_name}", "expense", expense_id)
+    text = f"{account.display_name} {'corrected the period by deleting' if was_locked else 'deleted'} {store_name}."
+    if was_locked:
+        text += " Recorded payments remain applied; check your recalculated balance."
+    _notify_group_members(db, group_id, text, f"/group.html?group={group_id}", exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "expense-deleted")
     return {"ok": True, "message": "Expense deleted"}
@@ -2391,10 +2540,17 @@ def list_expenses(
     group_id: int,
     period_key: Optional[str] = None,
     category: Optional[str] = None,
+    search: Optional[str] = Query(None, max_length=100),
+    member_id: Optional[int] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    min_amount: Optional[float] = Query(None, ge=0),
+    max_amount: Optional[float] = Query(None, ge=0),
+    involved_me: bool = False,
     account: models.Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ):
-    require_group_member(group_id, account, db)
+    current_member = require_group_member(group_id, account, db)
     q = (
         db.query(models.Expense)
         .join(models.MonthlyPeriod)
@@ -2404,13 +2560,203 @@ def list_expenses(
         q = q.filter(models.MonthlyPeriod.period_key == period_key)
     if category and category != "All":
         q = q.filter(models.Expense.category == category)
+    if search:
+        term = f"%{search.strip()}%"
+        q = q.filter(or_(models.Expense.store_name.ilike(term), models.Expense.category.ilike(term)))
+    if member_id:
+        q = q.filter(or_(models.Expense.payer_member_id == member_id, models.Expense.splits.any(models.ExpenseSplit.member_id == member_id)))
+    if involved_me:
+        q = q.filter(or_(models.Expense.payer_member_id == current_member.id, models.Expense.splits.any(models.ExpenseSplit.member_id == current_member.id)))
+    if date_from:
+        q = q.filter(models.Expense.bill_date >= date_from)
+    if date_to:
+        q = q.filter(models.Expense.bill_date <= date_to)
+    if min_amount is not None:
+        q = q.filter(models.Expense.total_amount >= Decimal(str(min_amount)))
+    if max_amount is not None:
+        q = q.filter(models.Expense.total_amount <= Decimal(str(max_amount)))
 
     return q.order_by(models.Expense.bill_date.desc(), models.Expense.id.desc()).all()
+
+
+def _group_expense_or_404(db: Session, group_id: int, expense_id: int) -> models.Expense:
+    expense = db.query(models.Expense).get(expense_id)
+    if not expense or expense.period.group_id != group_id:
+        raise HTTPException(404, "Expense not found")
+    return expense
+
+
+@app.get("/api/groups/{group_id}/expenses/{expense_id}/comments", response_model=list[schemas.ExpenseCommentOut])
+def list_expense_comments(group_id: int, expense_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    require_group_member(group_id, account, db)
+    _group_expense_or_404(db, group_id, expense_id)
+    rows = db.query(models.ExpenseComment).filter_by(expense_id=expense_id).order_by(models.ExpenseComment.created_at.asc()).all()
+    return [schemas.ExpenseCommentOut(id=row.id, body=row.body, author_name=row.account.display_name, created_at=row.created_at, updated_at=row.updated_at) for row in rows]
+
+
+@app.post("/api/groups/{group_id}/expenses/{expense_id}/comments", response_model=schemas.ExpenseCommentOut)
+def create_expense_comment(group_id: int, expense_id: int, payload: schemas.ExpenseCommentCreate, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    require_group_member(group_id, account, db)
+    expense = _group_expense_or_404(db, group_id, expense_id)
+    body = payload.body.strip()
+    if not body:
+        raise HTTPException(400, "A comment cannot be empty")
+    comment = models.ExpenseComment(expense_id=expense.id, account_id=account.id, body=body)
+    db.add(comment)
+    _record_activity(db, group_id, account, "comment_added", f"{account.display_name} commented on {expense.store_name}", "expense", expense.id)
+    _notify_group_members(db, group_id, f"{account.display_name} commented on {expense.store_name}.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+    db.commit()
+    db.refresh(comment)
+    notify_group_change(group_id, "comment-added")
+    return schemas.ExpenseCommentOut(id=comment.id, body=comment.body, author_name=account.display_name, created_at=comment.created_at, updated_at=comment.updated_at)
+
+
+@app.get("/api/groups/{group_id}/activity", response_model=list[schemas.GroupActivityOut])
+def list_group_activity(group_id: int, limit: int = Query(30, ge=1, le=100), account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    require_group_member(group_id, account, db)
+    rows = db.query(models.GroupActivity).filter_by(group_id=group_id).order_by(models.GroupActivity.created_at.desc(), models.GroupActivity.id.desc()).limit(limit).all()
+    return [schemas.GroupActivityOut(id=row.id, event_type=row.event_type, summary=row.summary, actor_name=row.actor.display_name if row.actor else None, entity_type=row.entity_type, entity_id=row.entity_id, created_at=row.created_at) for row in rows]
+
+
+@app.get("/api/notifications", response_model=list[schemas.NotificationOut])
+def list_notifications(unread_only: bool = False, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    query = db.query(models.Notification).filter_by(account_id=account.id)
+    if unread_only:
+        query = query.filter(models.Notification.read_at.is_(None))
+    return query.order_by(models.Notification.created_at.desc(), models.Notification.id.desc()).limit(50).all()
+
+
+@app.post("/api/notifications/{notification_id}/read", response_model=schemas.NotificationOut)
+def mark_notification_read(notification_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    row = db.query(models.Notification).filter_by(id=notification_id, account_id=account.id).first()
+    if not row:
+        raise HTTPException(404, "Notification not found")
+    row.read_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 # ---------------------------------------------------------------------------
 # Periods, Balances, Settlements, Reports
 # ---------------------------------------------------------------------------
+@app.get("/api/groups/{group_id}/periods/{period_key}/payments", response_model=list[schemas.GroupPaymentOut])
+def list_group_payments(group_id: int, period_key: str, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    require_group_member(group_id, account, db)
+    period = db.query(models.MonthlyPeriod).filter_by(group_id=group_id, period_key=period_key).first()
+    if not period:
+        return []
+    return db.query(models.GroupPayment).filter_by(period_id=period.id).order_by(models.GroupPayment.created_at.desc()).all()
+
+
+@app.post("/api/groups/{group_id}/periods/{period_key}/payments", response_model=schemas.GroupPaymentOut)
+def mark_group_payment_paid(group_id: int, period_key: str, payload: schemas.GroupPaymentCreate, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    payer = require_group_member(group_id, account, db)
+    period = db.query(models.MonthlyPeriod).filter_by(group_id=group_id, period_key=period_key).first()
+    if not period:
+        raise HTTPException(404, "Period not found")
+    if period.status != "SETTLED":
+        raise HTTPException(400, "Settle this period before recording payments")
+    if payer.id != payload.payer_member_id:
+        raise HTTPException(403, "Only the payer can mark this payment as paid")
+    _validate_expense_members(db, group_id, payload.payer_member_id, [payload.recipient_member_id])
+    if payload.payer_member_id == payload.recipient_member_id:
+        raise HTTPException(400, "A member cannot pay themselves")
+    currency = _normalize_currency(payload.currency, "USD")
+    expense_cutoff_id = db.query(func.max(models.Expense.id)).filter_by(period_id=period.id).scalar()
+    payment = models.GroupPayment(
+        period_id=period.id, payer_member_id=payload.payer_member_id,
+        recipient_member_id=payload.recipient_member_id,
+        amount=Decimal(str(payload.amount)), currency=currency,
+        status="PAID", expense_cutoff_id=expense_cutoff_id, marked_paid_at=datetime.now(timezone.utc),
+    )
+    db.add(payment)
+    recipient = db.query(models.GroupMember).get(payload.recipient_member_id)
+    _record_activity(db, group_id, account, "payment_marked_paid", f"{payer.display_name} marked a payment of {currency} {payload.amount:.2f} as paid to {recipient.display_name}", "payment", None)
+    db.add(models.Notification(account_id=recipient.account_id, group_id=group_id, message=f"{payer.display_name} marked a {currency} {payload.amount:.2f} payment to you as paid. Please confirm receipt.", link=f"/group.html?group={group_id}"))
+    db.commit()
+    db.refresh(payment)
+    notify_group_change(group_id, "payment-paid")
+    return payment
+
+
+@app.post("/api/groups/{group_id}/periods/{period_key}/payments/received", response_model=schemas.GroupPaymentOut)
+def mark_group_payment_received(group_id: int, period_key: str, payload: schemas.GroupPaymentCreate, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    """Recipient shortcut: record a transfer as received and confirmed at once."""
+    recipient = require_group_member(group_id, account, db)
+    period = db.query(models.MonthlyPeriod).filter_by(group_id=group_id, period_key=period_key).first()
+    if not period:
+        raise HTTPException(404, "Period not found")
+    if period.status != "SETTLED":
+        raise HTTPException(400, "Settle this period before recording payments")
+    if recipient.id != payload.recipient_member_id:
+        raise HTTPException(403, "Only the recipient can mark this payment as received")
+    _validate_expense_members(db, group_id, payload.payer_member_id, [payload.recipient_member_id])
+    if payload.payer_member_id == payload.recipient_member_id:
+        raise HTTPException(400, "A member cannot pay themselves")
+    currency = _normalize_currency(payload.currency, "USD")
+    now = datetime.now(timezone.utc)
+    expense_cutoff_id = db.query(func.max(models.Expense.id)).filter_by(period_id=period.id).scalar()
+    payment = models.GroupPayment(
+        period_id=period.id, payer_member_id=payload.payer_member_id,
+        recipient_member_id=payload.recipient_member_id,
+        amount=Decimal(str(payload.amount)), currency=currency,
+        status="CONFIRMED", expense_cutoff_id=expense_cutoff_id, marked_paid_at=now, confirmed_at=now,
+    )
+    db.add(payment)
+    payer = db.query(models.GroupMember).get(payload.payer_member_id)
+    _record_activity(db, group_id, account, "payment_received", f"{recipient.display_name} recorded {currency} {payload.amount:.2f} received from {payer.display_name}", "payment", None)
+    db.add(models.Notification(account_id=payer.account_id, group_id=group_id, message=f"{recipient.display_name} recorded your {currency} {payload.amount:.2f} payment as received. Your balance has been recalculated.", link=f"/group.html?group={group_id}"))
+    db.commit()
+    db.refresh(payment)
+    notify_group_change(group_id, "payment-received")
+    return payment
+
+
+@app.post("/api/groups/{group_id}/payments/{payment_id}/confirm", response_model=schemas.GroupPaymentOut)
+def confirm_group_payment(group_id: int, payment_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    recipient = require_group_member(group_id, account, db)
+    payment = db.query(models.GroupPayment).join(models.MonthlyPeriod).filter(
+        models.GroupPayment.id == payment_id, models.MonthlyPeriod.group_id == group_id,
+    ).first()
+    if not payment:
+        raise HTTPException(404, "Payment not found")
+    if payment.period.status != "SETTLED":
+        raise HTTPException(400, "Settle this period before confirming payments")
+    if payment.recipient_member_id != recipient.id:
+        raise HTTPException(403, "Only the recipient can confirm this payment")
+    if payment.status != "PAID":
+        raise HTTPException(400, "This payment cannot be confirmed")
+    payment.status = "CONFIRMED"
+    payment.confirmed_at = datetime.now(timezone.utc)
+    payer = db.query(models.GroupMember).get(payment.payer_member_id)
+    _record_activity(db, group_id, account, "payment_confirmed", f"{recipient.display_name} confirmed payment from {payer.display_name}", "payment", payment.id)
+    db.add(models.Notification(account_id=payer.account_id, group_id=group_id, message=f"{recipient.display_name} confirmed your {payment.currency} {float(payment.amount):.2f} payment. Your remaining balance has been recalculated.", link=f"/group.html?group={group_id}"))
+    db.commit()
+    db.refresh(payment)
+    notify_group_change(group_id, "payment-confirmed")
+    return payment
+
+
+@app.get("/api/groups/{group_id}/dashboard", response_model=schemas.GroupDashboardOut)
+def get_group_dashboard(group_id: int, period_key: str, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    require_group_member(group_id, account, db)
+    group = db.query(models.Group).get(group_id)
+    period = db.query(models.MonthlyPeriod).filter_by(group_id=group_id, period_key=period_key).first()
+    if not period:
+        return schemas.GroupDashboardOut(total_spent=0, currency=(group.currency if group else "USD"), category_totals={}, member_totals=[], largest_expenses=[])
+    balances, _, expenses = build_balances_and_settlements(db, group_id, period)
+    category_totals: dict[str, float] = {}
+    for expense in expenses:
+        category = expense.category or "General"
+        category_totals[category] = round(category_totals.get(category, 0) + float(expense.total_amount), 2)
+    return schemas.GroupDashboardOut(
+        total_spent=round(sum(float(expense.total_amount) for expense in expenses), 2),
+        currency=group.currency or "USD", category_totals=category_totals,
+        member_totals=balances,
+        largest_expenses=sorted(expenses, key=lambda expense: float(expense.total_amount), reverse=True)[:5],
+    )
+
 @app.get("/api/groups/{group_id}/periods", response_model=list[schemas.PeriodOut])
 def list_periods(
     group_id: int,
@@ -2494,8 +2840,8 @@ def generate_report(
 ):
     require_group_member(group_id, account, db)
     period = get_or_create_period(db, group_id, period_key)
-    if period.status == "SETTLED":
-        raise HTTPException(400, "Period is already settled")
+    # Re-exporting is read-only: allow a settled period's report to be
+    # regenerated when payment confirmations have been recorded afterwards.
 
     group = db.query(models.Group).get(group_id)
     balances, settlements, expenses = build_balances_and_settlements(db, group_id, period)

@@ -26,6 +26,7 @@ const state = {
   eventRefreshTimer: null,
   eventsStopped: false,
   isDraft: false,
+  commentingExpenseId: null,
 };
 
 function gid() {
@@ -52,14 +53,32 @@ function syncExpenseCurrencyUI() {
 // ---------------------------------------------------------------------------
 // Tabs
 // ---------------------------------------------------------------------------
+const GROUP_PAGE_HELP = {
+  upload: "<strong>Add / Scan:</strong> Upload a receipt or enter a bill, choose who paid and who shares it, then save it to this month.",
+  expenses: "<strong>Expenses:</strong> Review this month's bills, search or filter them, and open an item to see its split and notes.",
+  balances: "<strong>Balances & settlement:</strong> Review who owes whom. After the owner settles this period, members can record and confirm the transfers.",
+  insights: "<strong>Insights:</strong> See this month's spending total, top categories, and largest expenses.",
+  activity: "<strong>Activity:</strong> Follow group changes, expenses, comments, and payment updates in time order.",
+  reports: "<strong>PDF Reports:</strong> Generate or download a clear monthly record of expenses, balances, and confirmed settlements.",
+  members: "<strong>Members:</strong> Invite people, share the invite link, and manage the group roster. Only the owner can remove members or change group details.",
+};
+
+function updateGroupPageHelp(tabName) {
+  const help = $("#groupPageHelp");
+  if (help) help.innerHTML = GROUP_PAGE_HELP[tabName] || GROUP_PAGE_HELP.upload;
+}
+
 function switchTab(tabName) {
   $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tabName));
   $$(".tab-panel").forEach((p) => p.classList.toggle("hidden", p.id !== `tab-${tabName}`));
+  updateGroupPageHelp(tabName);
 
   if (tabName === "expenses") loadExpenses();
   if (tabName === "balances") loadBalances();
   if (tabName === "reports") loadReports();
   if (tabName === "members") loadMembers();
+  if (tabName === "insights") loadInsights();
+  if (tabName === "activity") loadActivity();
 }
 
 function applyDraftGroupState() {
@@ -110,8 +129,17 @@ async function loadGroup() {
   syncExpenseCurrencyUI();
 
   renderPayerOptions();
+  populateMemberFilter();
   applyDefaultSplit();
   renderSplitOptions();
+}
+
+function populateMemberFilter() {
+  const select = $("#expenseMemberFilter");
+  if (!select) return;
+  const selected = select.value;
+  select.innerHTML = '<option value="">All members</option>' + activeMembers().map((member) => `<option value="${member.id}">${ShareSquad.escapeHtml(member.display_name)}</option>`).join("");
+  select.value = selected;
 }
 
 async function loadGroupSettings() {
@@ -363,6 +391,10 @@ function updatePeriodStatus() {
   }
 }
 
+function isCurrentPeriodSettled() {
+  return state.periods.some((period) => period.period_key === state.currentPeriod && period.status === "SETTLED");
+}
+
 // ---------------------------------------------------------------------------
 // Expense Split UI & Math
 // ---------------------------------------------------------------------------
@@ -489,7 +521,12 @@ function updateSplitNotice() {
 // ---------------------------------------------------------------------------
 async function loadExpenses() {
   const filterCat = $("#groupCategoryFilter").value;
-  const expenses = await ShareSquad.api(`/groups/${gid()}/expenses?period_key=${state.currentPeriod}${filterCat !== "All" ? `&category=${encodeURIComponent(filterCat)}` : ""}`);
+  const params = new URLSearchParams({ period_key: state.currentPeriod });
+  if (filterCat !== "All") params.set("category", filterCat);
+  if ($("#expenseSearch")?.value.trim()) params.set("search", $("#expenseSearch").value.trim());
+  if ($("#expenseMemberFilter")?.value) params.set("member_id", $("#expenseMemberFilter").value);
+  if ($("#onlyMyExpenses")?.checked) params.set("involved_me", "true");
+  const expenses = await ShareSquad.api(`/groups/${gid()}/expenses?${params}`);
   state.currentExpenses = expenses;
 
   const tbody = $("#expensesBody");
@@ -524,6 +561,7 @@ async function loadExpenses() {
       <td class="py-2.5 text-right">
         <div class="flex items-center justify-end gap-1">
           <button class="edit-exp p-1 hover:text-brand" data-id="${e.id}" title="Edit"><i data-lucide="edit-2" class="w-3.5 h-3.5"></i></button>
+          <button class="comment-exp p-1 hover:text-brand" data-id="${e.id}" title="Comments"><i data-lucide="message-circle" class="w-3.5 h-3.5"></i></button>
           <button class="delete-exp p-1 hover:text-stamp" data-id="${e.id}" data-name="${ShareSquad.escapeHtml(e.store_name)}" title="Delete"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
         </div>
       </td>
@@ -547,6 +585,7 @@ async function loadExpenses() {
       </div>
       <div class="card-actions">
         <button class="edit-exp bb-btn-secondary !py-1 !px-2 text-xs flex-1" data-id="${e.id}"><i data-lucide="edit-2" class="w-3 h-3"></i> Edit</button>
+        <button class="comment-exp bb-btn-secondary !py-1 !px-2 text-xs flex-1" data-id="${e.id}"><i data-lucide="message-circle" class="w-3 h-3"></i> Notes</button>
         <button class="delete-exp bb-btn-secondary !py-1 !px-2 text-xs text-stamp border-stamp/30 hover:bg-stamp/5 flex-1" data-id="${e.id}" data-name="${ShareSquad.escapeHtml(e.store_name)}"><i data-lucide="trash-2" class="w-3 h-3"></i> Delete</button>
       </div>
     `;
@@ -568,7 +607,8 @@ async function loadExpenses() {
       const id = Number(btn.dataset.id);
       if (!confirm(`Delete "${name}"?`)) return;
       try {
-        await ShareSquad.api(`/groups/${gid()}/expenses/${id}`, { method: "DELETE" });
+        const override = state.myRole === "owner" ? "?owner_override=true" : "";
+        await ShareSquad.api(`/groups/${gid()}/expenses/${id}${override}`, { method: "DELETE" });
         ShareSquad.showToast("Expense deleted", "info");
         await loadExpenses();
       } catch (err) {
@@ -576,6 +616,8 @@ async function loadExpenses() {
       }
     });
   });
+
+  $$(".comment-exp").forEach((btn) => btn.addEventListener("click", () => openComments(Number(btn.dataset.id))));
 }
 
 function startEditExpense(exp) {
@@ -611,6 +653,38 @@ function cancelEdit() {
   $("#previewImg").classList.add("hidden");
   $("#receiptPreviewWrap")?.classList.add("hidden");
   setScanBusy(false);
+}
+
+async function openComments(expenseId) {
+  const expense = state.currentExpenses.find((item) => item.id === expenseId);
+  state.commentingExpenseId = expenseId;
+  $("#commentsTitle").textContent = `Notes - ${expense?.store_name || "Expense"}`;
+  $("#commentsModal").classList.remove("hidden");
+  await loadComments();
+}
+
+async function loadComments() {
+  if (!state.commentingExpenseId) return;
+  const list = $("#commentsList");
+  list.innerHTML = '<p class="text-xs font-mono text-ink/40">Loading notes...</p>';
+  try {
+    const comments = await ShareSquad.api(`/groups/${gid()}/expenses/${state.commentingExpenseId}/comments`);
+    list.innerHTML = comments.length ? comments.map((comment) => `<article class="p-3 rounded-lg bg-ink/5"><p class="text-sm text-ink">${ShareSquad.escapeHtml(comment.body)}</p><p class="text-[10px] font-mono text-ink/45 mt-1">${ShareSquad.escapeHtml(comment.author_name)} - ${ShareSquad.formatDate(comment.created_at)}</p></article>`).join("") : '<p class="text-xs font-mono text-ink/40 py-3">No notes yet. Add one only when it helps clarify the expense.</p>';
+  } catch (err) {
+    list.innerHTML = `<p class="text-xs font-mono balance-negative">${ShareSquad.escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function submitComment(event) {
+  event.preventDefault();
+  const input = $("#commentInput");
+  const body = input.value.trim();
+  if (!body || !state.commentingExpenseId) return;
+  try {
+    await ShareSquad.api(`/groups/${gid()}/expenses/${state.commentingExpenseId}/comments`, { method: "POST", body: JSON.stringify({ body }) });
+    input.value = "";
+    await loadComments();
+  } catch (err) { ShareSquad.showToast(err.message, "error"); }
 }
 
 // ---------------------------------------------------------------------------
@@ -676,7 +750,7 @@ async function saveExpense() {
 
   try {
     if (state.editingExpenseId) {
-      await ShareSquad.api(`/groups/${gid()}/expenses/${state.editingExpenseId}`, {
+      await ShareSquad.api(`/groups/${gid()}/expenses/${state.editingExpenseId}${state.myRole === "owner" ? "?owner_override=true" : ""}`, {
         method: "PUT",
         body: JSON.stringify(payload),
       });
@@ -702,8 +776,11 @@ async function saveExpense() {
 // Balances & Currency Auto-Conversion
 // ---------------------------------------------------------------------------
 async function loadBalances() {
-  const balances = await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/balances`);
-  const settlements = await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/settlements`);
+  const [balances, settlements, payments] = await Promise.all([
+    ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/balances`),
+    ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/settlements`),
+    ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments`),
+  ]);
 
   const tbody = $("#balanceBody");
   tbody.innerHTML = "";
@@ -748,6 +825,7 @@ async function loadBalances() {
     setEmpty.classList.remove("hidden");
   } else {
     setEmpty.classList.add("hidden");
+    const settlementActionsOpen = isCurrentPeriodSettled();
     settlements.forEach((s) => {
       fxRate = s.exchange_rate;
       const settleCurr = s.converted_currency || s.currency || baseCurr;
@@ -759,11 +837,23 @@ async function loadBalances() {
 
       const div = document.createElement("div");
       div.className = "p-3 rounded-lg bg-ink/5 flex flex-col gap-1";
+      const pendingPayment = payments.find((payment) => payment.status === "PAID" && Number(payment.payer_member_id) === Number(s.from_member_id) && Number(payment.recipient_member_id) === Number(s.to_member_id));
+      const payerAction = Number(s.from_member_id) === Number(state.myMemberId)
+        ? (!settlementActionsOpen ? "" : pendingPayment
+          ? '<span class="text-[10px] text-amber-700 font-bold mt-1">Awaiting recipient confirmation</span>'
+          : `<button class="mark-payment bb-btn-primary !py-1.5 !px-2 text-[10px] self-start mt-1" data-payer="${s.from_member_id}" data-recipient="${s.to_member_id}" data-amount="${s.amount}" data-currency="${s.currency || baseCurr}">Mark paid - request confirmation</button>`)
+        : "";
+      const recipientAction = Number(s.to_member_id) === Number(state.myMemberId)
+        ? (!settlementActionsOpen ? "" : pendingPayment
+          ? `<button class="confirm-payment bb-btn-primary !py-1.5 !px-2 text-[10px] self-start mt-1" data-id="${pendingPayment.id}">Confirm receipt</button>`
+          : `<button class="mark-received bb-btn-primary !py-1.5 !px-2 text-[10px] self-start mt-1" data-payer="${s.from_member_id}" data-recipient="${s.to_member_id}" data-amount="${s.amount}" data-currency="${s.currency || baseCurr}">Mark received &amp; settle</button>`)
+        : "";
       div.innerHTML = `
         <div class="flex items-center justify-between text-xs font-mono gap-3">
           <span><strong class="text-ink">${ShareSquad.escapeHtml(s.from_name)}</strong> <span class="text-stamp font-bold">&rarr; pays</span> <strong class="text-ink">${ShareSquad.escapeHtml(s.to_name)}</strong></span>
           <span class="font-bold text-ink text-right">${ShareSquad.formatMoney(settleAmt, settleCurr)}${origNote}</span>
         </div>
+        ${payerAction}${recipientAction}
       `;
       setList.appendChild(div);
     });
@@ -786,6 +876,65 @@ async function loadBalances() {
   } else {
     banner.classList.add("hidden");
   }
+
+  $$(".mark-payment").forEach((button) => button.addEventListener("click", async () => {
+    button.disabled = true;
+    button.textContent = "Request sent";
+    try {
+      await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments`, {
+        method: "POST",
+        body: JSON.stringify({ payer_member_id: Number(button.dataset.payer), recipient_member_id: Number(button.dataset.recipient), amount: Number(button.dataset.amount), currency: button.dataset.currency }),
+      });
+      ShareSquad.showToast("Payment request sent to the recipient.", "success");
+      await loadBalances();
+    } catch (err) { ShareSquad.showToast(err.message, "error"); button.disabled = false; button.textContent = "Mark paid - request confirmation"; }
+  }));
+  $$(".mark-received").forEach((button) => button.addEventListener("click", async () => {
+    button.disabled = true;
+    button.textContent = "Paid";
+    try {
+      await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments/received`, {
+        method: "POST",
+        body: JSON.stringify({ payer_member_id: Number(button.dataset.payer), recipient_member_id: Number(button.dataset.recipient), amount: Number(button.dataset.amount), currency: button.dataset.currency }),
+      });
+      ShareSquad.showToast("Payment recorded as paid and balances recalculated.", "success");
+      await loadBalances();
+    } catch (err) { ShareSquad.showToast(err.message, "error"); button.disabled = false; button.textContent = "Mark received & settle"; }
+  }));
+  await loadPaymentHistory(payments);
+}
+
+async function loadPaymentHistory(existingPayments = null) {
+  const list = $("#paymentHistory");
+  if (!list) return;
+  try {
+    const payments = existingPayments || await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments`);
+    const paymentOnlyNotice = isCurrentPeriodSettled()
+      ? '<p class="text-[11px] font-mono text-ink/55 mb-3">Expenses are locked for this settled period. You can still record or confirm its outstanding payments.</p>'
+      : "";
+    const pendingNotice = $("#paymentPendingNotice");
+    const waitingForConfirmation = payments.filter((payment) => payment.status === "PAID");
+    if (pendingNotice) {
+      if (waitingForConfirmation.length) {
+        const waitingOnMe = waitingForConfirmation.some((payment) => Number(payment.recipient_member_id) === Number(state.myMemberId));
+        pendingNotice.classList.remove("hidden");
+        pendingNotice.textContent = waitingOnMe
+          ? "Payment confirmation needed: confirm received payments below. Balances update immediately after confirmation."
+          : "Payment awaiting recipient confirmation. Balances update after the recipient confirms receipt.";
+      } else {
+        pendingNotice.classList.add("hidden");
+        pendingNotice.textContent = "";
+      }
+    }
+    if (!payments.length) { list.innerHTML = ""; return; }
+    const members = new Map(state.members.map((member) => [Number(member.id), member.display_name]));
+    list.innerHTML = paymentOnlyNotice + `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/45">Payment history</p>` + payments.map((payment) => `<div class="p-2 rounded bg-ink/5 text-xs font-mono flex flex-wrap items-center justify-between gap-2"><span>${ShareSquad.escapeHtml(members.get(payment.payer_member_id) || "Member")} paid ${ShareSquad.escapeHtml(members.get(payment.recipient_member_id) || "Member")} ${ShareSquad.formatMoney(payment.amount, payment.currency)}</span><span class="font-bold ${payment.status === "CONFIRMED" ? "text-emerald-700" : "text-amber-700"}">${payment.status}</span>${Number(payment.recipient_member_id) === Number(state.myMemberId) && payment.status === "PAID" ? `<button class="confirm-payment bb-btn-secondary !py-1 !px-2 text-[10px]" data-id="${payment.id}">Confirm</button>` : ""}</div>`).join("");
+    $$(".confirm-payment").forEach((button) => button.addEventListener("click", async () => {
+      button.disabled = true;
+      try { await ShareSquad.api(`/groups/${gid()}/payments/${button.dataset.id}/confirm`, { method: "POST" }); ShareSquad.showToast("Payment confirmed and balances recalculated.", "success"); await loadBalances(); }
+      catch (err) { ShareSquad.showToast(err.message, "error"); button.disabled = false; }
+    }));
+  } catch (_) { list.innerHTML = ""; }
 }
 
 async function applySettlementCurrency(code, customRate = null) {
@@ -857,6 +1006,52 @@ async function submitCurrencyConversion(e) {
     $("#currencyModalMsg").textContent = err.message;
     $("#currencyModalMsg").className = "text-xs font-mono balance-negative";
   }
+}
+
+async function loadActivity() {
+  const list = $("#activityList");
+  if (!list) return;
+  try {
+    const events = await ShareSquad.api(`/groups/${gid()}/activity`);
+    list.innerHTML = events.length ? events.map((event) => `<article class="activity-item"><span class="activity-dot"></span><div><p class="text-sm text-ink">${ShareSquad.escapeHtml(event.summary)}</p><p class="text-[10px] font-mono text-ink/45 mt-1">${ShareSquad.formatDate(event.created_at)}</p></div></article>`).join("") : '<p class="text-sm font-mono text-ink/40 py-4">Activity will appear as your group adds expenses, payments, and notes.</p>';
+  } catch (err) { list.innerHTML = `<p class="text-sm balance-negative">${ShareSquad.escapeHtml(err.message)}</p>`; }
+}
+
+async function loadInsights() {
+  const root = $("#insightsContent");
+  if (!root) return;
+  root.innerHTML = '<div class="bb-card text-sm font-mono text-ink/45">Loading insights...</div>';
+  try {
+    const data = await ShareSquad.api(`/groups/${gid()}/dashboard?period_key=${state.currentPeriod}`);
+    const categoryRows = Object.entries(data.category_totals || {}).sort((a, b) => b[1] - a[1]);
+    const top = data.largest_expenses || [];
+    root.innerHTML = `
+      <div class="insight-kpis"><article class="bb-card"><p class="insight-label">Total spending</p><p class="insight-value">${ShareSquad.formatMoney(data.total_spent, data.currency)}</p><p class="text-xs text-ink/45">${state.currentPeriod}</p></article><article class="bb-card"><p class="insight-label">Top category</p><p class="insight-value text-lg">${ShareSquad.escapeHtml(categoryRows[0]?.[0] || "No expenses")}</p><p class="text-xs text-ink/45">${categoryRows[0] ? ShareSquad.formatMoney(categoryRows[0][1], data.currency) : ""}</p></article></div>
+      <div class="grid md:grid-cols-2 gap-4"><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">By category</h3>${categoryRows.length ? categoryRows.map(([name, amount]) => `<div class="insight-row"><span>${ShareSquad.escapeHtml(name)}</span><strong>${ShareSquad.formatMoney(amount, data.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses in this period.</p>'}</article><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Largest expenses</h3>${top.length ? top.map((expense) => `<div class="insight-row"><span>${ShareSquad.escapeHtml(expense.store_name)}</span><strong>${ShareSquad.formatMoney(expense.total_amount, expense.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses in this period.</p>'}</article></div>`;
+  } catch (err) { root.innerHTML = `<div class="bb-card balance-negative">${ShareSquad.escapeHtml(err.message)}</div>`; }
+}
+
+async function openNotifications() {
+  const modal = $("#notificationsModal");
+  const list = $("#notificationsList");
+  modal.classList.remove("hidden");
+  list.innerHTML = '<p class="text-xs font-mono text-ink/40">Loading notifications...</p>';
+  try {
+    const items = await ShareSquad.api("/notifications");
+    list.innerHTML = items.length ? items.map((item) => `<button class="notification-item ${item.read_at ? "" : "unread"}" data-id="${item.id}" data-link="${ShareSquad.escapeHtml(item.link || "")}"><span>${ShareSquad.escapeHtml(item.message)}</span><small>${ShareSquad.formatDate(item.created_at)}</small></button>`).join("") : '<p class="text-xs font-mono text-ink/40 py-4">You are all caught up.</p>';
+    $$(".notification-item").forEach((button) => button.addEventListener("click", async () => {
+      await ShareSquad.api(`/notifications/${button.dataset.id}/read`, { method: "POST" });
+      if (button.dataset.link) window.location.href = button.dataset.link;
+      else { button.classList.remove("unread"); loadNotificationCount(); }
+    }));
+    loadNotificationCount();
+  } catch (err) { list.innerHTML = `<p class="text-xs balance-negative">${ShareSquad.escapeHtml(err.message)}</p>`; }
+}
+
+async function loadNotificationCount() {
+  const badge = $("#notificationCount");
+  if (!badge) return;
+  try { const items = await ShareSquad.api("/notifications?unread_only=true"); badge.textContent = items.length > 9 ? "9+" : items.length; badge.classList.toggle("hidden", !items.length); } catch (_) { badge.classList.add("hidden"); }
 }
 
 // ---------------------------------------------------------------------------
@@ -976,7 +1171,7 @@ async function loadMembers() {
 
   list.querySelectorAll(".remove-member").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      if (!confirm(`Remove ${btn.dataset.name} from this group?\n\nTheir expenses and balances in this group will be deleted permanently.`)) return;
+      if (!confirm(`Remove ${btn.dataset.name} from active group activity?\n\nActive-period expenses involving them will be removed. Completed, settled history and reports remain available.`)) return;
       try {
         await ShareSquad.api(`/groups/${gid()}/members/${btn.dataset.id}`, { method: "DELETE" });
         ShareSquad.showToast(`${btn.dataset.name} was removed`, "success");
@@ -1205,6 +1400,18 @@ async function handleReceiptUpload(file) {
 
   // Category filter on expenses
   $("#groupCategoryFilter").addEventListener("change", loadExpenses);
+  $("#expenseMemberFilter")?.addEventListener("change", loadExpenses);
+  $("#onlyMyExpenses")?.addEventListener("change", loadExpenses);
+  let searchDelay;
+  $("#expenseSearch")?.addEventListener("input", () => {
+    clearTimeout(searchDelay);
+    searchDelay = setTimeout(loadExpenses, 250);
+  });
+
+  $("#notificationsBtn")?.addEventListener("click", openNotifications);
+  $("#closeNotificationsBtn")?.addEventListener("click", () => $("#notificationsModal").classList.add("hidden"));
+  $("#closeCommentsBtn")?.addEventListener("click", () => $("#commentsModal").classList.add("hidden"));
+  $("#commentForm")?.addEventListener("submit", submitComment);
 
   // Currency auto-conversion
   $("#convertCurrencyBtn").addEventListener("click", openCurrencyModal);
@@ -1282,5 +1489,6 @@ async function handleReceiptUpload(file) {
   await loadGroup();
   await loadPeriods();
   await loadExpenses();
+  await loadNotificationCount();
   startGroupSync();
 })();

@@ -18,10 +18,18 @@ How to run it, deploy it, and update it without losing data: **[OPERATIONS.md](O
 | Receipts | Photo upload → local OCR first; API (Gemini and others) only if OCR is unsure **and** a key is set |
 | Splits | Equal, percent, exact, or shares; payer and participants per expense |
 | Money | Each expense can be USD, INR, CAD, EUR, and more; settle the month in another currency |
-| Balances | Who owes whom, simplified payments, live refresh in a group |
+| Balances | Who owes whom, record a payment, recipient confirmation, and live refresh in a group |
+| Group activity | A mobile-friendly activity feed, optional expense notes, and in-app notifications for expense and payment changes |
+| Insights & search | Search/filter the ledger by person, category, or your involvement; review category totals and largest expenses |
 | Reports | Monthly PDF with receipts (download; email if SMTP is configured) |
 | Personal tracker | Your own monthly expenses, same receipt scan, category totals, PDF export |
 | Settings | Preferred currency, compact list, your own vision API key, optional per-group override |
+
+## Group history and corrections
+
+- Removing a member removes their involvement from active periods, while completed settled reports and history remain preserved.
+- Once a group payment is marked paid, ordinary expense edits are locked. A group owner can make a correction; confirmed payments remain applied, balances are recalculated, and affected members receive an in-app notification.
+- Expense notes are optional and intended for clarifications, not required bookkeeping.
 
 ## Receipt reading (important)
 

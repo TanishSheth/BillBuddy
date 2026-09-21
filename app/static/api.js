@@ -177,6 +177,13 @@ function formatMoney(amount, currency = "USD") {
   return `<span class="currency-sym">${escapeHtml(meta.symbol)}</span>${formatted}`;
 }
 
+function formatMoneyText(amount, currency = "USD") {
+  const num = Number(amount || 0);
+  const meta = currencyMeta(currency);
+  const formatted = num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `${meta.symbol}${formatted}`;
+}
+
 function formatDate(iso) {
   if (!iso) return "";
   // Date-only values are calendar dates. Parsing them as UTC shifts them
@@ -377,6 +384,7 @@ window.ShareSquad = {
   setAuthImage,
   bindReceiptCamera,
   formatMoney,
+  formatMoneyText,
   formatDate,
   escapeHtml,
   initials,
