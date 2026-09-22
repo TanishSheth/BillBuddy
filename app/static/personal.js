@@ -97,8 +97,8 @@ function filterAndRenderExpenses() {
       <td class="py-2.5 px-2 font-mono font-bold text-right text-brand">${ShareSquad.formatMoney(e.total_amount, e.currency || "USD")}</td>
       <td class="py-2.5 px-2 text-right">
         <div class="flex items-center justify-end gap-1">
-          <button class="edit-expense p-1 hover:text-brand" data-id="${e.id}" title="Edit"><i data-lucide="edit-2" class="w-3.5 h-3.5"></i></button>
-          <button class="delete-expense p-1 hover:text-stamp" data-id="${e.id}" data-name="${ShareSquad.escapeHtml(e.store_name)}" title="Delete"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+          <button type="button" class="edit-expense p-1 hover:text-brand" data-id="${e.id}" title="Edit"><i data-lucide="edit-2" class="w-3.5 h-3.5"></i></button>
+          <button type="button" class="delete-expense p-1 hover:text-stamp" data-id="${e.id}" data-name="${ShareSquad.escapeHtml(e.store_name)}" title="Delete"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
         </div>
       </td>
     `;
@@ -117,8 +117,8 @@ function filterAndRenderExpenses() {
         </div>
         <div class="card-meta">${e.bill_date} &bull; ${ShareSquad.escapeHtml(e.notes || "No notes")}</div>
         <div class="card-actions">
-          <button class="edit-expense bb-btn-secondary !py-1 !px-2 text-xs flex-1" data-id="${e.id}"><i data-lucide="edit-2" class="w-3 h-3"></i> Edit</button>
-          <button class="delete-expense bb-btn-secondary !py-1 !px-2 text-xs text-stamp border-stamp/30 flex-1" data-id="${e.id}" data-name="${ShareSquad.escapeHtml(e.store_name)}"><i data-lucide="trash-2" class="w-3 h-3"></i> Delete</button>
+          <button type="button" class="edit-expense bb-btn-secondary !py-1 !px-2 text-xs flex-1" data-id="${e.id}"><i data-lucide="edit-2" class="w-3 h-3"></i> Edit</button>
+          <button type="button" class="delete-expense bb-btn-secondary !py-1 !px-2 text-xs text-stamp border-stamp/30 flex-1" data-id="${e.id}" data-name="${ShareSquad.escapeHtml(e.store_name)}"><i data-lucide="trash-2" class="w-3 h-3"></i> Delete</button>
         </div>
       `;
       mobileList.appendChild(card);
@@ -127,27 +127,37 @@ function filterAndRenderExpenses() {
 
   lucide.createIcons();
 
-  $$(".edit-expense").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const exp = currentSummary.expenses.find((x) => x.id === Number(btn.dataset.id));
-      if (exp) openExpenseModal(exp);
-    });
-  });
+}
 
-  $$(".delete-expense").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const name = btn.dataset.name;
-      const id = Number(btn.dataset.id);
-      if (!confirm(`Delete expense "${name}"?`)) return;
-      try {
-        await ShareSquad.api(`/personal/expenses/${id}`, { method: "DELETE" });
-        ShareSquad.showToast("Expense deleted", "info");
-        await loadPersonalSummary($("#monthPicker").value);
-      } catch (err) {
-        ShareSquad.showToast(err.message, "error");
-      }
-    });
-  });
+async function handleExpenseAction(event) {
+  const btn = event.target.closest("button.edit-expense, button.delete-expense");
+  if (!btn) return;
+  event.preventDefault();
+  const id = Number(btn.dataset.id);
+  const expense = currentSummary?.expenses?.find((item) => item.id === id);
+  if (!expense) {
+    ShareSquad.showToast("That expense is no longer available. Refreshing the list.", "info");
+    await loadPersonalSummary($("#monthPicker").value);
+    return;
+  }
+  if (btn.classList.contains("edit-expense")) {
+    openExpenseModal(expense);
+    return;
+  }
+
+  const name = expense.store_name || btn.dataset.name || "this expense";
+  if (!confirm(`Delete expense "${name}"? This cannot be undone.`)) return;
+  btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
+  try {
+    await ShareSquad.api(`/personal/expenses/${id}`, { method: "DELETE" });
+    ShareSquad.showToast("Expense deleted", "success");
+    await loadPersonalSummary($("#monthPicker").value);
+  } catch (err) {
+    btn.disabled = false;
+    btn.removeAttribute("aria-busy");
+    ShareSquad.showToast(err.message || "Could not delete the expense.", "error");
+  }
 }
 
 function openExpenseModal(expense = null) {
@@ -304,6 +314,11 @@ async function submitExpenseForm(e) {
   });
 
   $("#categoryFilter").addEventListener("change", filterAndRenderExpenses);
+  // Delegate actions from the permanent containers. The transaction cards are
+  // rebuilt after filters and refreshes, so direct listeners on each card can
+  // otherwise disappear on mobile.
+  $("#expensesTableBody").addEventListener("click", handleExpenseAction);
+  $("#expensesMobileList").addEventListener("click", handleExpenseAction);
 
   $("#addExpenseBtn").addEventListener("click", () => openExpenseModal());
   $("#scanReceiptBtn").addEventListener("click", () => {
