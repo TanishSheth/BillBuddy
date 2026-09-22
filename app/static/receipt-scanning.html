@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="ShareSquad receipt scanning: local OCR first, optional Google AI Studio API key, and always review before saving.">
+<meta name="description" content="ShareSquad receipt scanning: wrinkle-aware local OCR first, optional vision-provider API key, and always review before saving.">
 <link rel="canonical" href="https://sharesquad.tanishsheth.com/receipt-scanning.html">
 <title>Receipt Scanning — ShareSquad</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -25,20 +25,20 @@
 <p>ShareSquad can read merchant name, date, and total from a receipt photo. Suggestions are never saved as an expense until you confirm or correct them.</p>
 
 <h2>Local reading first</h2>
-<p>Every scan starts with free, on-server receipt reading. For many clear printed receipts, that is enough—no AI key required.</p>
+<p>Every scan starts with free, on-server receipt reading. It cleans uneven lighting and crease shadows, corrects perspective where possible, and uses layout-aware total matching. For many printed receipts, that is enough—no AI key required.</p>
 
-<h2>Optional Google AI Studio help</h2>
-<p>If a receipt is unclear, you can connect your own Google AI Studio API key for Gemini-powered extraction:</p>
+<h2>Optional provider help</h2>
+<p>If a receipt is unclear, you can connect your own supported vision-provider API key:</p>
 <ol class="landing-list mt-3">
 <li>Open <strong>Settings → Receipt scanning</strong>.</li>
 <li>Turn on <strong>Use my own AI API key</strong>.</li>
-<li>Select <strong>Google</strong> and a Gemini model.</li>
-<li>Create an API key in <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a>, paste it into ShareSquad, and save.</li>
+<li>Select a provider and model.</li>
+<li>Create an API key with that provider, paste it into ShareSquad, and save.</li>
 </ol>
-<p class="mt-4">Your API key is encrypted at rest and is not shown again after you save it. Google controls its own free-tier availability and limits.</p>
+<p class="mt-4">Your API key is encrypted at rest and is not shown again after you save it. Your chosen provider controls its own pricing, free tier, and limits.</p>
 
 <h2>You stay in control</h2>
-<p>Whether the details came from local OCR or Gemini, check store name, date, amount, and category before saving. A receipt is optional—you can always enter an expense manually.</p>
+<p>Whether the details came from local OCR or an optional provider, check store name, date, amount, and category before saving. A receipt is optional—you can always enter an expense manually.</p>
 
 <p class="mt-8 flex flex-wrap gap-3">
 <a href="/login.html?mode=signup" class="bb-btn-primary">Create a free account</a>

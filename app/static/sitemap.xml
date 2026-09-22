@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://sharesquad.tanishsheth.com/</loc></url>
+  <url><loc>https://sharesquad.tanishsheth.com/</loc><lastmod>2026-09-22</lastmod></url>
   <url><loc>https://sharesquad.tanishsheth.com/about.html</loc></url>
   <url><loc>https://sharesquad.tanishsheth.com/help.html</loc></url>
   <url><loc>https://sharesquad.tanishsheth.com/contact.html</loc></url>
   <url><loc>https://sharesquad.tanishsheth.com/privacy.html</loc></url>
   <url><loc>https://sharesquad.tanishsheth.com/terms.html</loc></url>
+  <url><loc>https://sharesquad.tanishsheth.com/shared-groups.html</loc></url>
+  <url><loc>https://sharesquad.tanishsheth.com/clear-balances.html</loc></url>
+  <url><loc>https://sharesquad.tanishsheth.com/receipt-scanning.html</loc></url>
 </urlset>

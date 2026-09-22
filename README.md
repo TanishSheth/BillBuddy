@@ -15,7 +15,7 @@ How to run it, deploy it, and update it without losing data: **[OPERATIONS.md](O
 |------|----------------|
 | Accounts | Register, sign in, JWT session in the browser |
 | Shared groups | Create a group with a base currency, invite by email or link, open/leave/delete |
-| Receipts | Photo upload → local OCR first; API (Gemini and others) only if OCR is unsure **and** a key is set |
+| Receipts | Photo upload → wrinkle-aware local OCR first; optional vision provider only if OCR is unsure **and** a key is set |
 | Splits | Equal, percent, exact, or shares; payer and participants per expense |
 | Money | Each expense can be USD, INR, CAD, EUR, and more; settle the month in another currency |
 | Balances | Who owes whom, record a payment, recipient confirmation, and live refresh in a group |
@@ -35,7 +35,7 @@ How to run it, deploy it, and update it without losing data: **[OPERATIONS.md](O
 
 Having an API key does **not** send every photo to the API.
 
-1. Tesseract OCR always runs first on the server (free, no key).
+1. Tesseract OCR always runs first on the server (free, no key). Receipt preparation includes perspective correction, crease-shadow normalization, adaptive thresholding, local text-line fallback, and geometry-aware total matching.
 2. If merchant, date, and total all look solid, that result is used and the API is skipped.
 3. If any of those is weak **and** a key is available, the photo is sent to the vision model.
 4. The warning toast is based on **missing fields on the form**, not on “the API had an error.” If merchant/date/total are filled, you get a success toast even when Gemini was skipped or failed internally.

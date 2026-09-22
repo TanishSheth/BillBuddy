@@ -3,6 +3,7 @@ Allow: /
 
 Disallow: /api/
 Disallow: /index.html
+Disallow: /landing.html
 Disallow: /group.html
 Disallow: /personal.html
 Disallow: /friends.html
@@ -10,6 +11,7 @@ Disallow: /settings.html
 Disallow: /quick-split.html
 Disallow: /quick-join.html
 Disallow: /join.html
+Disallow: /friend-join.html
 Disallow: /login.html
 Disallow: /reset-password.html
 
