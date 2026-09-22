@@ -214,6 +214,7 @@ def test_ocr_receipt_parsing():
         _find_total,
         _group_tokens_into_lines,
         _is_register_line,
+        _remove_wrinkle_shadows,
         _variant_score,
     )
 
@@ -258,7 +259,7 @@ def test_ocr_receipt_parsing():
         "width": [60, 40, 40, 50, 40, 40],
         "height": [12, 10, 12, 12, 10, 12],
     }
-    grouped, ntok, mean, lefts, heights = _group_tokens_into_lines(data)
+    grouped, ntok, mean, lefts, heights, line_boxes = _group_tokens_into_lines(data)
     assert ntok == 6
     assert mean == 80.0
     assert len(grouped) == 2
@@ -266,6 +267,45 @@ def test_ocr_receipt_parsing():
     assert grouped[1].startswith("TOTAL") and "22.25" in grouped[1]
     assert len(lefts) == 2
     assert heights == [12, 12]
+    assert line_boxes[1]["tokens"][-1]["text"] == "22.25"
+
+    geometry_lines = ["SUBTOTAL 80.00", "CASH TENDERED 100.00", "BALANCE DUE 90.00"]
+    geometry = [
+        {"left": 10, "top": 100, "right": 290, "bottom": 120, "tokens": [
+            {"text": "SUBTOTAL", "left": 10, "top": 100, "w": 90, "h": 20},
+            {"text": "80.00", "left": 240, "top": 100, "w": 50, "h": 20},
+        ]},
+        {"left": 10, "top": 160, "right": 290, "bottom": 180, "tokens": [
+            {"text": "CASH", "left": 10, "top": 160, "w": 45, "h": 20},
+            {"text": "TENDERED", "left": 60, "top": 160, "w": 90, "h": 20},
+            {"text": "100.00", "left": 230, "top": 160, "w": 60, "h": 20},
+        ]},
+        {"left": 10, "top": 420, "right": 290, "bottom": 445, "tokens": [
+            {"text": "BALANCE", "left": 10, "top": 420, "w": 75, "h": 25},
+            {"text": "DUE", "left": 90, "top": 420, "w": 35, "h": 25},
+            {"text": "90.00", "left": 240, "top": 420, "w": 50, "h": 25},
+        ]},
+    ]
+    assert _find_total(geometry_lines, geometry) == (90.00, True)
+
+    # A wrinkle can make the right-aligned price look like a separate row.
+    # Geometry matching should still attach it to the total label.
+    split_total_lines = ["GRAND TOTAL", "14.20"]
+    split_total_geometry = [
+        {"left": 10, "top": 300, "right": 125, "bottom": 320, "tokens": [
+            {"text": "GRAND", "left": 10, "top": 300, "w": 70, "h": 20},
+            {"text": "TOTAL", "left": 85, "top": 300, "w": 40, "h": 20},
+        ]},
+        {"left": 610, "top": 339, "right": 665, "bottom": 359, "tokens": [
+            {"text": "14.20", "left": 610, "top": 339, "w": 55, "h": 20},
+        ]},
+    ]
+    assert _find_total(split_total_lines, split_total_geometry) == (14.20, True)
+
+    import numpy as np
+    shadowed = np.tile(np.linspace(55, 210, 80, dtype=np.uint8), (50, 1))
+    flattened = _remove_wrinkle_shadows(shadowed)
+    assert flattened.mean() > shadowed.mean(), "shadow normalization should brighten a dark crease gradient"
 
     pub, pub_ok = _find_store_name(
         ["Palmetto Park Square"],

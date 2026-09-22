@@ -330,6 +330,18 @@ def _flatten_illumination(gray):
     return clahe.apply(flat)
 
 
+def _remove_wrinkle_shadows(gray):
+    """Flatten local crease shadows before adaptive thresholding.
+
+    A broad morphological close estimates paper illumination while ignoring
+    letter strokes. Dividing by that background handles the sharp, local
+    gradients that a global deskew or a single Otsu threshold cannot fix.
+    """
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+    background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+    return cv2.divide(gray, np.maximum(background, 1), scale=255)
+
+
 def _soften_thermal_ink(gray):
     """Light speckle removal only. Unsharp + bilateral split thermal pin-dots (3→8, I→|)."""
     return cv2.medianBlur(gray, 3)
@@ -396,6 +408,7 @@ def _prepare_paper_variants(bgr):
     bgr = _deskew(bgr)
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     gray = _flatten_illumination(gray)
+    gray = _remove_wrinkle_shadows(gray)
     gray = _soften_thermal_ink(gray)
     gray = _bridge_thermal_dots(gray)
     gray = _ensure_min_width(gray)
@@ -411,8 +424,8 @@ def _prepare_variants(image_bytes: bytes):
     return _prepare_paper_variants(bgr)
 
 
-def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float, list[int], list[int]]:
-    """Join Tesseract tokens that share a horizontal band so labels stay with prices."""
+def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float, list[int], list[int], list[dict]]:
+    """Join Tesseract tokens into rows while retaining receipt geometry."""
     n = len(data.get("text") or [])
     tokens = []
     confs: list[float] = []
@@ -428,7 +441,7 @@ def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float, list[in
             continue
         try:
             tokens.append({
-                "text": word,
+                "text": _repair_ocr_digits(word),
                 "left": int(data["left"][i]),
                 "top": int(data["top"][i]),
                 "w": int(data["width"][i]),
@@ -443,19 +456,38 @@ def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float, list[in
     for tok in tokens:
         cy = tok["top"] + tok["h"] / 2.0
         matched = None
+        best_distance = None
         for row in rows:
-            if abs(cy - row["cy"]) <= max(row["h"], tok["h"]) * 0.55:
+            # A crease can lift the right-hand price away from its left-hand
+            # label. Permit a modest, distance-aware vertical band while
+            # favouring the closest row so adjacent receipt lines stay apart.
+            dx = abs(tok["left"] - row["x"])
+            predicted_cy = row["cy"] + row["slope"] * (tok["left"] - row["x"])
+            tolerance = max(row["h"], tok["h"]) * 0.65 + min(20.0, dx * 0.04)
+            distance = abs(cy - predicted_cy)
+            if distance <= tolerance and (best_distance is None or distance < best_distance):
                 matched = row
-                break
+                best_distance = distance
         if matched is None:
-            rows.append({"tokens": [tok], "cy": cy, "h": float(tok["h"])})
+            rows.append({"tokens": [tok], "cy": cy, "h": float(tok["h"]), "x": float(tok["left"]), "slope": 0.0})
         else:
             matched["tokens"].append(tok)
             count = len(matched["tokens"])
             matched["cy"] = (matched["cy"] * (count - 1) + cy) / count
             matched["h"] = max(matched["h"], float(tok["h"]))
+            # Fit a gentle local text slope. Clamp it to avoid one noisy word
+            # pulling the entire row into a neighbouring line.
+            xs = [item["left"] + item["w"] / 2.0 for item in matched["tokens"]]
+            ys = [item["top"] + item["h"] / 2.0 for item in matched["tokens"]]
+            x_mean, y_mean = sum(xs) / len(xs), sum(ys) / len(ys)
+            denom = sum((x - x_mean) ** 2 for x in xs)
+            if denom > 1:
+                slope = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys)) / denom
+                matched["slope"] = max(-0.18, min(0.18, slope))
+                matched["x"] = x_mean
     rows.sort(key=lambda r: r["cy"])
     lines = []
+    line_boxes: list[dict] = []
     for row in rows:
         row["tokens"].sort(key=lambda t: t["left"])
         line = " ".join(t["text"] for t in row["tokens"]).strip()
@@ -463,23 +495,87 @@ def _group_tokens_into_lines(data: dict) -> tuple[list[str], int, float, list[in
             lines.append(line)
             lefts.append(row["tokens"][0]["left"])
             heights.append(int(round(row["h"])))
+            line_boxes.append({
+                "left": min(token["left"] for token in row["tokens"]),
+                "top": min(token["top"] for token in row["tokens"]),
+                "right": max(token["left"] + token["w"] for token in row["tokens"]),
+                "bottom": max(token["top"] + token["h"] for token in row["tokens"]),
+                "tokens": row["tokens"],
+            })
     mean = sum(confs) / len(confs) if confs else 0.0
-    return lines, len(tokens), mean, lefts, heights
+    return lines, len(tokens), mean, lefts, heights, line_boxes
 
 
-def _tesseract_pass(image, psm: str) -> tuple[str, float, list[str], int, list[int], list[int]]:
-    empty = ("", 0.0, [], 0, [], [])
+def _tesseract_pass(image, psm: str) -> tuple[str, float, list[str], int, list[int], list[int], list[dict]]:
+    empty = ("", 0.0, [], 0, [], [], [])
     if not TESSERACT_AVAILABLE:
         return empty
     try:
         data = pytesseract.image_to_data(image, config=psm, output_type=pytesseract.Output.DICT)
-        lines, token_count, mean, lefts, heights = _group_tokens_into_lines(data)
+        lines, token_count, mean, lefts, heights, line_boxes = _group_tokens_into_lines(data)
         lines = [_repair_ocr_digits(l) for l in lines]
         text = _repair_ocr_digits("\n".join(lines))
-        return text, mean, lines, token_count, lefts, heights
+        return text, mean, lines, token_count, lefts, heights, line_boxes
     except Exception as exc:
         logger.warning("Tesseract failed: %s", exc)
         return empty
+
+
+def _extract_text_regions(binary) -> list[tuple[int, int, int, int]]:
+    """Find likely text strips for a line-by-line OCR fallback.
+
+    This deliberately operates after shadow normalization and thresholding.
+    It does not try to straighten the entire sheet again: each crop is read as
+    one line, so local waves and small perspective shifts do not make
+    Tesseract's page-layout detector lose the row.
+    """
+    if binary is None or binary.size == 0:
+        return []
+    ink = cv2.bitwise_not(binary) if float(np.mean(binary)) > 127 else binary
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 3))
+    joined = cv2.dilate(ink, kernel, iterations=1)
+    contours, _ = cv2.findContours(joined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    height, width = binary.shape[:2]
+    regions = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w < max(30, width * 0.04) or h < 9 or h > height * 0.16:
+            continue
+        pad_x, pad_y = 10, 5
+        regions.append((max(0, x - pad_x), max(0, y - pad_y),
+                        min(width, x + w + pad_x), min(height, y + h + pad_y)))
+    return sorted(regions, key=lambda region: (region[1], region[0]))
+
+
+def _tesseract_local_line_pass(binary) -> tuple[str, float, list[str], int, list[int], list[int], list[dict]]:
+    """OCR detected receipt strips with PSM 7, retaining page coordinates."""
+    empty = ("", 0.0, [], 0, [], [], [])
+    if not TESSERACT_AVAILABLE:
+        return empty
+    regions = _extract_text_regions(binary)
+    if not regions:
+        return empty
+    merged = {key: [] for key in ("text", "conf", "left", "top", "width", "height")}
+    for x0, y0, x1, y1 in regions:
+        try:
+            data = pytesseract.image_to_data(
+                binary[y0:y1, x0:x1], config="--oem 3 --psm 7", output_type=pytesseract.Output.DICT,
+            )
+        except Exception as exc:
+            logger.info("Local line OCR skipped: %s", exc)
+            continue
+        for index, text in enumerate(data.get("text") or []):
+            merged["text"].append(text)
+            merged["conf"].append(data.get("conf", [])[index])
+            merged["left"].append(int(data.get("left", [])[index]) + x0)
+            merged["top"].append(int(data.get("top", [])[index]) + y0)
+            merged["width"].append(data.get("width", [])[index])
+            merged["height"].append(data.get("height", [])[index])
+    if not merged["text"]:
+        return empty
+    lines, token_count, mean, lefts, heights, line_boxes = _group_tokens_into_lines(merged)
+    text = _repair_ocr_digits("\n".join(lines))
+    return text, mean, lines, token_count, lefts, heights, line_boxes
 
 
 _ANCHOR_RE = re.compile(
@@ -507,25 +603,34 @@ def _variant_score(text: str, mean_conf: float, token_count: int) -> float:
     )
 
 
-def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list[int]]:
-    """Return (text, mean Tesseract word confidence 0-100, layout lines, x-offsets, line heights)."""
-    empty = ("", 0.0, [], [], [])
+def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list[int], list[dict]]:
+    """Return OCR text, confidence, line text, and token-level receipt geometry."""
+    empty = ("", 0.0, [], [], [], [])
     if not TESSERACT_AVAILABLE:
         logger.warning("pytesseract not installed — local OCR extraction unavailable.")
         return empty
 
     if CV2_AVAILABLE:
         try:
-            best = ("", -1.0, [], [], [], -1.0)
+            best = ("", -1.0, [], [], [], [], -1.0)
             for name, variant in _prepare_variants(image_bytes):
                 for psm in _TESSERACT_PSMS:
-                    text, conf, lines, ntok, lefts, heights = _tesseract_pass(variant, psm)
+                    text, conf, lines, ntok, lefts, heights, line_boxes = _tesseract_pass(variant, psm)
                     score = _variant_score(text, conf, ntok)
                     logger.info("OCR variant %s (%s) mean confidence %.1f score %.1f", name, psm, conf, score)
-                    if score > best[5]:
-                        best = (text, conf, lines, lefts, heights, score)
-            if best[5] >= 0:
-                return best[0], max(best[1], 0.0), best[2], best[3], best[4]
+                    if score > best[6]:
+                        best = (text, conf, lines, lefts, heights, line_boxes, score)
+                # The binary image is best suited to contour extraction. This
+                # adds a PSM-7 local-line candidate rather than replacing the
+                # full-page PSM-11 read used for ordinary, flat receipts.
+                if "bin" in name or name == "binary":
+                    text, conf, lines, ntok, lefts, heights, line_boxes = _tesseract_local_line_pass(variant)
+                    score = _variant_score(text, conf, ntok)
+                    logger.info("OCR variant %s (local PSM 7) mean confidence %.1f score %.1f", name, conf, score)
+                    if score > best[6]:
+                        best = (text, conf, lines, lefts, heights, line_boxes, score)
+            if best[6] >= 0:
+                return best[0], max(best[1], 0.0), best[2], best[3], best[4], best[5]
         except Exception as exc:
             logger.warning("OpenCV cleanup failed, using basic OCR: %s", exc)
 
@@ -539,10 +644,10 @@ def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list
             img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
         candidates = []
         for psm in _TESSERACT_PSMS:
-            text, conf, lines, ntok, lefts, heights = _tesseract_pass(img, psm)
-            candidates.append((text, conf, lines, lefts, heights, _variant_score(text, conf, ntok)))
-        text, conf, lines, lefts, heights, _score = max(candidates, key=lambda item: item[5])
-        return text, conf, lines, lefts, heights
+            text, conf, lines, ntok, lefts, heights, line_boxes = _tesseract_pass(img, psm)
+            candidates.append((text, conf, lines, lefts, heights, line_boxes, _variant_score(text, conf, ntok)))
+        text, conf, lines, lefts, heights, line_boxes, _score = max(candidates, key=lambda item: item[6])
+        return text, conf, lines, lefts, heights, line_boxes
     except Exception as exc:
         logger.warning("Local OCR failed: %s", exc)
         return empty
@@ -833,8 +938,94 @@ def _amount_on_same_row(line: str) -> float | None:
     return amounts[-1] if amounts else None
 
 
-def _find_total(lines: list[str]) -> tuple[float | None, bool]:
-    """Use only a Total-labeled row. Ignore tax / subtotal / savings / payment rows."""
+def _find_total_by_geometry(lines: list[str], line_boxes: list[dict]) -> tuple[float | None, bool]:
+    """Rank every detected money token using its label and receipt position.
+
+    Receipts normally put the payable amount in a right-aligned column near
+    the bottom. Keeping the OCR bounding boxes lets us distinguish that value
+    from similarly formatted item prices, tax, tendered cash, and loyalty
+    balances without relying on one literal spelling of "TOTAL".
+    """
+    if not line_boxes:
+        return None, False
+    page_right = max((box.get("right", 0) for box in line_boxes), default=1)
+    page_bottom = max((box.get("bottom", 0) for box in line_boxes), default=1)
+    candidates: list[tuple[float, float, bool]] = []
+    money_tokens: list[tuple[dict, dict, float]] = []
+
+    for index, box in enumerate(line_boxes):
+        line = lines[index] if index < len(lines) else ""
+        if not line or _is_register_line(line):
+            continue
+        kind = _classify_amount_line(line)
+        if kind in _IGNORE_KINDS:
+            continue
+        tokens = box.get("tokens") or []
+        for token in tokens:
+            amounts = _parse_amounts(str(token.get("text") or ""))
+            if not amounts:
+                continue
+            for amount in amounts:
+                if _plausible_receipt_total(amount):
+                    money_tokens.append((token, box, amount))
+            right_fraction = min((token.get("left", 0) + token.get("w", 0)) / max(page_right, 1), 1.0)
+            lower_fraction = min((token.get("top", 0) + token.get("h", 0)) / max(page_bottom, 1), 1.0)
+            score = right_fraction * 24.0 + lower_fraction * 16.0
+            is_total_row = kind == "total"
+            if is_total_row:
+                score += 100.0
+            # Rightmost numeric value is usually the amount column when a row
+            # contains quantity, unit price, and line total.
+            if token.get("left", 0) + token.get("w", 0) >= box.get("right", 0) - 3:
+                score += 8.0
+            for amount in amounts:
+                if _plausible_receipt_total(amount):
+                    candidates.append((score, amount, is_total_row))
+
+    # On a creased receipt, the left-side label and right-side amount can be
+    # read as separate rows. Pair a total label with a price to its right using
+    # a slope-aware vertical band instead of demanding the same y-coordinate.
+    for index, label_box in enumerate(line_boxes):
+        label_line = lines[index] if index < len(lines) else ""
+        if not label_line or _classify_amount_line(label_line) != "total":
+            continue
+        label_y = (label_box.get("top", 0) + label_box.get("bottom", 0)) / 2.0
+        label_right = label_box.get("right", 0)
+        line_height = max(label_box.get("bottom", 0) - label_box.get("top", 0), 1)
+        for token, _amount_box, amount in money_tokens:
+            token_left = token.get("left", 0)
+            if token_left < label_right - 4:
+                continue
+            token_y = token.get("top", 0) + token.get("h", 0) / 2.0
+            dx = token_left - label_right
+            # A 5% rise/fall across the row plus almost one line height covers
+            # local waviness without connecting unrelated receipt sections.
+            vertical_band = min(70.0, line_height * 0.9 + dx * 0.05)
+            dy = abs(token_y - label_y)
+            if dy > vertical_band:
+                continue
+            right_fraction = min((token_left + token.get("w", 0)) / max(page_right, 1), 1.0)
+            proximity = max(0.0, 1.0 - (dy / max(vertical_band, 1.0)))
+            candidates.append((120.0 + right_fraction * 16.0 + proximity * 12.0, amount, True))
+
+    if not candidates:
+        return None, False
+    best_score, best_amount, is_total_row = max(candidates, key=lambda candidate: candidate[0])
+    # A label-free candidate is a useful form suggestion, but is deliberately
+    # low confidence so the VLM/manual-review fallback still runs.
+    if is_total_row or best_score >= 38.0:
+        return best_amount, is_total_row
+    return None, False
+
+
+def _find_total(lines: list[str], line_boxes: list[dict] | None = None) -> tuple[float | None, bool]:
+    """Find the payable amount, preferring full geometry-aware OCR evidence."""
+    geometric_amount, geometric_confident = _find_total_by_geometry(lines, line_boxes or [])
+    if geometric_amount is not None:
+        return geometric_amount, geometric_confident
+
+    # Geometry is unavailable only with an OCR backend that did not return
+    # bounding boxes. Preserve the conservative text-only fallback.
     found = None
     for index, line in enumerate(lines):
         if _is_register_line(line):
@@ -1320,16 +1511,15 @@ def extract_receipt_data_ocr(
     guess (or missing) — the caller can decide to escalate to a VLM if one
     is configured, or just hand the guess to the user to confirm/edit.
     """
-    text, mean_conf, boxed_lines, line_lefts, line_heights = _run_ocr(image_bytes)
+    text, mean_conf, boxed_lines, line_lefts, line_heights, line_boxes = _run_ocr(image_bytes)
     lines = boxed_lines or [l for l in text.splitlines() if l.strip()]
-    total_lines = _drop_child_promo_lines(lines, line_lefts)
     fingerprint = receipt_store_fingerprint(lines, text)
 
     store_name, store_confident = _find_store_name(
         lines, text, heights=line_heights, learned_vendors=learned_vendors,
     )
     bill_date, date_confident = _find_date(text)
-    total_amount, total_confident = _find_total(total_lines)
+    total_amount, total_confident = _find_total(lines, line_boxes)
     cached_category = None
     if store_name:
         needle = store_name.strip().lower()
