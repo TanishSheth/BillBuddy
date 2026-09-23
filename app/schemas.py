@@ -197,11 +197,48 @@ class FriendSettlementOut(BaseModel):
     payer_confirmed: bool
     recipient_confirmed: bool
     status: str
+    settled_at: Optional[datetime] = None
 
 
 class FriendSettlementConfirm(BaseModel):
     month_key: str = Field(pattern=r"^\d{4}-\d{2}$")
     action: str = Field(pattern=r"^(paid|received)$")
+
+
+class PairPaymentCreate(BaseModel):
+    amount: float = Field(gt=0)
+    currency: str = Field(default="USD", min_length=3, max_length=10)
+
+
+class PairPaymentOut(BaseModel):
+    id: int
+    payer_account_id: int
+    recipient_account_id: int
+    amount: float
+    currency: str
+    status: str
+    reported_by_account_id: int
+    created_at: datetime
+    confirmed_at: Optional[datetime] = None
+
+
+class ConsolidatedSourceOut(BaseModel):
+    kind: str
+    label: str
+    amount: float
+    currency: str
+    period_key: Optional[str] = None
+    group_id: Optional[int] = None
+
+
+class ConsolidatedFriendBalanceOut(BaseModel):
+    friend_id: int
+    balance: float
+    currency: str
+    payer_account_id: Optional[int] = None
+    recipient_account_id: Optional[int] = None
+    sources: List[ConsolidatedSourceOut]
+    payments: List[PairPaymentOut]
 
 
 class FriendOut(BaseModel):

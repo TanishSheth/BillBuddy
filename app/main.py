@@ -8,6 +8,7 @@ import hashlib
 import asyncio
 import threading
 import io
+import json
 from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal
 from calendar import monthrange
@@ -192,7 +193,7 @@ def _validate_invite_email(email: str, account: models.Account, group_id: int, d
     already = (
         db.query(models.GroupMember)
         .join(models.Account)
-        .filter(models.GroupMember.group_id == group_id, models.Account.email == email)
+        .filter(models.GroupMember.group_id == group_id, models.Account.email == email, models.GroupMember.is_active.is_(True))
         .first()
     )
     if already:
@@ -1192,6 +1193,12 @@ def create_quick_split(
     for participant in split.participants:
         participant_values[participant.id] = next(value for email, value, _label, _token in invitees if email == participant.email)
     _apply_quick_split_values(split, payload.payer_value, participant_values)
+    # A settlement closes the balance that existed at that moment. A later
+    # bill in the same month must reopen it rather than being hidden behind
+    # the already-settled month record.
+    for participant in split.participants:
+        if participant.account_id and participant.account_id != split.payer_account_id:
+            _reopen_friend_settlement(db, split.payer_account_id, participant.account_id, split.bill_date)
     db.commit()
     db.refresh(split)
 
@@ -1278,7 +1285,11 @@ def _friend_month_balance(db: Session, account_id: int, friend_id: int, month_ke
     except ValueError as err:
         raise HTTPException(400, "Use a month in YYYY-MM format") from err
     end = date(start.year + (start.month == 12), 1 if start.month == 12 else start.month + 1, 1)
-    rows = (
+    one, two = _friend_pair(account_id, friend_id)
+    settlement = db.query(models.FriendMonthlySettlement).filter_by(
+        account_one_id=one, account_two_id=two, month_key=month_key,
+    ).first()
+    query = (
         db.query(models.QuickSplit, models.QuickSplitParticipant)
         .join(models.QuickSplitParticipant)
         .filter(
@@ -1289,8 +1300,12 @@ def _friend_month_balance(db: Session, account_id: int, friend_id: int, month_ke
                 (models.QuickSplit.payer_account_id == friend_id) & (models.QuickSplitParticipant.account_id == account_id),
             ),
         )
-        .all()
     )
+    # A settlement applies only to bills that existed when it was confirmed.
+    # Keep its timestamp as the cutoff when later activity reopens the month.
+    if settlement and settlement.settled_at:
+        query = query.filter(models.QuickSplit.created_at > settlement.settled_at)
+    rows = query.all()
     balance = Decimal("0.00")
     currency = "USD"
     for split, participant in rows:
@@ -1314,6 +1329,142 @@ def _activate_friendship(db: Session, first_id: int, second_id: int) -> models.F
     elif row.status != "REMOVED":
         row.status = "ACTIVE"
     return row
+
+
+def _reopen_friend_settlement(db: Session, first_id: int, second_id: int, bill_date: date) -> None:
+    """New activity after a monthly settlement starts a fresh open balance."""
+    one, two = _friend_pair(first_id, second_id)
+    month_key = bill_date.strftime("%Y-%m")
+    settlement = db.query(models.FriendMonthlySettlement).filter_by(
+        account_one_id=one, account_two_id=two, month_key=month_key,
+    ).first()
+    # A timestamp means this row has already closed an earlier set of bills.
+    # Recalculate the still-open portion every time another bill is added,
+    # including while the other person is part-way through confirming it.
+    if settlement and settlement.settled_at:
+        balance, currency = _friend_month_balance(db, first_id, second_id, month_key)
+        settlement.status = "PENDING"
+        settlement.payer_confirmed = False
+        settlement.recipient_confirmed = False
+        settlement.amount = abs(balance)
+        settlement.currency = currency
+        settlement.payer_account_id = first_id if balance < 0 else second_id
+        settlement.recipient_account_id = second_id if balance < 0 else first_id
+
+
+def _reconcile_friend_settlements(db: Session, first_id: int, second_id: int) -> None:
+    """Repair a settled month if a bill was added after its settlement time."""
+    one, two = _friend_pair(first_id, second_id)
+    rows = db.query(models.FriendMonthlySettlement).filter_by(
+        account_one_id=one, account_two_id=two, status="SETTLED",
+    ).all()
+    changed = False
+    for settlement in rows:
+        if not settlement.settled_at:
+            continue
+        try:
+            start = date.fromisoformat(f"{settlement.month_key}-01")
+        except ValueError:
+            continue
+        end = date(start.year + (start.month == 12), 1 if start.month == 12 else start.month + 1, 1)
+        has_new_bill = db.query(models.QuickSplit.id).join(models.QuickSplitParticipant).filter(
+            models.QuickSplit.bill_date >= start,
+            models.QuickSplit.bill_date < end,
+            models.QuickSplit.created_at > settlement.settled_at,
+            or_(
+                (models.QuickSplit.payer_account_id == first_id) & (models.QuickSplitParticipant.account_id == second_id),
+                (models.QuickSplit.payer_account_id == second_id) & (models.QuickSplitParticipant.account_id == first_id),
+            ),
+        ).first()
+        if has_new_bill:
+            _reopen_friend_settlement(db, first_id, second_id, start)
+            changed = True
+    if changed:
+        db.commit()
+
+
+def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, currency: str) -> list[dict]:
+    """Return open pair debts, never mixing currencies or unpaid payment claims."""
+    currency = _normalize_currency(currency, "USD")
+    sources: list[dict] = []
+    one, two = _friend_pair(account_id, friend_id)
+    monthly = {
+        row.month_key: row for row in db.query(models.FriendMonthlySettlement).filter_by(
+            account_one_id=one, account_two_id=two,
+        ).all()
+    }
+    direct_by_month: dict[str, Decimal] = {}
+    direct_rows = db.query(models.QuickSplit, models.QuickSplitParticipant).join(models.QuickSplitParticipant).filter(
+        models.QuickSplit.currency == currency,
+        or_(
+            (models.QuickSplit.payer_account_id == account_id) & (models.QuickSplitParticipant.account_id == friend_id),
+            (models.QuickSplit.payer_account_id == friend_id) & (models.QuickSplitParticipant.account_id == account_id),
+        ),
+    ).all()
+    for split, participant in direct_rows:
+        month_key = split.bill_date.strftime("%Y-%m")
+        settlement = monthly.get(month_key)
+        if settlement and settlement.status == "SETTLED":
+            continue
+        if settlement and settlement.settled_at and split.created_at and split.created_at <= settlement.settled_at:
+            continue
+        value = Decimal(str(participant.share_amount))
+        direct_by_month[month_key] = direct_by_month.get(month_key, Decimal("0.00")) + (value if split.payer_account_id == account_id else -value)
+
+    # Confirmed pair payments allocated to a direct month reduce only that
+    # month's open amount. A pending claim never changes either person's debt.
+    payments = db.query(models.PairPayment).filter_by(
+        account_one_id=one, account_two_id=two, status="CONFIRMED", currency=currency,
+    ).all()
+    for payment in payments:
+        for allocation in json.loads(payment.allocations_json or "[]"):
+            if allocation.get("kind") != "DIRECT":
+                continue
+            month_key = allocation.get("month_key")
+            if month_key not in direct_by_month:
+                continue
+            amount = Decimal(str(allocation.get("amount", 0)))
+            direct_by_month[month_key] += amount if payment.payer_account_id == account_id else -amount
+
+    for month_key, value in direct_by_month.items():
+        if value:
+            sources.append({"kind": "DIRECT", "label": f"Direct splits · {month_key}", "amount": float(value), "currency": currency, "period_key": month_key, "group_id": None})
+
+    # Group balances become available for consolidated settlement only after
+    # that month's group period has been finalized. This preserves the audit
+    # trail and prevents a later edited bill being paid twice.
+    group_member_rows = db.query(models.GroupMember).filter(
+        models.GroupMember.account_id.in_((account_id, friend_id)),
+    ).all()
+    members_by_group: dict[int, dict[int, models.GroupMember]] = {}
+    for member in group_member_rows:
+        members_by_group.setdefault(member.group_id, {})[member.account_id] = member
+    for group_id, members in members_by_group.items():
+        if account_id not in members or friend_id not in members:
+            continue
+        group = db.query(models.Group).get(group_id)
+        if not group or _normalize_currency(group.currency, "USD") != currency:
+            continue
+        for period in db.query(models.MonthlyPeriod).filter_by(group_id=group_id, status="SETTLED").order_by(models.MonthlyPeriod.period_key.asc()).all():
+            _balances, settlements, _expenses = build_balances_and_settlements(db, group_id, period)
+            mine, theirs = members[account_id].id, members[friend_id].id
+            for settlement in settlements:
+                if {settlement["from_member_id"], settlement["to_member_id"]} != {mine, theirs}:
+                    continue
+                amount = Decimal(str(settlement["amount"]))
+                signed = amount if settlement["from_member_id"] == theirs else -amount
+                sources.append({
+                    "kind": "GROUP", "label": f"{group.name} · {period.period_key}", "amount": float(signed), "currency": currency,
+                    "period_key": period.period_key, "group_id": group_id,
+                    "period_id": period.id, "payer_member_id": settlement["from_member_id"], "recipient_member_id": settlement["to_member_id"],
+                })
+    return sources
+
+
+def _consolidated_friend_balance(db: Session, account_id: int, friend_id: int, currency: str) -> tuple[Decimal, list[dict]]:
+    sources = _consolidated_friend_sources(db, account_id, friend_id, currency)
+    balance = sum((Decimal(str(source["amount"])) for source in sources), Decimal("0.00"))
+    return balance.quantize(Decimal("0.01")), sources
 
 
 def _sync_group_friends(db: Session, account_id: int) -> None:
@@ -1422,15 +1573,151 @@ def _friend_settlement_out(row: models.FriendMonthlySettlement) -> schemas.Frien
     return schemas.FriendSettlementOut(
         month_key=row.month_key, payer_account_id=row.payer_account_id, recipient_account_id=row.recipient_account_id,
         amount=float(row.amount), currency=row.currency, payer_confirmed=row.payer_confirmed,
-        recipient_confirmed=row.recipient_confirmed, status=row.status,
+        recipient_confirmed=row.recipient_confirmed, status=row.status, settled_at=row.settled_at,
     )
 
 
 @app.get("/api/friends/{friend_id}/settlements", response_model=list[schemas.FriendSettlementOut])
 def list_friend_settlements(friend_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    _reconcile_friend_settlements(db, account.id, friend_id)
     one, two = sorted((account.id, friend_id))
     rows = db.query(models.FriendMonthlySettlement).filter_by(account_one_id=one, account_two_id=two).order_by(models.FriendMonthlySettlement.month_key.desc()).all()
     return [_friend_settlement_out(row) for row in rows]
+
+
+def _pair_payment_out(payment: models.PairPayment) -> schemas.PairPaymentOut:
+    return schemas.PairPaymentOut(
+        id=payment.id, payer_account_id=payment.payer_account_id, recipient_account_id=payment.recipient_account_id,
+        amount=float(payment.amount), currency=payment.currency, status=payment.status,
+        reported_by_account_id=payment.reported_by_account_id, created_at=payment.created_at, confirmed_at=payment.confirmed_at,
+    )
+
+
+def _apply_confirmed_pair_payment(db: Session, payment: models.PairPayment) -> None:
+    """Apply a recipient-confirmed pair payment exactly once to group sources."""
+    if payment.status == "CONFIRMED":
+        return
+    for allocation in json.loads(payment.allocations_json or "[]"):
+        if allocation.get("kind") != "GROUP":
+            continue
+        period = db.query(models.MonthlyPeriod).get(allocation.get("period_id"))
+        if not period or period.status != "SETTLED":
+            raise HTTPException(409, "A group source is no longer ready for this payment. Refresh and record it again.")
+        cutoff_id = db.query(func.max(models.Expense.id)).filter_by(period_id=period.id).scalar()
+        db.add(models.GroupPayment(
+            period_id=period.id, payer_member_id=allocation["payer_member_id"], recipient_member_id=allocation["recipient_member_id"],
+            amount=Decimal(str(allocation["amount"])), currency=payment.currency, status="CONFIRMED",
+            expense_cutoff_id=cutoff_id, marked_paid_at=datetime.now(timezone.utc), confirmed_at=datetime.now(timezone.utc),
+        ))
+    payment.status = "CONFIRMED"
+    payment.confirmed_at = datetime.now(timezone.utc)
+
+
+def _reconcile_recipient_reported_pair_payments(db: Session, account_one_id: int, account_two_id: int, currency: str) -> None:
+    """A lender's own received-payment record is authoritative by design."""
+    payments = db.query(models.PairPayment).filter_by(
+        account_one_id=account_one_id, account_two_id=account_two_id, currency=currency, status="PENDING",
+    ).all()
+    changed = False
+    for payment in payments:
+        if payment.reported_by_account_id == payment.recipient_account_id:
+            _apply_confirmed_pair_payment(db, payment)
+            changed = True
+    if changed:
+        db.commit()
+
+
+@app.get("/api/friends/{friend_id}/consolidated-balance", response_model=schemas.ConsolidatedFriendBalanceOut)
+def get_consolidated_friend_balance(
+    friend_id: int, currency: str = "USD", account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
+):
+    if friend_id == account.id or not db.query(models.Account).get(friend_id):
+        raise HTTPException(404, "Friend not found")
+    one, two = _friend_pair(account.id, friend_id)
+    connection = db.query(models.FriendConnection).filter_by(account_one_id=one, account_two_id=two, status="ACTIVE").first()
+    if not connection:
+        raise HTTPException(403, "Add this person as a friend before viewing a consolidated balance")
+    normalized_currency = _normalize_currency(currency, "USD")
+    _reconcile_recipient_reported_pair_payments(db, one, two, normalized_currency)
+    balance, sources = _consolidated_friend_balance(db, account.id, friend_id, normalized_currency)
+    payments = db.query(models.PairPayment).filter_by(account_one_id=one, account_two_id=two, currency=normalized_currency).order_by(models.PairPayment.created_at.desc()).all()
+    payer_id = account.id if balance < 0 else friend_id if balance > 0 else None
+    recipient_id = friend_id if balance < 0 else account.id if balance > 0 else None
+    return schemas.ConsolidatedFriendBalanceOut(
+        friend_id=friend_id, balance=float(balance), currency=normalized_currency,
+        payer_account_id=payer_id, recipient_account_id=recipient_id,
+        sources=[schemas.ConsolidatedSourceOut(**{key: value for key, value in source.items() if key in {"kind", "label", "amount", "currency", "period_key", "group_id"}}) for source in sources],
+        payments=[_pair_payment_out(payment) for payment in payments],
+    )
+
+
+@app.post("/api/friends/{friend_id}/consolidated-payments", response_model=schemas.PairPaymentOut)
+def record_consolidated_friend_payment(
+    friend_id: int, payload: schemas.PairPaymentCreate, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
+):
+    normalized_currency = _normalize_currency(payload.currency, "USD")
+    balance, sources = _consolidated_friend_balance(db, account.id, friend_id, normalized_currency)
+    if not balance:
+        raise HTTPException(400, "There is no open balance to pay")
+    payer_id = account.id if balance < 0 else friend_id
+    recipient_id = friend_id if balance < 0 else account.id
+    amount = Decimal(str(payload.amount)).quantize(Decimal("0.01"))
+    if account.id not in (payer_id, recipient_id):
+        raise HTTPException(403, "Only the two people in this balance can record payment")
+    if amount > abs(balance):
+        raise HTTPException(400, f"Payment cannot exceed the open balance of {normalized_currency} {abs(balance):.2f}")
+
+    remaining = amount
+    allocations = []
+    # Oldest first makes partial payments predictable and gives every source
+    # a permanent, inspectable allocation.
+    for source in sorted(sources, key=lambda item: (item["period_key"] or "", item["kind"])):
+        if remaining <= 0 or Decimal(str(source["amount"])) * balance <= 0:
+            continue
+        applied = min(remaining, abs(Decimal(str(source["amount"]))))
+        allocation = {"kind": source["kind"], "amount": float(applied), "month_key": source.get("period_key")}
+        if source["kind"] == "GROUP":
+            allocation.update({
+                "period_id": source["period_id"], "payer_member_id": source["payer_member_id"],
+                "recipient_member_id": source["recipient_member_id"], "group_id": source["group_id"],
+            })
+        allocations.append(allocation)
+        remaining -= applied
+    if remaining > Decimal("0.001"):
+        raise HTTPException(409, "This balance changed. Refresh and try the payment again.")
+
+    one, two = _friend_pair(account.id, friend_id)
+    payment = models.PairPayment(
+        account_one_id=one, account_two_id=two, payer_account_id=payer_id, recipient_account_id=recipient_id,
+        amount=amount, currency=normalized_currency, status="PENDING", reported_by_account_id=account.id,
+        allocations_json=json.dumps(allocations),
+    )
+    db.add(payment)
+    # A lender recording money received does not need to request their own
+    # confirmation. A borrower's "I paid" entry remains pending for lender approval.
+    if account.id == recipient_id:
+        _apply_confirmed_pair_payment(db, payment)
+    db.commit(); db.refresh(payment)
+    return _pair_payment_out(payment)
+
+
+@app.post("/api/friends/{friend_id}/consolidated-payments/{payment_id}/confirm", response_model=schemas.PairPaymentOut)
+def confirm_consolidated_friend_payment(
+    friend_id: int, payment_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
+):
+    one, two = _friend_pair(account.id, friend_id)
+    payment = db.query(models.PairPayment).filter_by(id=payment_id, account_one_id=one, account_two_id=two).first()
+    if not payment:
+        raise HTTPException(404, "Payment not found")
+    if payment.status != "PENDING":
+        raise HTTPException(400, "This payment has already been handled")
+    if account.id == payment.reported_by_account_id:
+        raise HTTPException(403, "The other person must confirm this payment")
+    if account.id not in (payment.payer_account_id, payment.recipient_account_id):
+        raise HTTPException(403, "Only the other person in this payment can confirm it")
+    _apply_confirmed_pair_payment(db, payment)
+    db.commit(); db.refresh(payment)
+    return _pair_payment_out(payment)
 
 
 @app.get("/api/friends/{friend_id}/avatar")
@@ -1967,21 +2254,18 @@ def create_group_invite(
     already_member = False
     existing_account = db.query(models.Account).filter_by(email=email).first()
     if existing_account:
-        db.add(
-            models.GroupMember(
-                group_id=group.id,
-                account_id=existing_account.id,
-                display_name=existing_account.display_name,
-                role="member",
-            )
-        )
+        membership = db.query(models.GroupMember).filter_by(group_id=group.id, account_id=existing_account.id).first()
+        if membership:
+            membership.is_active = True
+            membership.display_name = existing_account.display_name
+        else:
+            db.add(models.GroupMember(group_id=group.id, account_id=existing_account.id, display_name=existing_account.display_name, role="member"))
         pending = (
             db.query(models.GroupInvite)
             .filter_by(group_id=group.id, email=email)
             .first()
         )
-        if pending:
-            pending.status = "accepted"
+        if pending: pending.status = "accepted"
         already_member = True
     else:
         invite = (
@@ -2029,6 +2313,30 @@ def create_group_invite(
         invite_url=invite_url,
         message=message,
     )
+
+
+@app.get("/api/group-invites")
+def list_group_invites(account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    rows = db.query(models.GroupInvite).filter_by(email=account.email.lower(), status="pending").all()
+    return [{"id": row.id, "group_id": row.group_id, "group_name": row.group.name} for row in rows if row.group]
+
+
+@app.post("/api/group-invites/{invite_id}/accept")
+def accept_group_invite(invite_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    invite = db.query(models.GroupInvite).filter_by(id=invite_id, email=account.email.lower(), status="pending").first()
+    if not invite: raise HTTPException(404, "Group invitation not found")
+    if not db.query(models.GroupMember).filter_by(group_id=invite.group_id, account_id=account.id).first():
+        db.add(models.GroupMember(group_id=invite.group_id, account_id=account.id, display_name=account.display_name, role="member"))
+    invite.status = "accepted"; db.commit(); notify_group_change(invite.group_id, "member-joined")
+    return {"ok": True}
+
+
+@app.post("/api/group-invites/{invite_id}/decline")
+def decline_group_invite(invite_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    invite = db.query(models.GroupInvite).filter_by(id=invite_id, email=account.email.lower(), status="pending").first()
+    if not invite: raise HTTPException(404, "Group invitation not found")
+    invite.status = "declined"; db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/groups/join", response_model=schemas.GroupOut)
@@ -2673,7 +2981,7 @@ def mark_group_payment_paid(group_id: int, period_key: str, payload: schemas.Gro
     db.add(payment)
     recipient = db.query(models.GroupMember).get(payload.recipient_member_id)
     _record_activity(db, group_id, account, "payment_marked_paid", f"{payer.display_name} marked a payment of {currency} {payload.amount:.2f} as paid to {recipient.display_name}", "payment", None)
-    db.add(models.Notification(account_id=recipient.account_id, group_id=group_id, message=f"{payer.display_name} marked a {currency} {payload.amount:.2f} payment to you as paid. Please confirm receipt.", link=f"/group.html?group={group_id}"))
+    _notify_group_members(db, group_id, f"{payer.display_name} marked a {currency} {payload.amount:.2f} payment as paid to {recipient.display_name}.", f"/group.html?group={group_id}", exclude_account_id=account.id)
     db.commit()
     db.refresh(payment)
     notify_group_change(group_id, "payment-paid")
@@ -2706,7 +3014,7 @@ def mark_group_payment_received(group_id: int, period_key: str, payload: schemas
     db.add(payment)
     payer = db.query(models.GroupMember).get(payload.payer_member_id)
     _record_activity(db, group_id, account, "payment_received", f"{recipient.display_name} recorded {currency} {payload.amount:.2f} received from {payer.display_name}", "payment", None)
-    db.add(models.Notification(account_id=payer.account_id, group_id=group_id, message=f"{recipient.display_name} recorded your {currency} {payload.amount:.2f} payment as received. Your balance has been recalculated.", link=f"/group.html?group={group_id}"))
+    _notify_group_members(db, group_id, f"{recipient.display_name} recorded a {currency} {payload.amount:.2f} payment received from {payer.display_name}. Balances were recalculated.", f"/group.html?group={group_id}", exclude_account_id=account.id)
     db.commit()
     db.refresh(payment)
     notify_group_change(group_id, "payment-received")
@@ -2731,7 +3039,7 @@ def confirm_group_payment(group_id: int, payment_id: int, account: models.Accoun
     payment.confirmed_at = datetime.now(timezone.utc)
     payer = db.query(models.GroupMember).get(payment.payer_member_id)
     _record_activity(db, group_id, account, "payment_confirmed", f"{recipient.display_name} confirmed payment from {payer.display_name}", "payment", payment.id)
-    db.add(models.Notification(account_id=payer.account_id, group_id=group_id, message=f"{recipient.display_name} confirmed your {payment.currency} {float(payment.amount):.2f} payment. Your remaining balance has been recalculated.", link=f"/group.html?group={group_id}"))
+    _notify_group_members(db, group_id, f"{recipient.display_name} confirmed a {payment.currency} {float(payment.amount):.2f} payment from {payer.display_name}. Balances were recalculated.", f"/group.html?group={group_id}", exclude_account_id=account.id)
     db.commit()
     db.refresh(payment)
     notify_group_change(group_id, "payment-confirmed")
@@ -2825,6 +3133,8 @@ def reopen_period(
     period.pdf_filename = None
     period.pdf_path = None
     period.settled_at = None
+    _record_activity(db, group_id, account, "period_reopened", f"{account.display_name} reopened {period_key}", "period", period.id)
+    _notify_group_members(db, group_id, f"{account.display_name} reopened the {period_key} period. Balances may have changed.", f"/group.html?group={group_id}", exclude_account_id=account.id)
     db.commit()
     db.refresh(period)
     notify_group_change(group_id, "period-reopened")
@@ -2881,6 +3191,8 @@ def generate_report(
     period.pdf_path = pdf_path
     period.status = "SETTLED"
     period.settled_at = datetime.now()
+    _record_activity(db, group_id, account, "period_settled", f"{account.display_name} settled {period_key}", "period", period.id)
+    _notify_group_members(db, group_id, f"{account.display_name} settled the {period_key} period. Review your consolidated Friend balance.", f"/group.html?group={group_id}", exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "period-settled")
 

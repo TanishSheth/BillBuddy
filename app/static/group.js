@@ -838,22 +838,14 @@ async function loadBalances() {
       const div = document.createElement("div");
       div.className = "p-3 rounded-lg bg-ink/5 flex flex-col gap-1";
       const pendingPayment = payments.find((payment) => payment.status === "PAID" && Number(payment.payer_member_id) === Number(s.from_member_id) && Number(payment.recipient_member_id) === Number(s.to_member_id));
-      const payerAction = Number(s.from_member_id) === Number(state.myMemberId)
-        ? (!settlementActionsOpen ? "" : pendingPayment
-          ? '<span class="text-[10px] text-amber-700 font-bold mt-1">Awaiting recipient confirmation</span>'
-          : `<button class="mark-payment bb-btn-primary !py-1.5 !px-2 text-[10px] self-start mt-1" data-payer="${s.from_member_id}" data-recipient="${s.to_member_id}" data-amount="${s.amount}" data-currency="${s.currency || baseCurr}">Mark paid - request confirmation</button>`)
-        : "";
-      const recipientAction = Number(s.to_member_id) === Number(state.myMemberId)
-        ? (!settlementActionsOpen ? "" : pendingPayment
-          ? `<button class="confirm-payment bb-btn-primary !py-1.5 !px-2 text-[10px] self-start mt-1" data-id="${pendingPayment.id}">Confirm receipt</button>`
-          : `<button class="mark-received bb-btn-primary !py-1.5 !px-2 text-[10px] self-start mt-1" data-payer="${s.from_member_id}" data-recipient="${s.to_member_id}" data-amount="${s.amount}" data-currency="${s.currency || baseCurr}">Mark received &amp; settle</button>`)
-        : "";
+      const payerAction = "";
+      const recipientAction = "";
       div.innerHTML = `
         <div class="flex items-center justify-between text-xs font-mono gap-3">
           <span><strong class="text-ink">${ShareSquad.escapeHtml(s.from_name)}</strong> <span class="text-stamp font-bold">&rarr; pays</span> <strong class="text-ink">${ShareSquad.escapeHtml(s.to_name)}</strong></span>
           <span class="font-bold text-ink text-right">${ShareSquad.formatMoney(settleAmt, settleCurr)}${origNote}</span>
         </div>
-        ${payerAction}${recipientAction}
+        <p class="text-[10px] text-ink/55 mt-1">Included in this person’s consolidated Friend total. Record and confirm payments from Friends.</p>
       `;
       setList.appendChild(div);
     });
@@ -878,24 +870,30 @@ async function loadBalances() {
   }
 
   $$(".mark-payment").forEach((button) => button.addEventListener("click", async () => {
+    const amount = Number(prompt(`How much of the ${button.dataset.currency} ${Number(button.dataset.amount).toFixed(2)} balance did you pay?`, button.dataset.amount));
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    if (amount > Number(button.dataset.amount)) return ShareSquad.showToast("A partial payment cannot exceed the remaining balance.", "error");
     button.disabled = true;
     button.textContent = "Request sent";
     try {
       await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments`, {
         method: "POST",
-        body: JSON.stringify({ payer_member_id: Number(button.dataset.payer), recipient_member_id: Number(button.dataset.recipient), amount: Number(button.dataset.amount), currency: button.dataset.currency }),
+        body: JSON.stringify({ payer_member_id: Number(button.dataset.payer), recipient_member_id: Number(button.dataset.recipient), amount, currency: button.dataset.currency }),
       });
       ShareSquad.showToast("Payment request sent to the recipient.", "success");
       await loadBalances();
     } catch (err) { ShareSquad.showToast(err.message, "error"); button.disabled = false; button.textContent = "Mark paid - request confirmation"; }
   }));
   $$(".mark-received").forEach((button) => button.addEventListener("click", async () => {
+    const amount = Number(prompt(`How much of the ${button.dataset.currency} ${Number(button.dataset.amount).toFixed(2)} balance did you receive?`, button.dataset.amount));
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    if (amount > Number(button.dataset.amount)) return ShareSquad.showToast("A partial payment cannot exceed the remaining balance.", "error");
     button.disabled = true;
     button.textContent = "Paid";
     try {
       await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments/received`, {
         method: "POST",
-        body: JSON.stringify({ payer_member_id: Number(button.dataset.payer), recipient_member_id: Number(button.dataset.recipient), amount: Number(button.dataset.amount), currency: button.dataset.currency }),
+        body: JSON.stringify({ payer_member_id: Number(button.dataset.payer), recipient_member_id: Number(button.dataset.recipient), amount, currency: button.dataset.currency }),
       });
       ShareSquad.showToast("Payment recorded as paid and balances recalculated.", "success");
       await loadBalances();

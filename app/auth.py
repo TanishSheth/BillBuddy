@@ -77,29 +77,12 @@ def get_current_account(
 
 def process_pending_invites(db: Session, account: models.Account) -> list[models.GroupMember]:
     added: list[models.GroupMember] = []
-    invites = (
-        db.query(models.GroupInvite)
-        .filter_by(email=account.email.lower(), status="pending")
-        .all()
-    )
+    invites = db.query(models.GroupInvite).filter_by(email=account.email.lower(), status="pending").all()
     for invite in invites:
-        existing = (
-            db.query(models.GroupMember)
-            .filter_by(group_id=invite.group_id, account_id=account.id)
-            .first()
-        )
-        if not existing:
-            member = models.GroupMember(
-                group_id=invite.group_id,
-                account_id=account.id,
-                display_name=account.display_name,
-                role="member",
-            )
-            db.add(member)
-            added.append(member)
+        if not db.query(models.GroupMember).filter_by(group_id=invite.group_id, account_id=account.id).first():
+            db.add(models.GroupMember(group_id=invite.group_id, account_id=account.id, display_name=account.display_name, role="member"))
         invite.status = "accepted"
-    if invites:
-        db.commit()
+    if invites: db.commit()
     # Quick Split invitations do not create a group membership. Claim any
     # pending shares addressed to this account as soon as they sign in.
     quick_participants = (

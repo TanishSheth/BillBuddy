@@ -337,6 +337,24 @@ class FriendMonthlySettlement(Base):
     settled_at = Column(DateTime, nullable=True)
 
 
+class PairPayment(Base):
+    """A confirmed transfer between two friends, allocated to its source debts."""
+    __tablename__ = "pair_payments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_one_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    account_two_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    payer_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False)
+    recipient_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False)
+    amount = Column(Numeric(10, 2), nullable=False)
+    currency = Column(String(10), nullable=False, default="USD")
+    status = Column(String(20), nullable=False, default="PENDING")  # PENDING, CONFIRMED, DECLINED
+    reported_by_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False)
+    allocations_json = Column(Text, nullable=False, default="[]")
+    created_at = Column(DateTime, server_default=func.now())
+    confirmed_at = Column(DateTime, nullable=True)
+
+
 class FriendConnection(Base):
     """A durable, mutual friendship; REMOVED prevents a group re-adding it."""
     __tablename__ = "friend_connections"

@@ -41,7 +41,7 @@ function mergeFriends(splits, contacts) {
   contacts.forEach((contact) => {
     const key = `account-${contact.id}`;
     const entry = map.get(key) || { key, friend: { id: contact.id, name: contact.display_name, hasAvatar: contact.has_avatar }, balance: 0, currency: "USD", rows: [] };
-    entry.friend = { id: contact.id, name: contact.display_name, hasAvatar: contact.has_avatar };
+    entry.friend = { id: contact.id, name: contact.display_name, email: contact.email, hasAvatar: contact.has_avatar };
     map.set(key, entry);
   });
   return [...map.values()].sort((a, b) => a.friend.name.localeCompare(b.friend.name));
@@ -64,10 +64,26 @@ function statusForBill(row) {
 function renderList() {
   const grid = $("#friendsGrid");
   if (!friends.length) { grid.innerHTML = '<div class="bb-card sm:col-span-2 lg:col-span-3 text-center py-10"><p class="font-mono font-bold">No friends yet</p><p class="text-sm text-ink/60 mt-2">Add a friend by email or private link. Group members will also appear here automatically.</p></div>'; return; }
-  grid.innerHTML = friends.map((friend) => `<article class="bb-card border border-ink/10"><div class="flex items-center justify-between gap-3"><button class="text-left grow flex items-center gap-3" data-friend-key="${friend.key}">${friendAvatar(friend.friend)}<p class="font-mono font-bold text-base">${ShareSquad.escapeHtml(friend.friend.name)}</p></button><button type="button" class="remove-friend bb-btn-secondary !py-1.5 !px-2.5 text-[10px] text-stamp border-stamp/30" data-remove-friend="${friend.friend.id}">Remove</button></div></article>`).join("");
+  grid.innerHTML = friends.map((friend) => `<article class="bb-card border border-ink/10"><div class="flex items-center justify-between gap-3"><button class="text-left grow flex items-center gap-3" data-friend-key="${friend.key}">${friendAvatar(friend.friend)}<p class="font-mono font-bold text-base">${ShareSquad.escapeHtml(friend.friend.name)}</p></button><button type="button" class="remove-friend bb-btn-secondary !py-1.5 !px-2.5 text-[10px] text-stamp border-stamp/30" data-remove-friend="${friend.friend.id}">Remove</button></div><button type="button" class="invite-friend-group bb-btn-secondary w-full !py-1.5 mt-3 text-[10px]" data-invite-friend="${friend.friend.id}">Invite to group</button></article>`).join("");
   loadFriendAvatars(grid);
   grid.querySelectorAll("[data-friend-key]").forEach((button) => button.onclick = () => openFriend(button.dataset.friendKey));
   grid.querySelectorAll("[data-remove-friend]").forEach((button) => button.onclick = () => removeFriend(Number(button.dataset.removeFriend)));
+  grid.querySelectorAll("[data-invite-friend]").forEach((button) => button.onclick = () => inviteFriendToGroup(Number(button.dataset.inviteFriend)));
+}
+
+async function inviteFriendToGroup(friendId) {
+  const friend = friends.find((entry) => entry.friend.id === friendId)?.friend;
+  if (!friend) return;
+  try {
+    const groups = await ShareSquad.api("/groups");
+    if (!groups.length) return ShareSquad.showToast("Create a group before inviting a friend.", "error");
+    const picker = document.createElement("div");
+    picker.className = "fixed inset-0 z-50 bg-ink/50 flex items-center justify-center p-4";
+    picker.innerHTML = `<div class="bb-card w-full max-w-sm"><h2 class="font-mono font-bold text-brand">Invite ${ShareSquad.escapeHtml(friend.name)} to a group</h2><select class="bb-input w-full mt-4">${groups.map((group) => `<option value="${group.id}">${ShareSquad.escapeHtml(group.name)}</option>`).join("")}</select><div class="flex gap-2 mt-4"><button class="bb-btn-primary flex-1 send">Send invite</button><button class="bb-btn-secondary cancel">Cancel</button></div></div>`;
+    document.body.appendChild(picker);
+    picker.querySelector(".cancel").onclick = () => picker.remove();
+    picker.querySelector(".send").onclick = async () => { const group = groups.find((item) => item.id === Number(picker.querySelector("select").value)); if (!group) return; try { await ShareSquad.api(`/groups/${group.id}/invites`, { method: "POST", body: JSON.stringify({ email: friend.email }) }); picker.remove(); ShareSquad.showToast(`${friend.name} was invited to ${group.name}.`, "success"); } catch (error) { ShareSquad.showToast(error.message || "Could not invite this friend", "error"); } };
+  } catch (error) { ShareSquad.showToast(error.message || "Could not invite this friend", "error"); }
 }
 
 function renderValues() {
@@ -86,7 +102,10 @@ function renderLedger(friend) {
   const currentMonth = new Date().toISOString().slice(0, 7);
   const selectedMonth = activeLedger === "current" ? currentMonth : $("#historyMonth").value;
   const rows = friend.rows.filter((row) => String(row.split.bill_date).slice(0, 7) === selectedMonth).sort((a, b) => String(b.split.bill_date).localeCompare(String(a.split.bill_date)));
-  const monthBalance = cents(rows.reduce((sum, row) => sum + row.balance, 0));
+  const settlement = friend.settlements?.get(selectedMonth);
+  const cutoff = settlement?.status !== "SETTLED" && settlement?.settled_at ? new Date(settlement.settled_at) : null;
+  const openRows = cutoff ? rows.filter((row) => new Date(row.split.created_at) > cutoff) : rows;
+  const monthBalance = cents(openRows.reduce((sum, row) => sum + row.balance, 0));
   $("#ledgerTitle").textContent = activeLedger === "current" ? `This month · ${monthName(currentMonth)}` : `History · ${monthName(selectedMonth)}`;
   $("#historyMonth").classList.toggle("hidden", activeLedger !== "history");
   [["#currentBillsTab", activeLedger === "current"], ["#historyBillsTab", activeLedger === "history"]].forEach(([selector, isActive]) => {
@@ -95,23 +114,33 @@ function renderLedger(friend) {
     tab.classList.toggle("bb-btn-secondary", !isActive);
   });
   $("#friendLedger").innerHTML = rows.length ? rows.map((row) => { const bill = statusForBill(row); return `<div class="member-row"><div><p class="font-semibold text-sm">${ShareSquad.escapeHtml(row.split.title)}</p><p class="text-xs text-ink/55">${ShareSquad.formatDate(row.split.bill_date)} · ${row.split.is_payer ? "You paid" : `${ShareSquad.escapeHtml(friend.friend.name)} paid`} ${money(row.split.total_amount, row.split.currency)}</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${bill.tone}">${bill.text}</p><p class="text-[10px] text-ink/50">${bill.hint}</p></div></div>`; }).join("") : '<p class="text-sm text-ink/55 py-3">No bills in this month.</p>';
-  const settlement = friend.settlements?.get(selectedMonth);
-  const panel = $("#monthlySettlement");
-  if (!rows.length || monthBalance === 0) {
-    panel.innerHTML = '<p class="text-xs text-ink/55">No settlement is needed for this month.</p>';
-  } else if (settlement?.status === "SETTLED") {
-    panel.innerHTML = '<p class="text-xs font-mono text-ink/55">✓ This month is settled by both people.</p>';
-  } else {
-    const payerId = settlement?.payer_account_id || (monthBalance < 0 ? me.account.id : friend.friend.id);
-    const iOwe = payerId === me.account.id;
-    const confirmed = iOwe ? settlement?.payer_confirmed : settlement?.recipient_confirmed;
-    const otherConfirmed = iOwe ? settlement?.recipient_confirmed : settlement?.payer_confirmed;
-    const action = iOwe ? "paid" : "received";
-    const label = iOwe ? "Confirm I paid" : "Settle this month (payment received)";
-    const note = confirmed ? (otherConfirmed ? "Settlement is being finalized…" : "Your payment confirmation is saved. Waiting for the receiver to settle the month.") : iOwe ? "Your confirmation waits for the receiver to confirm payment." : "As the receiver, you can settle this month once payment is received.";
-    panel.innerHTML = `<div class="flex flex-wrap items-center justify-between gap-3"><p class="text-xs text-ink/60 max-w-sm">${note}</p>${confirmed ? '<span class="text-[10px] font-mono text-brand">Confirmed by you</span>' : `<button type="button" class="bb-btn-primary !py-1.5 !px-3 text-[10px] confirm-month-settlement" data-month="${selectedMonth}" data-action="${action}">${label}</button>`}</div>`;
-    panel.querySelector(".confirm-month-settlement")?.addEventListener("click", () => confirmMonthSettlement(friend, selectedMonth, action));
-  }
+  $("#monthlySettlement").innerHTML = `<p class="text-xs text-ink/55">Direct bills here are included in the total above. Record one combined payment there for both group and direct balances.</p>`;
+}
+
+function renderConsolidated(friend) {
+  const total = friend.consolidated;
+  const breakdown = $("#consolidatedBreakdown"); const payments = $("#consolidatedPayments");
+  if (!total) { breakdown.innerHTML = ""; payments.innerHTML = ""; return; }
+  const sources = total.sources || [];
+  breakdown.innerHTML = `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/45">Included in this total</p>${sources.length ? sources.map((source) => `<div class="flex justify-between gap-3 text-xs"><span>${ShareSquad.escapeHtml(source.label)}</span><span class="font-mono ${source.amount > 0 ? "text-green-700" : "text-red-700"}">${source.amount > 0 ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(source.amount), source.currency)}</span></div>`).join("") : '<p class="text-xs text-ink/55">No open balances in this currency.</p>'}`;
+  const pending = (total.payments || []).filter((payment) => payment.status === "PENDING");
+  const balance = Number(total.balance || 0);
+  const iOwe = balance < 0;
+  const fullLabel = iOwe ? "Mark full payment" : "Mark full payment received";
+  const partialLabel = iOwe ? "Mark partial payment" : "Record partial payment received";
+  payments.innerHTML = `${balance ? `<div class="flex flex-wrap gap-2"><button type="button" id="markFullConsolidatedPayment" class="bb-btn-primary !py-1.5 !px-3 text-[10px]">${fullLabel}</button><button type="button" id="showPartialConsolidatedPayment" class="bb-btn-secondary !py-1.5 !px-3 text-[10px]">${partialLabel}</button></div><div id="partialConsolidatedPaymentForm" class="hidden mt-3 flex flex-wrap items-end gap-2"><label class="text-[10px] font-mono text-ink/55">Payment amount<input id="consolidatedPaymentAmount" class="bb-input block !w-32 !py-1.5 mt-1 text-xs" type="number" min="0.01" max="${Math.abs(balance)}" step="0.01" placeholder="0.00"></label><button type="button" id="recordConsolidatedPayment" class="bb-btn-primary !py-1.5 !px-3 text-[10px]">Save partial payment</button></div>` : ""}${pending.map((payment) => `<div class="mt-3 p-2 rounded bg-amber-500/10 text-xs flex items-center justify-between gap-2"><span>${ShareSquad.formatMoney(payment.amount, payment.currency)} awaiting lender confirmation</span>${Number(payment.reported_by_account_id) !== Number(me.account.id) ? `<button class="confirm-consolidated-payment bb-btn-secondary !py-1 !px-2 text-[10px]" data-id="${payment.id}">Confirm received</button>` : '<span class="text-[10px] font-mono text-amber-700">Reported by you</span>'}</div>`).join("")}`;
+  const savePayment = async (amount) => {
+    if (!Number.isFinite(amount) || amount <= 0 || amount > Math.abs(balance)) return ShareSquad.showToast("Enter an amount up to the open balance.", "error");
+    try { await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-payments`, { method: "POST", body: JSON.stringify({ amount, currency: total.currency }) }); ShareSquad.showToast(iOwe ? "Payment request sent to the lender for confirmation." : "Payment received and applied to the balance.", "success"); await refresh(); openFriend(friend.key); }
+    catch (err) { ShareSquad.showToast(err.message || "Could not record payment", "error"); }
+  };
+  $("#markFullConsolidatedPayment")?.addEventListener("click", () => savePayment(Math.abs(balance)));
+  $("#showPartialConsolidatedPayment")?.addEventListener("click", () => { $("#partialConsolidatedPaymentForm")?.classList.remove("hidden"); $("#consolidatedPaymentAmount")?.focus(); });
+  $("#recordConsolidatedPayment")?.addEventListener("click", () => savePayment(Number($("#consolidatedPaymentAmount")?.value)));
+  payments.querySelectorAll(".confirm-consolidated-payment").forEach((button) => button.addEventListener("click", async () => {
+    try { await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-payments/${button.dataset.id}/confirm`, { method: "POST" }); ShareSquad.showToast("Payment confirmed and applied to the open balances.", "success"); await refresh(); openFriend(friend.key); }
+    catch (err) { ShareSquad.showToast(err.message || "Could not confirm payment", "error"); }
+  }));
 }
 
 function setupHistory(friend) {
@@ -128,7 +157,7 @@ function openFriend(key) {
   const friend = friends.find((item) => item.key === key); if (!friend) return;
   activeFriend = friend;
   $("#friendsListPane").classList.add("hidden"); $("#friendDetailPane").classList.remove("hidden");
-  const state = statusFor(friend); const balance = cents(friend.balance); $("#friendName").textContent = friend.friend.name; $("#friendBalance").innerHTML = state.text; $("#friendBalance").className = `font-mono font-bold text-xl mt-3 ${balance > 0 ? "text-green-700" : balance < 0 ? "text-red-700" : "text-ink/60"}`; $("#friendBalanceHelp").textContent = balance > 0 ? "Green means they should pay you overall." : balance < 0 ? "Red means you should pay them overall." : "Grey means you are settled overall.";
+  const state = statusFor(friend); const balance = cents(friend.balance); $("#friendName").textContent = friend.friend.name; $("#friendBalance").innerHTML = state.text; $("#friendBalance").className = `font-mono font-bold text-xl mt-3 ${balance > 0 ? "text-green-700" : balance < 0 ? "text-red-700" : "text-ink/60"}`; $("#friendBalanceHelp").textContent = balance > 0 ? "Green means they should pay you overall." : balance < 0 ? "Red means you should pay them overall." : "Grey means you are settled overall."; renderConsolidated(friend);
   setupHistory(friend);
   $("#friendExpensePanel").classList.toggle("hidden", !friend.friend.id); $("#friendExpenseForm").dataset.friendId = friend.friend.id || ""; $("#friendPaidBy").options[1].textContent = `${friend.friend.name} paid`; ShareSquad.fillCurrencySelect($("#friendExpenseCurrency"), friend.currency); renderValues();
 }
@@ -142,8 +171,14 @@ async function refresh() {
   renderList();
   await Promise.all(friends.filter((friend) => friend.friend.id).map(async (friend) => {
     const settlements = await ShareSquad.api(`/friends/${friend.friend.id}/settlements`).catch(() => []);
+    friend.consolidated = await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-balance?currency=USD`).catch(() => null);
     friend.settlements = new Map(settlements.map((settlement) => [settlement.month_key, settlement]));
-    friend.balance = friend.rows.filter((row) => friend.settlements.get(String(row.split.bill_date).slice(0, 7))?.status !== "SETTLED").reduce((sum, row) => sum + row.balance, 0);
+    friend.balance = friend.consolidated ? Number(friend.consolidated.balance) : friend.rows.reduce((sum, row) => {
+      const settlement = friend.settlements.get(String(row.split.bill_date).slice(0, 7));
+      if (settlement?.status === "SETTLED") return sum;
+      if (settlement?.settled_at && new Date(row.split.created_at) <= new Date(settlement.settled_at)) return sum;
+      return sum + row.balance;
+    }, 0);
   }));
   renderList();
 }
