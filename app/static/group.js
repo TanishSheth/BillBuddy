@@ -845,7 +845,6 @@ async function loadBalances() {
           <span><strong class="text-ink">${ShareSquad.escapeHtml(s.from_name)}</strong> <span class="text-stamp font-bold">&rarr; pays</span> <strong class="text-ink">${ShareSquad.escapeHtml(s.to_name)}</strong></span>
           <span class="font-bold text-ink text-right">${ShareSquad.formatMoney(settleAmt, settleCurr)}${origNote}</span>
         </div>
-        <p class="text-[10px] text-ink/55 mt-1">Included in this person’s consolidated Friend total. Record and confirm payments from Friends.</p>
       `;
       setList.appendChild(div);
     });
