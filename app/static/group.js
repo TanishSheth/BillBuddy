@@ -56,7 +56,7 @@ function syncExpenseCurrencyUI() {
 const GROUP_PAGE_HELP = {
   upload: "<strong>Add / Scan:</strong> Upload a receipt or enter a bill, choose who paid and who shares it, then save it to this month.",
   expenses: "<strong>Expenses:</strong> Review this month's bills, search or filter them, and open an item to see its split and notes.",
-  balances: "<strong>Balances & settlement:</strong> Review who owes whom. After the owner settles this period, members can record and confirm the transfers.",
+  balances: "<strong>Balances & settlement:</strong> Review who owes whom for this period. After the owner settles the month, those amounts roll into each person’s consolidated Friend total—record and confirm payments from Friends.",
   insights: "<strong>Insights:</strong> See this month's spending total, top categories, and largest expenses.",
   activity: "<strong>Activity:</strong> Follow group changes, expenses, comments, and payment updates in time order.",
   reports: "<strong>PDF Reports:</strong> Generate or download a clear monthly record of expenses, balances, and confirmed settlements.",
