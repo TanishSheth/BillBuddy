@@ -1714,20 +1714,81 @@ async function handleReceiptUpload(file) {
     }, 80);
   });
 
-  // Swipe left/right to navigate between group tabs on touch screens
+  // Swipe left/right between group tabs — content only, not chrome/controls
   const TAB_ORDER = ["upload", "expenses", "balances", "insights", "activity", "reports", "members"];
-  let _swipeStartX = 0;
-  document.addEventListener("touchstart", (e) => { _swipeStartX = e.touches[0].clientX; }, { passive: true });
+  const SWIPE_BLOCK =
+    "#mainNav, .page-header, #periodBar, #balanceStrip, .bottom-nav, .mobile-quick-action, " +
+    "input, textarea, select, button, a, label, .tab-nav, [role='dialog'], .modal, " +
+    "[data-no-swipe], .split-type-pill, .payer-amount";
+  let _swipe = null;
+
+  function swipeIsBlocked(target) {
+    if (!(target instanceof Element)) return true;
+    if (target.closest(SWIPE_BLOCK)) return true;
+    // Horizontal scroll strips (member chips, etc.)
+    let node = target;
+    while (node && node !== document.body) {
+      if (node instanceof HTMLElement) {
+        const style = window.getComputedStyle(node);
+        const ox = style.overflowX;
+        if ((ox === "auto" || ox === "scroll") && node.scrollWidth > node.clientWidth + 4) {
+          return true;
+        }
+      }
+      node = node.parentElement;
+    }
+    return false;
+  }
+
+  document.addEventListener("touchstart", (e) => {
+    const touch = e.touches[0];
+    if (!touch || e.touches.length !== 1) {
+      _swipe = null;
+      return;
+    }
+    if (swipeIsBlocked(e.target)) {
+      _swipe = null;
+      return;
+    }
+    // Active tab body, or shared help blurb (outside panels, not interactive)
+    const panel = e.target.closest?.(".tab-panel");
+    const help = e.target.closest?.(".how-it-works, #groupPageHelp");
+    if (help) {
+      _swipe = { x: touch.clientX, y: touch.clientY };
+      return;
+    }
+    if (!panel || panel.classList.contains("hidden")) {
+      _swipe = null;
+      return;
+    }
+    _swipe = { x: touch.clientX, y: touch.clientY };
+  }, { passive: true });
+
+  document.addEventListener("touchmove", (e) => {
+    if (!_swipe || e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const dx = touch.clientX - _swipe.x;
+    const dy = touch.clientY - _swipe.y;
+    // Vertical scroll intent — cancel tab swipe
+    if (Math.abs(dy) > 24 && Math.abs(dy) > Math.abs(dx)) _swipe = null;
+  }, { passive: true });
+
   document.addEventListener("touchend", (e) => {
-    const diff = _swipeStartX - e.changedTouches[0].clientX;
-    if (Math.abs(diff) < 60) return;
-    const active = $$(".tab-btn").find ? Array.from($$(".tab-btn")).find((b) => b.classList.contains("active")) : null;
+    if (!_swipe) return;
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - _swipe.x;
+    const dy = touch.clientY - _swipe.y;
+    _swipe = null;
+    if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.35) return;
+    const active = $$(".tab-btn").find((b) => b.classList.contains("active"));
     if (!active) return;
     const idx = TAB_ORDER.indexOf(active.dataset.tab);
     if (idx === -1) return;
-    const next = diff > 0 ? TAB_ORDER[idx + 1] : TAB_ORDER[idx - 1];
+    const next = dx < 0 ? TAB_ORDER[idx + 1] : TAB_ORDER[idx - 1];
     if (next) switchTab(next);
   }, { passive: true });
+
+  document.addEventListener("touchcancel", () => { _swipe = null; }, { passive: true });
 
   await loadGroupSettings();
   await loadGroup();
