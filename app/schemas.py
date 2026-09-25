@@ -234,11 +234,26 @@ class ConsolidatedSourceOut(BaseModel):
 class ConsolidatedFriendBalanceOut(BaseModel):
     friend_id: int
     balance: float
+    # The amount that can be recorded as a consolidated payment today. Live
+    # group shares are reflected in balance but stay read-only until settled.
+    settleable_balance: float
     currency: str
     payer_account_id: Optional[int] = None
     recipient_account_id: Optional[int] = None
     sources: List[ConsolidatedSourceOut]
     payments: List[PairPaymentOut]
+
+
+class FriendGroupContributionOut(BaseModel):
+    group_id: int
+    group_name: str
+    expense_id: int
+    title: str
+    bill_date: date
+    period_key: str
+    currency: str
+    # Positive means the friend owes the current account; negative reverses it.
+    pair_amount: float
 
 
 class FriendOut(BaseModel):

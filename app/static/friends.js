@@ -101,11 +101,15 @@ function monthName(month) {
 function renderLedger(friend) {
   const currentMonth = new Date().toISOString().slice(0, 7);
   const selectedMonth = activeLedger === "current" ? currentMonth : $("#historyMonth").value;
-  const rows = friend.rows.filter((row) => String(row.split.bill_date).slice(0, 7) === selectedMonth).sort((a, b) => String(b.split.bill_date).localeCompare(String(a.split.bill_date)));
+  const rows = friend.rows.filter((row) => String(row.split.bill_date).slice(0, 7) === selectedMonth);
+  const groupRows = (friend.groupContributions || []).filter((row) => String(row.bill_date).slice(0, 7) === selectedMonth);
+  const entries = [
+    ...rows.map((row) => ({ kind: "direct", date: row.split.bill_date, row })),
+    ...groupRows.map((row) => ({ kind: "group", date: row.bill_date, row })),
+  ].sort((a, b) => String(b.date).localeCompare(String(a.date)));
   const settlement = friend.settlements?.get(selectedMonth);
   const cutoff = settlement?.status !== "SETTLED" && settlement?.settled_at ? new Date(settlement.settled_at) : null;
   const openRows = cutoff ? rows.filter((row) => new Date(row.split.created_at) > cutoff) : rows;
-  const monthBalance = cents(openRows.reduce((sum, row) => sum + row.balance, 0));
   $("#ledgerTitle").textContent = activeLedger === "current" ? `This month · ${monthName(currentMonth)}` : `History · ${monthName(selectedMonth)}`;
   $("#historyMonth").classList.toggle("hidden", activeLedger !== "history");
   [["#currentBillsTab", activeLedger === "current"], ["#historyBillsTab", activeLedger === "history"]].forEach(([selector, isActive]) => {
@@ -113,8 +117,19 @@ function renderLedger(friend) {
     tab.classList.toggle("bb-btn-primary", isActive);
     tab.classList.toggle("bb-btn-secondary", !isActive);
   });
-  $("#friendLedger").innerHTML = rows.length ? rows.map((row) => { const bill = statusForBill(row); return `<div class="member-row"><div><p class="font-semibold text-sm">${ShareSquad.escapeHtml(row.split.title)}</p><p class="text-xs text-ink/55">${ShareSquad.formatDate(row.split.bill_date)} · ${row.split.is_payer ? "You paid" : `${ShareSquad.escapeHtml(friend.friend.name)} paid`} ${money(row.split.total_amount, row.split.currency)}</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${bill.tone}">${bill.text}</p><p class="text-[10px] text-ink/50">${bill.hint}</p></div></div>`; }).join("") : '<p class="text-sm text-ink/55 py-3">No bills in this month.</p>';
-  $("#monthlySettlement").innerHTML = `<p class="text-xs text-ink/55">Direct bills here are included in the total above. Record one combined payment there for both group and direct balances.</p>`;
+  $("#friendLedger").innerHTML = entries.length ? entries.map((entry) => {
+    if (entry.kind === "direct") {
+      const bill = statusForBill(entry.row);
+      return `<div class="member-row"><div><p class="font-semibold text-sm">${ShareSquad.escapeHtml(entry.row.split.title)}</p><p class="text-xs text-ink/55">${ShareSquad.formatDate(entry.row.split.bill_date)} · ${entry.row.split.is_payer ? "You paid" : `${ShareSquad.escapeHtml(friend.friend.name)} paid`} ${money(entry.row.split.total_amount, entry.row.split.currency)}</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${bill.tone}">${bill.text}</p><p class="text-[10px] text-ink/50">${bill.hint}</p></div></div>`;
+    }
+    const contribution = entry.row; const positive = Number(contribution.pair_amount) > 0;
+    return `<button type="button" class="member-row group-ledger-row w-full text-left" data-group-id="${contribution.group_id}" data-expense-id="${contribution.expense_id}"><div><p class="font-semibold text-sm">${ShareSquad.escapeHtml(contribution.title)}</p><p class="text-xs text-ink/55"><span class="group-source-label">From ${ShareSquad.escapeHtml(contribution.group_name)}</span> · ${ShareSquad.formatDate(contribution.bill_date)} · ${ShareSquad.escapeHtml(contribution.period_key)}</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${positive ? "text-green-700" : "text-red-700"}">${positive ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(contribution.pair_amount), contribution.currency)}</p><p class="text-[10px] text-ink/50">${positive ? "They owe you" : "You owe them"}</p></div></button>`;
+  }).join("") : '<p class="text-sm text-ink/55 py-3">No bills in this month.</p>';
+  $("#friendLedger").querySelectorAll(".group-ledger-row").forEach((button) => button.addEventListener("click", () => {
+    ShareSquad.setStoredGroupId(button.dataset.groupId);
+    window.location.href = `/group.html?group=${encodeURIComponent(button.dataset.groupId)}&tab=expenses&focus=expense-${encodeURIComponent(button.dataset.expenseId)}`;
+  }));
+  $("#monthlySettlement").innerHTML = `<p class="text-xs text-ink/55">Group shares are read-only here. Select one to edit it in its original group. Direct bills are included in the total above.</p>`;
 }
 
 function renderConsolidated(friend) {
@@ -122,19 +137,21 @@ function renderConsolidated(friend) {
   const breakdown = $("#consolidatedBreakdown"); const payments = $("#consolidatedPayments");
   if (!total) { breakdown.innerHTML = ""; payments.innerHTML = ""; return; }
   const sources = total.sources || [];
-  breakdown.innerHTML = `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/45">Included in this total</p>${sources.length ? sources.map((source) => `<div class="flex justify-between gap-3 text-xs"><span>${ShareSquad.escapeHtml(source.label)}</span><span class="font-mono ${source.amount > 0 ? "text-green-700" : "text-red-700"}">${source.amount > 0 ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(source.amount), source.currency)}</span></div>`).join("") : '<p class="text-xs text-ink/55">No open balances in this currency.</p>'}`;
+  breakdown.innerHTML = `<button type="button" id="toggleConsolidatedBreakdown" class="text-[10px] font-mono uppercase tracking-widest text-brand font-bold">▾ View balance breakdown</button><div id="consolidatedBreakdownRows" class="hidden mt-3 space-y-2">${sources.length ? sources.map((source) => `<div class="flex justify-between gap-3 text-xs"><span>${ShareSquad.escapeHtml(source.label)}</span><span class="font-mono ${source.amount > 0 ? "text-green-700" : "text-red-700"}">${source.amount > 0 ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(source.amount), source.currency)}</span></div>`).join("") : '<p class="text-xs text-ink/55">No open balances in this currency.</p>'}</div>`;
+  $("#toggleConsolidatedBreakdown")?.addEventListener("click", (event) => { const rows = $("#consolidatedBreakdownRows"); const open = rows.classList.toggle("hidden"); event.currentTarget.textContent = `${open ? "▾" : "▴"} ${open ? "View" : "Hide"} balance breakdown`; });
   const pending = (total.payments || []).filter((payment) => payment.status === "PENDING");
   const balance = Number(total.balance || 0);
-  const iOwe = balance < 0;
+  const settleableBalance = Number(total.settleable_balance || 0);
+  const iOwe = settleableBalance < 0;
   const fullLabel = iOwe ? "Mark full payment" : "Mark full payment received";
   const partialLabel = iOwe ? "Mark partial payment" : "Record partial payment received";
-  payments.innerHTML = `${balance ? `<div class="flex flex-wrap gap-2"><button type="button" id="markFullConsolidatedPayment" class="bb-btn-primary !py-1.5 !px-3 text-[10px]">${fullLabel}</button><button type="button" id="showPartialConsolidatedPayment" class="bb-btn-secondary !py-1.5 !px-3 text-[10px]">${partialLabel}</button></div><div id="partialConsolidatedPaymentForm" class="hidden mt-3 flex flex-wrap items-end gap-2"><label class="text-[10px] font-mono text-ink/55">Payment amount<input id="consolidatedPaymentAmount" class="bb-input block !w-32 !py-1.5 mt-1 text-xs" type="number" min="0.01" max="${Math.abs(balance)}" step="0.01" placeholder="0.00"></label><button type="button" id="recordConsolidatedPayment" class="bb-btn-primary !py-1.5 !px-3 text-[10px]">Save partial payment</button></div>` : ""}${pending.map((payment) => `<div class="mt-3 p-2 rounded bg-amber-500/10 text-xs flex items-center justify-between gap-2"><span>${ShareSquad.formatMoney(payment.amount, payment.currency)} awaiting lender confirmation</span>${Number(payment.reported_by_account_id) !== Number(me.account.id) ? `<button class="confirm-consolidated-payment bb-btn-secondary !py-1 !px-2 text-[10px]" data-id="${payment.id}">Confirm received</button>` : '<span class="text-[10px] font-mono text-amber-700">Reported by you</span>'}</div>`).join("")}`;
+  payments.innerHTML = `${settleableBalance ? `<div class="flex flex-wrap gap-2"><button type="button" id="markFullConsolidatedPayment" class="bb-btn-primary !py-1.5 !px-3 text-[10px]">${fullLabel}</button><button type="button" id="showPartialConsolidatedPayment" class="bb-btn-secondary !py-1.5 !px-3 text-[10px]">${partialLabel}</button></div><div id="partialConsolidatedPaymentForm" class="hidden mt-3 flex flex-wrap items-end gap-2"><label class="text-[10px] font-mono text-ink/55">Payment amount<input id="consolidatedPaymentAmount" class="bb-input block !w-32 !py-1.5 mt-1 text-xs" type="number" min="0.01" max="${Math.abs(settleableBalance)}" step="0.01" placeholder="0.00"></label><button type="button" id="recordConsolidatedPayment" class="bb-btn-primary !py-1.5 !px-3 text-[10px]">Save partial payment</button></div>` : balance ? '<p class="text-xs text-ink/55">Current group shares are read-only until the group period is settled.</p>' : ""}${pending.map((payment) => `<div class="mt-3 p-2 rounded bg-amber-500/10 text-xs flex items-center justify-between gap-2"><span>${ShareSquad.formatMoney(payment.amount, payment.currency)} awaiting lender confirmation</span>${Number(payment.reported_by_account_id) !== Number(me.account.id) ? `<button class="confirm-consolidated-payment bb-btn-secondary !py-1 !px-2 text-[10px]" data-id="${payment.id}">Confirm received</button>` : '<span class="text-[10px] font-mono text-amber-700">Reported by you</span>'}</div>`).join("")}`;
   const savePayment = async (amount) => {
-    if (!Number.isFinite(amount) || amount <= 0 || amount > Math.abs(balance)) return ShareSquad.showToast("Enter an amount up to the open balance.", "error");
+    if (!Number.isFinite(amount) || amount <= 0 || amount > Math.abs(settleableBalance)) return ShareSquad.showToast("Enter an amount up to the payment-ready balance.", "error");
     try { await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-payments`, { method: "POST", body: JSON.stringify({ amount, currency: total.currency }) }); ShareSquad.showToast(iOwe ? "Payment request sent to the lender for confirmation." : "Payment received and applied to the balance.", "success"); await refresh(); openFriend(friend.key); }
     catch (err) { ShareSquad.showToast(err.message || "Could not record payment", "error"); }
   };
-  $("#markFullConsolidatedPayment")?.addEventListener("click", () => savePayment(Math.abs(balance)));
+  $("#markFullConsolidatedPayment")?.addEventListener("click", () => savePayment(Math.abs(settleableBalance)));
   $("#showPartialConsolidatedPayment")?.addEventListener("click", () => { $("#partialConsolidatedPaymentForm")?.classList.remove("hidden"); $("#consolidatedPaymentAmount")?.focus(); });
   $("#recordConsolidatedPayment")?.addEventListener("click", () => savePayment(Number($("#consolidatedPaymentAmount")?.value)));
   payments.querySelectorAll(".confirm-consolidated-payment").forEach((button) => button.addEventListener("click", async () => {
@@ -144,7 +161,10 @@ function renderConsolidated(friend) {
 }
 
 function setupHistory(friend) {
-  const months = [...new Set(friend.rows.map((row) => String(row.split.bill_date).slice(0, 7)))].sort().reverse();
+  const months = [...new Set([
+    ...friend.rows.map((row) => String(row.split.bill_date).slice(0, 7)),
+    ...(friend.groupContributions || []).map((row) => String(row.bill_date).slice(0, 7)),
+  ])].sort().reverse();
   const currentMonth = new Date().toISOString().slice(0, 7);
   const previousMonth = months.find((month) => month !== currentMonth) || months[0] || currentMonth;
   $("#historyMonth").innerHTML = months.map((month) => `<option value="${month}">${monthName(month)}</option>`).join("");
@@ -172,6 +192,7 @@ async function refresh() {
   await Promise.all(friends.filter((friend) => friend.friend.id).map(async (friend) => {
     const settlements = await ShareSquad.api(`/friends/${friend.friend.id}/settlements`).catch(() => []);
     friend.consolidated = await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-balance?currency=USD`).catch(() => null);
+    friend.groupContributions = await ShareSquad.api(`/friends/${friend.friend.id}/group-contributions`).catch(() => []);
     friend.settlements = new Map(settlements.map((settlement) => [settlement.month_key, settlement]));
     friend.balance = friend.consolidated ? Number(friend.consolidated.balance) : friend.rows.reduce((sum, row) => {
       const settlement = friend.settlements.get(String(row.split.bill_date).slice(0, 7));
@@ -185,7 +206,7 @@ async function refresh() {
 
 async function removeFriend(friendId) {
   const friend = friends.find((entry) => entry.friend.id === friendId)?.friend;
-  if (!friend || !confirm(`Remove ${friend.name} from your Friends list? This will not remove them from any group or delete past expenses.`)) return;
+  if (!friend || !await ShareSquad.confirmDialog({ title: `Remove ${friend.name}?`, message: "This only removes them from your Friends list. Group memberships and past expenses remain available.", confirmLabel: "Remove friend" })) return;
   try { await ShareSquad.api(`/friends/${friendId}`, { method: "DELETE" }); ShareSquad.showToast(`${friend.name} was removed from Friends`, "success"); await refresh(); }
   catch (error) { ShareSquad.showToast(error.message || "Could not remove friend", "error"); }
 }
@@ -220,7 +241,7 @@ $("#openAddBill").onclick = () => { const panel = $("#friendExpensePanel"); if (
 $("#friendExpenseType").onchange = renderValues;
 $("#friendPaidBy").onchange = renderValues;
 $("#settingsBtn").onclick = () => { location.href = "/settings.html"; };
-$("#logoutBtn").onclick = () => { ShareSquad.removeToken(); ShareSquad.removeStoredGroupId(); location.href = "/login.html"; };
+$("#logoutBtn")?.addEventListener("click", () => { ShareSquad.removeToken(); ShareSquad.removeStoredGroupId(); location.href = "/login.html"; });
 $("#addFriendBtn").onclick = openFriendInvite;
 $("#addFriendHeaderBtn")?.addEventListener("click", openFriendInvite);
 const legacySplitButton = document.querySelector('a[href="/quick-split.html"]');

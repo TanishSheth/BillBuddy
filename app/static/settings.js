@@ -145,7 +145,7 @@ async function saveGeneralSettings() {
 }
 
 async function clearGeneralKey() {
-  if (!confirm("Remove your custom API key?")) return;
+  if (!await ShareSquad.confirmDialog({ title: "Remove custom API key?", message: "The saved key will be removed from your account.", confirmLabel: "Remove key" })) return;
   const msg = $("#generalMsg");
   try {
     const updated = await ShareSquad.api("/settings/account", {
@@ -249,7 +249,7 @@ async function saveGroupSettings() {
 async function clearGroupKey() {
   const gid = state.selectedGroupId;
   if (!gid) return;
-  if (!confirm("Clear this group's custom API key?")) return;
+  if (!await ShareSquad.confirmDialog({ title: "Clear group API key?", message: "This group's custom key will be removed.", confirmLabel: "Clear key" })) return;
   const msg = $("#groupMsg");
   try {
     const updated = await ShareSquad.api(`/settings/groups/${gid}`, {
@@ -320,7 +320,7 @@ async function clearGroupKey() {
     }
   });
   $("#removeProfileAvatarBtn")?.addEventListener("click", async () => {
-    if (!confirm("Remove your profile photo?")) return;
+    if (!await ShareSquad.confirmDialog({ title: "Remove profile photo?", message: "Your current profile photo will be removed.", confirmLabel: "Remove photo" })) return;
     try {
       await ShareSquad.api("/auth/me/avatar", { method: "DELETE" });
       const avatar = $("#profileAvatar");

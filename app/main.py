@@ -122,6 +122,12 @@ def _notify_group_members(db: Session, group_id: int, message: str, link: str = 
             ))
 
 
+def _group_focus_link(group_id: int, tab: str, focus: str = "") -> str:
+    """A notification link that opens the exact relevant group workspace."""
+    link = f"/group.html?group={group_id}&tab={tab}"
+    return f"{link}&focus={focus}" if focus else link
+
+
 def _period_has_paid_transfer(db: Session, period_id: int) -> bool:
     return db.query(models.GroupPayment.id).filter(
         models.GroupPayment.period_id == period_id,
@@ -1458,6 +1464,49 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
                     "period_key": period.period_key, "group_id": group_id,
                     "period_id": period.id, "payer_member_id": settlement["from_member_id"], "recipient_member_id": settlement["to_member_id"],
                 })
+
+    # Active group periods are visible in the friend total immediately. They
+    # remain read-only here because a group expense can still change before
+    # its period is settled; only finalized group sources are payment-ready.
+    active_mine = {member.group_id: member for member in db.query(models.GroupMember).filter_by(account_id=account_id, is_active=True).all()}
+    active_theirs = {member.group_id: member for member in db.query(models.GroupMember).filter_by(account_id=friend_id, is_active=True).all()}
+    active_shared_ids = sorted(set(active_mine).intersection(active_theirs))
+    if active_shared_ids:
+        active_rows = db.query(models.Expense, models.MonthlyPeriod, models.Group).join(
+            models.MonthlyPeriod, models.Expense.period_id == models.MonthlyPeriod.id
+        ).join(models.Group, models.MonthlyPeriod.group_id == models.Group.id).filter(
+            models.MonthlyPeriod.group_id.in_(active_shared_ids),
+            models.MonthlyPeriod.status != "SETTLED",
+            models.Expense.currency == currency,
+        ).all()
+        active_expense_ids = [expense.id for expense, _period, _group in active_rows]
+        active_split_map: dict[int, dict[int, Decimal]] = {}
+        if active_expense_ids:
+            for split in db.query(models.ExpenseSplit).filter(models.ExpenseSplit.expense_id.in_(active_expense_ids)).all():
+                active_split_map.setdefault(split.expense_id, {})[split.member_id] = Decimal(str(split.share_amount))
+        active_totals: dict[tuple[int, str], Decimal] = {}
+        active_details: dict[tuple[int, str], tuple[models.Group, models.MonthlyPeriod]] = {}
+        for expense, period, group in active_rows:
+            mine, theirs = active_mine[group.id], active_theirs[group.id]
+            shares = active_split_map.get(expense.id, {})
+            if expense.payer_member_id == mine.id and theirs.id in shares:
+                amount = shares[theirs.id]
+            elif expense.payer_member_id == theirs.id and mine.id in shares:
+                amount = -shares[mine.id]
+            else:
+                continue
+            key = (group.id, period.period_key)
+            active_totals[key] = active_totals.get(key, Decimal("0.00")) + amount
+            active_details[key] = (group, period)
+        for key, amount in active_totals.items():
+            if not amount:
+                continue
+            group, period = active_details[key]
+            sources.append({
+                "kind": "GROUP", "label": f"{group.name} · {period.period_key} (current)", "amount": float(amount),
+                "currency": currency, "period_key": period.period_key, "group_id": group.id,
+                "settlement_ready": False,
+            })
     return sources
 
 
@@ -1640,15 +1689,71 @@ def get_consolidated_friend_balance(
     normalized_currency = _normalize_currency(currency, "USD")
     _reconcile_recipient_reported_pair_payments(db, one, two, normalized_currency)
     balance, sources = _consolidated_friend_balance(db, account.id, friend_id, normalized_currency)
+    settleable_balance = sum((
+        Decimal(str(source["amount"])) for source in sources if source.get("settlement_ready") is not False
+    ), Decimal("0.00")).quantize(Decimal("0.01"))
     payments = db.query(models.PairPayment).filter_by(account_one_id=one, account_two_id=two, currency=normalized_currency).order_by(models.PairPayment.created_at.desc()).all()
     payer_id = account.id if balance < 0 else friend_id if balance > 0 else None
     recipient_id = friend_id if balance < 0 else account.id if balance > 0 else None
     return schemas.ConsolidatedFriendBalanceOut(
-        friend_id=friend_id, balance=float(balance), currency=normalized_currency,
+        friend_id=friend_id, balance=float(balance), settleable_balance=float(settleable_balance), currency=normalized_currency,
         payer_account_id=payer_id, recipient_account_id=recipient_id,
         sources=[schemas.ConsolidatedSourceOut(**{key: value for key, value in source.items() if key in {"kind", "label", "amount", "currency", "period_key", "group_id"}}) for source in sources],
         payments=[_pair_payment_out(payment) for payment in payments],
     )
+
+
+@app.get("/api/friends/{friend_id}/group-contributions", response_model=list[schemas.FriendGroupContributionOut])
+def get_friend_group_contributions(
+    friend_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
+):
+    """Live, read-only pair portions from shared group expenses.
+
+    An entry exists only when one of the two people paid and the other has an
+    explicit split. Bills paid by a third group member are deliberately not
+    represented as a debt between this pair.
+    """
+    if friend_id == account.id or not db.query(models.Account).get(friend_id):
+        raise HTTPException(404, "Friend not found")
+    one, two = _friend_pair(account.id, friend_id)
+    connection = db.query(models.FriendConnection).filter_by(account_one_id=one, account_two_id=two, status="ACTIVE").first()
+    if not connection:
+        raise HTTPException(403, "Add this person as a friend before viewing group contributions")
+
+    mine = {member.group_id: member for member in db.query(models.GroupMember).filter_by(account_id=account.id, is_active=True).all()}
+    theirs = {member.group_id: member for member in db.query(models.GroupMember).filter_by(account_id=friend_id, is_active=True).all()}
+    shared_group_ids = sorted(set(mine).intersection(theirs))
+    if not shared_group_ids:
+        return []
+
+    rows = db.query(models.Expense, models.MonthlyPeriod, models.Group).join(
+        models.MonthlyPeriod, models.Expense.period_id == models.MonthlyPeriod.id
+    ).join(models.Group, models.MonthlyPeriod.group_id == models.Group.id).filter(
+        models.MonthlyPeriod.group_id.in_(shared_group_ids)
+    ).order_by(models.Expense.bill_date.desc(), models.Expense.id.desc()).all()
+    expense_ids = [expense.id for expense, _period, _group in rows]
+    split_map: dict[int, dict[int, Decimal]] = {}
+    if expense_ids:
+        for split in db.query(models.ExpenseSplit).filter(models.ExpenseSplit.expense_id.in_(expense_ids)).all():
+            split_map.setdefault(split.expense_id, {})[split.member_id] = Decimal(str(split.share_amount))
+
+    result = []
+    for expense, period, group in rows:
+        my_member = mine[group.id]
+        friend_member = theirs[group.id]
+        shares = split_map.get(expense.id, {})
+        if expense.payer_member_id == my_member.id and friend_member.id in shares:
+            amount = shares[friend_member.id]
+        elif expense.payer_member_id == friend_member.id and my_member.id in shares:
+            amount = -shares[my_member.id]
+        else:
+            continue
+        result.append(schemas.FriendGroupContributionOut(
+            group_id=group.id, group_name=group.name, expense_id=expense.id,
+            title=expense.store_name, bill_date=expense.bill_date, period_key=period.period_key,
+            currency=expense.currency or group.currency or "USD", pair_amount=float(amount),
+        ))
+    return result
 
 
 @app.post("/api/friends/{friend_id}/consolidated-payments", response_model=schemas.PairPaymentOut)
@@ -1656,23 +1761,26 @@ def record_consolidated_friend_payment(
     friend_id: int, payload: schemas.PairPaymentCreate, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
 ):
     normalized_currency = _normalize_currency(payload.currency, "USD")
-    balance, sources = _consolidated_friend_balance(db, account.id, friend_id, normalized_currency)
-    if not balance:
-        raise HTTPException(400, "There is no open balance to pay")
-    payer_id = account.id if balance < 0 else friend_id
-    recipient_id = friend_id if balance < 0 else account.id
+    _live_balance, sources = _consolidated_friend_balance(db, account.id, friend_id, normalized_currency)
+    settleable_balance = sum((
+        Decimal(str(source["amount"])) for source in sources if source.get("settlement_ready") is not False
+    ), Decimal("0.00")).quantize(Decimal("0.01"))
+    if not settleable_balance:
+        raise HTTPException(400, "There is no payment-ready balance. Current group shares can be paid after the group period is settled.")
+    payer_id = account.id if settleable_balance < 0 else friend_id
+    recipient_id = friend_id if settleable_balance < 0 else account.id
     amount = Decimal(str(payload.amount)).quantize(Decimal("0.01"))
     if account.id not in (payer_id, recipient_id):
         raise HTTPException(403, "Only the two people in this balance can record payment")
-    if amount > abs(balance):
-        raise HTTPException(400, f"Payment cannot exceed the open balance of {normalized_currency} {abs(balance):.2f}")
+    if amount > abs(settleable_balance):
+        raise HTTPException(400, f"Payment cannot exceed the payment-ready balance of {normalized_currency} {abs(settleable_balance):.2f}")
 
     remaining = amount
     allocations = []
     # Oldest first makes partial payments predictable and gives every source
     # a permanent, inspectable allocation.
     for source in sorted(sources, key=lambda item: (item["period_key"] or "", item["kind"])):
-        if remaining <= 0 or Decimal(str(source["amount"])) * balance <= 0:
+        if source.get("settlement_ready") is False or remaining <= 0 or Decimal(str(source["amount"])) * settleable_balance <= 0:
             continue
         applied = min(remaining, abs(Decimal(str(source["amount"]))))
         allocation = {"kind": source["kind"], "amount": float(applied), "month_key": source.get("period_key")}
@@ -2178,7 +2286,7 @@ def remove_group_member(
     name = target.display_name
     removed_expenses = _purge_member_group_history(db, group_id, target)
     _record_activity(db, group_id, account, "member_removed", f"{name} was removed from active group activity", "member", member_id)
-    _notify_group_members(db, group_id, f"{name} was removed from active group activity. Settled history is preserved.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+    _notify_group_members(db, group_id, f"{name} was removed from active group activity. Settled history is preserved.", _group_focus_link(group_id, "members", "groupMembers"), exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "member-removed")
     msg = f"{name} was removed from active group activity"
@@ -2252,6 +2360,7 @@ def create_group_invite(
     invite_url = _invite_url(request, group.invite_code)
 
     already_member = False
+    member_added = False
     existing_account = db.query(models.Account).filter_by(email=email).first()
     if existing_account:
         membership = db.query(models.GroupMember).filter_by(group_id=group.id, account_id=existing_account.id).first()
@@ -2260,6 +2369,7 @@ def create_group_invite(
             membership.display_name = existing_account.display_name
         else:
             db.add(models.GroupMember(group_id=group.id, account_id=existing_account.id, display_name=existing_account.display_name, role="member"))
+        member_added = True
         pending = (
             db.query(models.GroupInvite)
             .filter_by(group_id=group.id, email=email)
@@ -2278,7 +2388,12 @@ def create_group_invite(
         else:
             db.add(models.GroupInvite(group_id=group.id, email=email, status="pending"))
 
+    if member_added:
+        _record_activity(db, group_id, account, "member_added", f"{account.display_name} added {existing_account.display_name} to the group", "member", None)
+        _notify_group_members(db, group_id, f"{account.display_name} added {existing_account.display_name} to the group.", _group_focus_link(group_id, "members", "groupMembers"), exclude_account_id=account.id)
     db.commit()
+    if member_added:
+        notify_group_change(group_id, "member-added")
 
     email_sent = False
     if is_email_configured():
@@ -2362,7 +2477,10 @@ def join_group(
             role="member",
         )
         db.add(member)
+        _record_activity(db, group.id, account, "member_joined", f"{account.display_name} joined the group", "member", None)
+        _notify_group_members(db, group.id, f"{account.display_name} joined the group.", _group_focus_link(group.id, "members", "groupMembers"), exclude_account_id=account.id)
         db.commit()
+        notify_group_change(group.id, "member-joined")
     return group
 
 
@@ -2746,7 +2864,7 @@ def create_expense(
     db.commit()
     db.refresh(expense)
     _record_activity(db, group_id, account, "expense_created", f"{account.display_name} added {expense.store_name}", "expense", expense.id)
-    _notify_group_members(db, group_id, f"{account.display_name} added {expense.store_name} to this group.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+    _notify_group_members(db, group_id, f"{account.display_name} added {expense.store_name} to this group.", _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "expense-created")
     return expense
@@ -2803,9 +2921,9 @@ def update_expense(
     db.refresh(expense)
     _record_activity(db, group_id, account, "expense_updated", f"{account.display_name} updated {expense.store_name}", "expense", expense.id)
     if was_locked:
-        _notify_group_members(db, group_id, f"{account.display_name} corrected {expense.store_name}. Recorded payments remain applied; check your recalculated balance.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+        _notify_group_members(db, group_id, f"{account.display_name} corrected {expense.store_name}. Recorded payments remain applied; check your recalculated balance.", _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
     else:
-        _notify_group_members(db, group_id, f"{account.display_name} updated {expense.store_name}.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+        _notify_group_members(db, group_id, f"{account.display_name} updated {expense.store_name}.", _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "expense-updated")
     return expense
@@ -2837,7 +2955,7 @@ def delete_expense(
     text = f"{account.display_name} {'corrected the period by deleting' if was_locked else 'deleted'} {store_name}."
     if was_locked:
         text += " Recorded payments remain applied; check your recalculated balance."
-    _notify_group_members(db, group_id, text, f"/group.html?group={group_id}", exclude_account_id=account.id)
+    _notify_group_members(db, group_id, text, _group_focus_link(group_id, "expenses", "expensesBody"), exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "expense-deleted")
     return {"ok": True, "message": "Expense deleted"}
@@ -2912,7 +3030,7 @@ def create_expense_comment(group_id: int, expense_id: int, payload: schemas.Expe
     comment = models.ExpenseComment(expense_id=expense.id, account_id=account.id, body=body)
     db.add(comment)
     _record_activity(db, group_id, account, "comment_added", f"{account.display_name} commented on {expense.store_name}", "expense", expense.id)
-    _notify_group_members(db, group_id, f"{account.display_name} commented on {expense.store_name}.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+    _notify_group_members(db, group_id, f"{account.display_name} commented on {expense.store_name}.", _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
     db.commit()
     db.refresh(comment)
     notify_group_change(group_id, "comment-added")
@@ -2981,7 +3099,7 @@ def mark_group_payment_paid(group_id: int, period_key: str, payload: schemas.Gro
     db.add(payment)
     recipient = db.query(models.GroupMember).get(payload.recipient_member_id)
     _record_activity(db, group_id, account, "payment_marked_paid", f"{payer.display_name} marked a payment of {currency} {payload.amount:.2f} as paid to {recipient.display_name}", "payment", None)
-    _notify_group_members(db, group_id, f"{payer.display_name} marked a {currency} {payload.amount:.2f} payment as paid to {recipient.display_name}.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+    _notify_group_members(db, group_id, f"{payer.display_name} marked a {currency} {payload.amount:.2f} payment as paid to {recipient.display_name}.", _group_focus_link(group_id, "balances", "paymentHistory"), exclude_account_id=account.id)
     db.commit()
     db.refresh(payment)
     notify_group_change(group_id, "payment-paid")
@@ -3014,7 +3132,7 @@ def mark_group_payment_received(group_id: int, period_key: str, payload: schemas
     db.add(payment)
     payer = db.query(models.GroupMember).get(payload.payer_member_id)
     _record_activity(db, group_id, account, "payment_received", f"{recipient.display_name} recorded {currency} {payload.amount:.2f} received from {payer.display_name}", "payment", None)
-    _notify_group_members(db, group_id, f"{recipient.display_name} recorded a {currency} {payload.amount:.2f} payment received from {payer.display_name}. Balances were recalculated.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+    _notify_group_members(db, group_id, f"{recipient.display_name} recorded a {currency} {payload.amount:.2f} payment received from {payer.display_name}. Balances were recalculated.", _group_focus_link(group_id, "balances", "paymentHistory"), exclude_account_id=account.id)
     db.commit()
     db.refresh(payment)
     notify_group_change(group_id, "payment-received")
@@ -3039,7 +3157,7 @@ def confirm_group_payment(group_id: int, payment_id: int, account: models.Accoun
     payment.confirmed_at = datetime.now(timezone.utc)
     payer = db.query(models.GroupMember).get(payment.payer_member_id)
     _record_activity(db, group_id, account, "payment_confirmed", f"{recipient.display_name} confirmed payment from {payer.display_name}", "payment", payment.id)
-    _notify_group_members(db, group_id, f"{recipient.display_name} confirmed a {payment.currency} {float(payment.amount):.2f} payment from {payer.display_name}. Balances were recalculated.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+    _notify_group_members(db, group_id, f"{recipient.display_name} confirmed a {payment.currency} {float(payment.amount):.2f} payment from {payer.display_name}. Balances were recalculated.", _group_focus_link(group_id, "balances", "paymentHistory"), exclude_account_id=account.id)
     db.commit()
     db.refresh(payment)
     notify_group_change(group_id, "payment-confirmed")
@@ -3134,7 +3252,7 @@ def reopen_period(
     period.pdf_path = None
     period.settled_at = None
     _record_activity(db, group_id, account, "period_reopened", f"{account.display_name} reopened {period_key}", "period", period.id)
-    _notify_group_members(db, group_id, f"{account.display_name} reopened the {period_key} period. Balances may have changed.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+    _notify_group_members(db, group_id, f"{account.display_name} reopened the {period_key} period. Balances may have changed.", _group_focus_link(group_id, "balances", "periodSelect"), exclude_account_id=account.id)
     db.commit()
     db.refresh(period)
     notify_group_change(group_id, "period-reopened")
@@ -3192,7 +3310,7 @@ def generate_report(
     period.status = "SETTLED"
     period.settled_at = datetime.now()
     _record_activity(db, group_id, account, "period_settled", f"{account.display_name} settled {period_key}", "period", period.id)
-    _notify_group_members(db, group_id, f"{account.display_name} settled the {period_key} period. Review your consolidated Friend balance.", f"/group.html?group={group_id}", exclude_account_id=account.id)
+    _notify_group_members(db, group_id, f"{account.display_name} settled the {period_key} period. Review your consolidated Friend balance.", _group_focus_link(group_id, "balances", "settlementList"), exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "period-settled")
 

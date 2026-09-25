@@ -81,6 +81,25 @@ function switchTab(tabName) {
   if (tabName === "activity") loadActivity();
 }
 
+function focusNotificationTarget() {
+  const params = new URLSearchParams(window.location.search);
+  const requestedTab = params.get("tab");
+  const focus = params.get("focus");
+  if (requestedTab && GROUP_PAGE_HELP[requestedTab]) switchTab(requestedTab);
+  if (!focus) return;
+  setTimeout(() => {
+    // Older notifications only identify the expense list. Highlight its most
+    // recent visible item so the user still lands on a concrete change.
+    const target = focus === "expensesBody"
+      ? document.querySelector("#expensesBody tr, #expensesMobileList [data-expense-id]") || document.getElementById("expensesBody")
+      : document.getElementById(focus) || document.querySelector(`[data-expense-id="${CSS.escape(focus.replace("expense-", ""))}"]`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.classList.add("notification-focus");
+    setTimeout(() => target.classList.remove("notification-focus"), 2100);
+  }, 280);
+}
+
 function applyDraftGroupState() {
   const activeCount = (state.members || []).filter((member) => member.is_active !== false).length;
   state.isDraft = activeCount < 2;
@@ -382,11 +401,11 @@ function updatePeriodStatus() {
 
   if (periodRec && periodRec.status === "SETTLED") {
     badge.textContent = "Settled";
-    badge.className = "text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full border status-settled font-bold";
+    badge.className = "status-chip status-settled";
     reopenBtn.classList.remove("hidden");
   } else {
     badge.textContent = "Active";
-    badge.className = "text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full border status-active font-bold";
+    badge.className = "status-chip status-active";
     reopenBtn.classList.add("hidden");
   }
 }
@@ -551,6 +570,7 @@ async function loadExpenses() {
     // Desktop Row
     const tr = document.createElement("tr");
     tr.className = "border-b border-ink/5 hover:bg-ink/5 transition-colors";
+    tr.dataset.expenseId = e.id;
     tr.innerHTML = `
       <td class="py-2.5 pr-3 text-ink/70">${e.bill_date}</td>
       <td class="py-2.5 pr-3 font-bold text-ink">${ShareSquad.escapeHtml(e.store_name)}</td>
@@ -571,6 +591,7 @@ async function loadExpenses() {
     // Mobile Card
     const card = document.createElement("div");
     card.className = "bb-mobile-card";
+    card.dataset.expenseId = e.id;
     card.innerHTML = `
       <div class="card-top">
         <div>
@@ -605,7 +626,7 @@ async function loadExpenses() {
     btn.addEventListener("click", async () => {
       const name = btn.dataset.name;
       const id = Number(btn.dataset.id);
-      if (!confirm(`Delete "${name}"?`)) return;
+      if (!await ShareSquad.confirmDialog({ title: `Delete “${name}”?`, message: "This expense will be deleted and every member's balance will update.", confirmLabel: "Delete expense" })) return;
       try {
         const override = state.myRole === "owner" ? "?owner_override=true" : "";
         await ShareSquad.api(`/groups/${gid()}/expenses/${id}${override}`, { method: "DELETE" });
@@ -1032,13 +1053,13 @@ async function openNotifications() {
   const modal = $("#notificationsModal");
   const list = $("#notificationsList");
   modal.classList.remove("hidden");
-  list.innerHTML = '<p class="text-xs font-mono text-ink/40">Loading notifications...</p>';
+  list.innerHTML = '<div class="ui-skeleton-card"><span></span><span></span></div>';
   try {
     const items = await ShareSquad.api("/notifications");
-    list.innerHTML = items.length ? items.map((item) => `<button class="notification-item ${item.read_at ? "" : "unread"}" data-id="${item.id}" data-link="${ShareSquad.escapeHtml(item.link || "")}"><span>${ShareSquad.escapeHtml(item.message)}</span><small>${ShareSquad.formatDate(item.created_at)}</small></button>`).join("") : '<p class="text-xs font-mono text-ink/40 py-4">You are all caught up.</p>';
+    list.innerHTML = items.length ? items.map((item) => `<button class="notification-item ${item.read_at ? "" : "unread"}" data-id="${item.id}" data-link="${ShareSquad.escapeHtml(item.link || "")}" data-message="${ShareSquad.escapeHtml(item.message)}"><span>${ShareSquad.escapeHtml(item.message)}</span><small>${ShareSquad.formatDate(item.created_at)}</small>${item.link ? '<span class="notification-action">View details →</span>' : ""}</button>`).join("") : '<p class="text-sm text-ink/55 py-5 text-center">You are all caught up.</p>';
     $$(".notification-item").forEach((button) => button.addEventListener("click", async () => {
       await ShareSquad.api(`/notifications/${button.dataset.id}/read`, { method: "POST" });
-      if (button.dataset.link) window.location.href = button.dataset.link;
+      if (button.dataset.link) ShareSquad.openNotificationLink(button.dataset.link, button.dataset.message);
       else { button.classList.remove("unread"); loadNotificationCount(); }
     }));
     loadNotificationCount();
@@ -1168,7 +1189,7 @@ async function loadMembers() {
 
   list.querySelectorAll(".remove-member").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      if (!confirm(`Remove ${btn.dataset.name} from active group activity?\n\nActive-period expenses involving them will be removed. Completed, settled history and reports remain available.`)) return;
+      if (!await ShareSquad.confirmDialog({ title: `Remove ${btn.dataset.name}?`, message: "Their active-period expenses will be removed. Completed history and reports remain available.", confirmLabel: "Remove member" })) return;
       try {
         await ShareSquad.api(`/groups/${gid()}/members/${btn.dataset.id}`, { method: "DELETE" });
         ShareSquad.showToast(`${btn.dataset.name} was removed`, "success");
@@ -1280,7 +1301,7 @@ async function handleReceiptUpload(file) {
 
   // Reopen period
   $("#reopenPeriodBtn").addEventListener("click", async () => {
-    if (!confirm(`Re-open period ${state.currentPeriod} for editing?`)) return;
+    if (!await ShareSquad.confirmDialog({ title: `Re-open ${state.currentPeriod}?`, message: "Members can edit this period again and balances may change.", confirmLabel: "Re-open period", danger: false })) return;
     try {
       await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/reopen`, { method: "POST" });
       ShareSquad.showToast("Period re-opened for editing", "info");
@@ -1355,7 +1376,7 @@ async function handleReceiptUpload(file) {
     $("#groupCoverInput")?.click();
   });
   $("#removeGroupPhotoBtn")?.addEventListener("click", async () => {
-    if (!confirm("Remove this group photo?")) return;
+    if (!await ShareSquad.confirmDialog({ title: "Remove group photo?", message: "The current group photo will be removed.", confirmLabel: "Remove photo" })) return;
     try {
       const updated = await ShareSquad.api(`/groups/${gid()}/cover`, { method: "DELETE" });
       state.group = updated;
@@ -1488,4 +1509,5 @@ async function handleReceiptUpload(file) {
   await loadExpenses();
   await loadNotificationCount();
   startGroupSync();
+  focusNotificationTarget();
 })();

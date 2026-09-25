@@ -80,6 +80,142 @@ function showToast(msg, type = "info", duration = 3500) {
   }, duration);
 }
 
+// A shared, accessible replacement for browser confirm() dialogs. Keeping it
+// here means every destructive workflow speaks and behaves the same way.
+function confirmDialog({ title = "Are you sure?", message = "This action cannot be undone.", confirmLabel = "Confirm", danger = true } = {}) {
+  return new Promise((resolve) => {
+    const previousFocus = document.activeElement;
+    const overlay = document.createElement("div");
+    overlay.className = "app-dialog-overlay";
+    overlay.innerHTML = `
+      <section class="app-dialog" role="dialog" aria-modal="true" aria-labelledby="appDialogTitle" aria-describedby="appDialogMessage">
+        <div class="app-dialog-icon ${danger ? "is-danger" : ""}" aria-hidden="true">${danger ? "!" : "?"}</div>
+        <h2 id="appDialogTitle">${escapeHtml(title)}</h2>
+        <p id="appDialogMessage">${escapeHtml(message)}</p>
+        <div class="app-dialog-actions">
+          <button type="button" class="bb-btn-secondary" data-dialog-cancel>Cancel</button>
+          <button type="button" class="${danger ? "bb-btn-danger" : "bb-btn-primary"}" data-dialog-confirm>${escapeHtml(confirmLabel)}</button>
+        </div>
+      </section>`;
+    const finish = (accepted) => {
+      document.removeEventListener("keydown", onKeyDown);
+      overlay.remove();
+      previousFocus?.focus?.();
+      resolve(accepted);
+    };
+    const onKeyDown = (event) => { if (event.key === "Escape") finish(false); };
+    overlay.addEventListener("click", (event) => { if (event.target === overlay) finish(false); });
+    overlay.querySelector("[data-dialog-cancel]").addEventListener("click", () => finish(false));
+    overlay.querySelector("[data-dialog-confirm]").addEventListener("click", () => finish(true));
+    document.addEventListener("keydown", onKeyDown);
+    document.body.appendChild(overlay);
+    overlay.querySelector("[data-dialog-cancel]").focus();
+  });
+}
+
+function renderSkeleton(root, variant = "cards") {
+  if (!root) return;
+  const blocks = variant === "rows" ? 4 : 3;
+  root.setAttribute("aria-busy", "true");
+  root.innerHTML = Array.from({ length: blocks }, () => `<div class="ui-skeleton-card" aria-hidden="true"><span></span><span></span><span></span></div>`).join("");
+}
+
+function initGlobalNotifications() {
+  if (!getToken() || $("#notificationsBtn")) return;
+  const actions = $(".header-actions");
+  if (!actions) return;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = "notificationsBtn";
+  button.className = "bb-btn-secondary !py-1.5 !px-2.5 text-[11px] relative";
+  button.title = "Notifications";
+  button.setAttribute("aria-label", "Notifications");
+  button.innerHTML = `<i data-lucide="bell" class="w-3.5 h-3.5"></i><span id="notificationCount" class="hidden notification-count">0</span>`;
+  actions.prepend(button);
+  window.lucide?.createIcons();
+  const modal = document.createElement("div");
+  modal.id = "notificationsModal";
+  modal.className = "modal-overlay hidden";
+  modal.innerHTML = `<div class="bb-card modal-card"><div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3"><h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Notifications</h2><button type="button" class="text-ink/40 hover:text-ink font-bold" aria-label="Close notifications">×</button></div><div id="notificationsList" class="space-y-2 max-h-[60vh] overflow-y-auto"></div></div>`;
+  document.body.appendChild(modal);
+  const load = async () => {
+    const list = $("#notificationsList");
+    list.innerHTML = '<div class="ui-skeleton-card"><span></span><span></span></div>';
+    try {
+      const items = await api("/notifications");
+      list.innerHTML = items.length ? items.map((item) => `<button class="notification-item ${item.read_at ? "" : "unread"}" data-id="${item.id}" data-link="${escapeHtml(item.link || "")}" data-message="${escapeHtml(item.message)}"><span>${escapeHtml(item.message)}</span><small>${formatDate(item.created_at)}</small>${item.link ? '<span class="notification-action">View details →</span>' : ""}</button>`).join("") : '<p class="text-sm text-ink/55 py-5 text-center">You are all caught up.</p>';
+      list.querySelectorAll(".notification-item").forEach((item) => item.addEventListener("click", async () => { await api(`/notifications/${item.dataset.id}/read`, { method: "POST" }); if (item.dataset.link) openNotificationLink(item.dataset.link, item.dataset.message); else { item.classList.remove("unread"); refreshCount(); } }));
+      refreshCount();
+    } catch (error) { list.innerHTML = `<p class="text-sm balance-negative">${escapeHtml(error.message)}</p>`; }
+  };
+  const refreshCount = async () => { try { const unread = await api("/notifications?unread_only=true"); const badge = $("#notificationCount"); badge.textContent = unread.length > 9 ? "9+" : unread.length; badge.classList.toggle("hidden", !unread.length); } catch (_) {} };
+  button.addEventListener("click", () => { modal.classList.remove("hidden"); load(); });
+  modal.querySelector("button").addEventListener("click", () => modal.classList.add("hidden"));
+  modal.addEventListener("click", (event) => { if (event.target === modal) modal.classList.add("hidden"); });
+  refreshCount();
+}
+
+function initMobileQuickAction() {
+  if (!getToken() || $(".mobile-quick-action")) return;
+  const onDashboard = /(^|\/)index\.html$|\/$/.test(window.location.pathname);
+  const onFriends = /friends\.html$/.test(window.location.pathname);
+  if (onFriends) return;
+  const target = onDashboard ? null : ["#addExpenseBtn", "#openAddBill", "#quickSplitBtn"].map((selector) => $(selector)).find(Boolean);
+  if (!onDashboard && !target) return;
+  if (onDashboard) {
+    const actions = document.createElement("div");
+    actions.className = "mobile-quick-actions";
+    actions.innerHTML = '<button type="button" class="mobile-quick-action quick-split">＋ <span>Quick split</span></button><button type="button" class="mobile-quick-action create-group">＋ <span>Create group</span></button>';
+    actions.querySelector(".quick-split").addEventListener("click", () => { window.location.href = "/quick-split.html"; });
+    actions.querySelector(".create-group").addEventListener("click", () => $("#newGroupBtn")?.click());
+    document.body.appendChild(actions);
+    return;
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "mobile-quick-action";
+  button.innerHTML = "＋ <span>Quick add</span>";
+  button.addEventListener("click", () => target.click());
+  document.body.appendChild(button);
+}
+
+function openNotificationLink(link, message = "") {
+  if (!link) return false;
+  const target = new URL(link, window.location.origin);
+  if (target.pathname.endsWith("/group.html") && !target.searchParams.get("tab")) {
+    const text = String(message).toLowerCase();
+    if (/payment|paid|received|confirmed/.test(text)) { target.searchParams.set("tab", "balances"); target.searchParams.set("focus", "paymentHistory"); }
+    else if (/member|invite/.test(text)) { target.searchParams.set("tab", "members"); target.searchParams.set("focus", "groupMembers"); }
+    else if (/settled|reopened/.test(text)) { target.searchParams.set("tab", "balances"); target.searchParams.set("focus", "periodSelect"); }
+    else if (/added|updated|deleted|comment/.test(text)) { target.searchParams.set("tab", "expenses"); target.searchParams.set("focus", "expensesBody"); }
+  }
+  const groupId = target.searchParams.get("group");
+  if (groupId) setStoredGroupId(groupId);
+  window.location.href = `${target.pathname}${target.search}${target.hash}`;
+  return true;
+}
+
+function initSearchPalette() {
+  if (!getToken() || $("#globalSearchPalette")) return;
+  const overlay = document.createElement("div");
+  overlay.id = "globalSearchPalette";
+  overlay.className = "app-dialog-overlay hidden";
+  overlay.innerHTML = `<section class="app-dialog search-palette" role="dialog" aria-modal="true" aria-label="Search ShareSquad"><div class="flex items-center justify-between gap-3"><h2>Search ShareSquad</h2><kbd>Esc</kbd></div><input class="bb-input mt-4" placeholder="Search groups and friends…" aria-label="Search"><div class="search-results mt-3"></div></section>`;
+  document.body.appendChild(overlay);
+  const input = overlay.querySelector("input"); const results = overlay.querySelector(".search-results");
+  let all = [];
+  const close = () => overlay.classList.add("hidden");
+  const open = async () => {
+    overlay.classList.remove("hidden"); input.value = ""; results.innerHTML = '<p class="text-sm text-ink/55">Start typing to search groups and friends.</p>'; input.focus();
+    if (!all.length) { const [groups, friends] = await Promise.all([api("/groups").catch(() => []), api("/friends").catch(() => [])]); all = [...groups.map((x) => ({ label: x.name, type: "Group", href: "/group.html", groupId: x.id })), ...friends.map((x) => ({ label: x.display_name || x.name, type: "Friend", href: `/friends.html?friend=${x.id}` }))]; }
+  };
+  input.addEventListener("input", () => { const q = input.value.trim().toLowerCase(); const matches = all.filter((x) => x.label.toLowerCase().includes(q)).slice(0, 7); results.innerHTML = q && matches.length ? matches.map((x, i) => `<button class="search-result" data-i="${i}"><small>${x.type}</small>${escapeHtml(x.label)}</button>`).join("") : q ? '<p class="text-sm text-ink/55">No matches found.</p>' : '<p class="text-sm text-ink/55">Start typing to search groups and friends.</p>'; results.querySelectorAll("button").forEach((button) => button.addEventListener("click", () => { const item = matches[Number(button.dataset.i)]; if (item.groupId) setStoredGroupId(item.groupId); location.href = item.href; })); });
+  document.addEventListener("keydown", (event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); open().catch((err) => showToast(err.message, "error")); } else if (event.key === "Escape" && !overlay.classList.contains("hidden")) close(); });
+  overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
+}
+
+document.addEventListener("DOMContentLoaded", () => setTimeout(() => { initGlobalNotifications(); initMobileQuickAction(); initSearchPalette(); if (!/(^|\/)index\.html$|\/$/.test(window.location.pathname)) $("#logoutBtn")?.remove(); }, 0));
+
 async function api(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
   const token = getToken();
@@ -378,6 +514,12 @@ window.ShareSquad = {
   setStoredGroupId,
   removeStoredGroupId,
   showToast,
+  confirmDialog,
+  renderSkeleton,
+  initGlobalNotifications,
+  initMobileQuickAction,
+  initSearchPalette,
+  openNotificationLink,
   isReceiptImageFile,
   prepareReceiptFile,
   uploadReceipt,

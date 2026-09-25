@@ -100,7 +100,7 @@ function renderGroups(groups) {
             <span>${g.member_count} member${g.member_count === 1 ? "" : "s"}</span>
             ${g.role === "owner" ? ' &bull; <span class="text-brand font-bold">Owner</span>' : ""}
           </p>
-          ${g.member_count < 2 ? '<span class="inline-flex mt-2 text-[10px] font-mono font-bold text-amber-800 bg-amber-100 border border-amber-300 rounded px-1.5 py-0.5">DRAFT · INVITE A MEMBER TO START SPLITTING</span>' : ""}
+          ${g.member_count < 2 ? '<span class="status-chip status-draft mt-2">Draft · invite a member</span>' : '<span class="status-chip status-active mt-2">Active</span>'}
           <p class="text-[10px] text-ink/40 mt-1.5 font-mono">Created ${ShareSquad.formatDate(g.created_at)}</p>
         </div>
         <div class="flex gap-2 pt-3 border-t border-ink/10">
@@ -113,7 +113,7 @@ function renderGroups(groups) {
                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                  </button>`
               : `<button type="button" class="leave-group bb-btn-secondary !py-1.5 !px-2.5 text-[11px] text-stamp border-stamp/30 hover:bg-stamp/5" data-id="${g.id}" data-name="${ShareSquad.escapeHtml(g.name)}" title="Leave group">
-                   <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
+                   <svg class="leave-group-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h6v18h-6M14 6h2"/><circle cx="8" cy="6" r="2"/><path d="M8 9v5m0-4-3 2m3-2 3 2m-3 2-3 5m3-5 3 5M2 13h8m-2-2 2 2-2 2"/></svg>
                  </button>`
           }
         </div>
@@ -142,7 +142,7 @@ function renderGroups(groups) {
     btn.addEventListener("click", async () => {
       const name = btn.dataset.name;
       const id = Number(btn.dataset.id);
-      if (!confirm(`Delete "${name}"?\n\nThis permanently removes all expenses, reports, and members from this group.`)) return;
+      if (!await ShareSquad.confirmDialog({ title: `Delete “${name}”?`, message: "This permanently removes the group, its expenses, reports, and members.", confirmLabel: "Delete group" })) return;
       try {
         await ShareSquad.api(`/groups/${id}`, { method: "DELETE" });
         ShareSquad.showToast(`Group "${name}" deleted`, "info");
@@ -157,7 +157,7 @@ function renderGroups(groups) {
     btn.addEventListener("click", async () => {
       const name = btn.dataset.name;
       const id = Number(btn.dataset.id);
-      if (!confirm(`Leave "${name}"?\n\nYour expenses in this group will be deleted, and you will lose access to the group.`)) return;
+      if (!await ShareSquad.confirmDialog({ title: `Leave “${name}”?`, message: "Your active expenses in this group will be removed and you will lose access.", confirmLabel: "Leave group" })) return;
       try {
         await ShareSquad.api(`/groups/${id}/leave`, { method: "POST" });
         ShareSquad.showToast(`Left group "${name}"`, "info");
@@ -169,7 +169,26 @@ function renderGroups(groups) {
   });
 }
 
+function renderOnboarding(groups, friends, quickSplits) {
+  const card = $("#onboardingChecklist");
+  if (!card || localStorage.getItem("sharesquad_onboarding_dismissed")) return;
+  const steps = [
+    [groups.length > 0, "Create your first group", "#newGroupBtn"],
+    [groups.some((group) => group.member_count > 1), "Invite a member", "/friends.html"],
+    [quickSplits.length > 0, "Log your first shared bill", "/quick-split.html"],
+    [groups.length > 0 || friends.length > 0, "Review balances and settlements", groups[0] ? "/group.html" : "/friends.html"],
+  ];
+  const complete = steps.filter(([done]) => done).length;
+  if (complete === steps.length) { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  card.innerHTML = `<div class="flex justify-between gap-3"><div><h2 class="font-semibold text-base">Getting started with ShareSquad</h2><p class="text-sm text-ink/60 mt-1">${complete}/4 complete</p></div><button type="button" class="text-ink/45" aria-label="Dismiss checklist">×</button></div><div class="onboarding-progress"><span style="width:${complete * 25}%"></span></div><div class="mt-4 grid sm:grid-cols-2 gap-2">${steps.map(([done, label, target]) => `<a href="${target.startsWith("#") ? "javascript:void(0)" : target}" data-onboarding-target="${target}" class="onboarding-step ${done ? "done" : ""}">${done ? "✓" : "○"} ${label}</a>`).join("")}</div>`;
+  card.querySelector("button").onclick = () => { localStorage.setItem("sharesquad_onboarding_dismissed", "1"); card.classList.add("hidden"); };
+  card.querySelectorAll("[data-onboarding-target]").forEach((item) => item.onclick = (event) => { const target = item.dataset.onboardingTarget; if (target.startsWith("#")) { event.preventDefault(); $(target)?.click(); } });
+}
+
 async function loadDashboard() {
+  ShareSquad.renderSkeleton($("#groupsGrid"));
+  ShareSquad.renderSkeleton($("#friendSplitsGrid"));
   try {
     const me = await ShareSquad.api("/auth/me");
     const greeting = $("#userGreeting");
@@ -186,6 +205,7 @@ async function loadDashboard() {
     const consolidatedByFriend = new Map(consolidatedResults.filter(([, total]) => total).map(([friendId, total]) => [friendId, total]));
     renderGroups(groups);
     renderQuickSplits(quickSplits, friends, settlementsByFriend, consolidatedByFriend);
+    renderOnboarding(groups, friends, quickSplits);
   } catch (err) {
     console.error("Failed to load dashboard:", err);
     ShareSquad.showToast(err.message || "Could not load groups", "error");

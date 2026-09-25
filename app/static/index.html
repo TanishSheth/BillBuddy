@@ -54,15 +54,11 @@
   </header>
 
   <main class="page-main max-w-5xl mx-auto px-4 sm:px-5 py-6 sm:py-8 flex-1 w-full">
-    <div class="flex justify-center mb-6 gap-3">
-      <div class="flex flex-wrap gap-2">
-        <a href="/friends.html" class="bb-btn-secondary !py-2 !px-3 text-[11px]"><i data-lucide="handshake" class="w-3.5 h-3.5"></i> Split with a friend</a>
-        <button id="splitGroupBtn" type="button" class="bb-btn-primary !py-2 !px-3 text-[11px]"><i data-lucide="users" class="w-3.5 h-3.5"></i> Split with a group</button>
-      </div>
-    </div>
     <div class="how-it-works mb-5">
       <p><strong>Choose how to split:</strong> <strong>Split with a friend</strong> opens your reusable Friends list for private two-person bills. <strong>Split with a group</strong> creates or opens a multi-person shared group. Your personal spending stays separate in <a href="/personal.html" class="text-brand underline">Personal</a>.</p>
     </div>
+
+    <section id="onboardingChecklist" class="hidden bb-card mb-5 onboarding-card"></section>
 
     <div id="groupsGrid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
     

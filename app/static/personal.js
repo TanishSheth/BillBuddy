@@ -146,7 +146,7 @@ async function handleExpenseAction(event) {
   }
 
   const name = expense.store_name || btn.dataset.name || "this expense";
-  if (!confirm(`Delete expense "${name}"? This cannot be undone.`)) return;
+  if (!await ShareSquad.confirmDialog({ title: `Delete “${name}”?`, message: "This personal expense will be permanently deleted.", confirmLabel: "Delete expense" })) return;
   btn.disabled = true;
   btn.setAttribute("aria-busy", "true");
   try {
