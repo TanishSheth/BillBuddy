@@ -1681,7 +1681,7 @@ def _pair_settlement_source_for_period(
     *,
     settlement_ready: bool,
 ) -> Optional[dict]:
-    """One Friend↔Friend group line, using the same smart Who-pays-whom edge as the group page."""
+    """Friend↔Friend group line from the same expense-aware Who-pays-whom plan as the group page."""
     _balances, settlements, _expenses = build_balances_and_settlements(
         db, group.id, period, settlement_mode="smart",
     )
@@ -1708,10 +1708,11 @@ def _pair_settlement_source_for_period(
 
 
 def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, currency: str) -> list[dict]:
-    """Return open pair debts, never mixing currencies or unpaid payment claims.
+    """Open pair debts: expense-aware group transfers + direct friend bills.
 
-    Group lines use the same smart settlement transfers shown on the group
-    Balances → Who pays whom card, so Friends totals stay verifiable there.
+    Group lines reuse the group Balances → Who pays whom plan (payer edges from
+    real expenses — never invented co-participant pairs). Friend tab total is
+    simply those group lines plus direct one-to-one bills in this currency.
     """
     currency = _normalize_currency(currency, "USD")
     sources: list[dict] = []

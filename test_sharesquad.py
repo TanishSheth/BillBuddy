@@ -161,6 +161,22 @@ def test_debt_simplification():
         for s in who_pays
     ), "A creditor should never need to forward an overpayment"
 
+    # One creditor paid for everyone: no invented debtor↔debtor transfers.
+    house = [{"id": i, "name": n} for i, n in enumerate(["Tanish", "Sanju", "Kuku", "KP", "Bk"], 1)]
+    house_expense = [{
+        "payer_id": 5,
+        "total_amount": 418.70,
+        "splits": [{"user_id": i, "share_amount": 83.74} for i in range(1, 6)],
+    }]
+    house_balances = compute_balances(house, house_expense)
+    house_settlements = graph_constrained_settlements(house, house_expense, house_balances)
+    assert all(s["to_member_id"] == 5 for s in house_settlements)
+    assert {s["from_member_id"] for s in house_settlements} == {1, 2, 3, 4}
+    assert all(s["amount"] == 83.74 for s in house_settlements)
+    assert not any(
+        {s["from_member_id"], s["to_member_id"]} == {1, 2} for s in house_settlements
+    ), "Tanish must not pay Sanju when both only owe Bk"
+
     print("  [PASS] Debt simplification tests passed!")
 
 

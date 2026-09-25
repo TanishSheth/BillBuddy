@@ -268,7 +268,7 @@ function renderConsolidated(friend) {
   const breakdown = $("#consolidatedBreakdown"); const payments = $("#consolidatedPayments");
   if (!total) { breakdown.innerHTML = ""; payments.innerHTML = ""; return; }
   const sources = total.sources || [];
-  breakdown.innerHTML = `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/50 mb-2">Balance breakdown</p><p class="text-[10px] text-ink/55 mb-3">Group lines match that group’s Who pays whom card. Direct lines are your private bills with this person.</p><div id="consolidatedBreakdownRows" class="space-y-2">${sources.length ? sources.map((source) => {
+  breakdown.innerHTML = `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/50 mb-2">Balance breakdown</p><p class="text-[10px] text-ink/55 mb-3">Group lines use the same expense-aware Who pays whom plan as the group. Direct lines are private bills with this person. The total is those amounts added together.</p><div id="consolidatedBreakdownRows" class="space-y-2">${sources.length ? sources.map((source) => {
     const ready = source.settlement_ready !== false;
     const hint = source.kind === "GROUP" ? (ready ? " · payment-ready" : " · preview") : "";
     return `<div class="flex justify-between gap-3 text-xs"><span>${ShareSquad.escapeHtml(source.label)}${hint ? `<span class="text-ink/40">${hint}</span>` : ""}</span><span class="font-mono ${source.amount > 0 ? "text-green-700" : "text-red-700"}">${source.amount > 0 ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(source.amount), source.currency)}</span></div>`;

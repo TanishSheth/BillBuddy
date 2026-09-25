@@ -7,7 +7,7 @@ ShareSquad Core Money-Splitting Math:
   5. calculate_splits(split_type, total, items) -> unified split dispatcher
   6. compute_balances(expenses, members)        -> net balance per member
   7. simplify_debts(balances)                   -> greedy min-transaction settlement plan
-  8. graph_constrained_settlements(...)         -> who-pays-whom on original payer edges
+  8. graph_constrained_settlements(...)         -> expense-aware who-pays-whom (payer edges only)
 """
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List, Optional, Sequence, Tuple, Union
@@ -288,13 +288,12 @@ def graph_constrained_settlements(
     expenses: List[dict],
     balances: Optional[Dict[int, dict]] = None,
 ) -> List[dict]:
-    """Settle on original payer edges where possible, with exact cent totals.
+    """Expense-aware who-pays-whom: settle only on real payer↔participant edges.
 
-    The constrained portion is a max-flow problem: a debtor may pay only an
-    original payer, but no creditor can receive more than their balance.  The
-    previous least-squares approximation enforced only debtor totals, which
-    could overpay one creditor and then ask that creditor to pay another one.
-    Any amount with no valid original-payer path is settled normally.
+    Debtors pay the people who actually covered the bills (max-flow on those
+    edges, capped by remaining net balances). This never invents a transfer
+    between two people who only co-participated on someone else's receipt —
+    that pairwise leftover is what used to split one Bk payment across friends.
     """
     if balances is None:
         balances = compute_balances(members, expenses)
@@ -365,43 +364,16 @@ def graph_constrained_settlements(
             capacity[(start, end)] -= path_capacity
             capacity[(end, start)] += path_capacity
 
-    transfers: Dict[Tuple[int, int], int] = {
-        (debtor, lender): original_capacity[(debtor, lender)] - capacity[(debtor, lender)]
-        for debtor, lender in sorted(edges)
-        if original_capacity.get((debtor, lender), 0) > capacity.get((debtor, lender), 0)
-    }
-
-    remaining_cents = dict(net_cents)
-    for (debtor, lender), amount in transfers.items():
-        remaining_cents[debtor] += amount
-        remaining_cents[lender] -= amount
-
-    leftover_balances = {
-        mid: {**balances.get(mid, {"member_id": mid, "name": names.get(mid, str(mid))}), "net_balance": remaining_cents.get(mid, 0) / 100}
-        for mid in user_ids
-    }
-    extra = simplify_debts(leftover_balances)
-    extra_pairs = {(s["from_member_id"], s["to_member_id"]): s["amount"] for s in extra}
-
     settlements = []
-    seen = set()
-    for (d, l), amount_cents in transfers.items():
-        seen.add((d, l))
-        settlements.append({
-            "from_member_id": d,
-            "from_name": names.get(d, str(d)),
-            "to_member_id": l,
-            "to_name": names.get(l, str(l)),
-            "amount": round(amount_cents / 100, 2),
-        })
-    for (d, l), amount in extra_pairs.items():
-        if (d, l) in seen:
+    for debtor, lender in sorted(edges):
+        amount_cents = original_capacity[(debtor, lender)] - capacity[(debtor, lender)]
+        if amount_cents <= 0:
             continue
         settlements.append({
-            "from_member_id": d,
-            "from_name": names.get(d, str(d)),
-            "to_member_id": l,
-            "to_name": names.get(l, str(l)),
-            "amount": amount,
+            "from_member_id": debtor,
+            "from_name": names.get(debtor, str(debtor)),
+            "to_member_id": lender,
+            "to_name": names.get(lender, str(lender)),
+            "amount": round(amount_cents / 100, 2),
         })
     return settlements
