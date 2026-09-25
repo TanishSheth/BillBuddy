@@ -1681,7 +1681,7 @@ def _pair_settlement_source_for_period(
     *,
     settlement_ready: bool,
 ) -> Optional[dict]:
-    """Friend↔Friend group line from the same expense-aware Who-pays-whom plan as the group page."""
+    """Friend↔Friend amount from group Who pays whom (expense-aware). Counts in Friend total."""
     _balances, settlements, _expenses = build_balances_and_settlements(
         db, group.id, period, settlement_mode="smart",
     )
@@ -1694,7 +1694,7 @@ def _pair_settlement_source_for_period(
         suffix = "" if settlement_ready else " (current)"
         return {
             "kind": "GROUP",
-            "label": f"{group.name} · {period.period_key}{suffix}",
+            "label": f"{group.name} · Who pays whom · {period.period_key}{suffix}",
             "amount": float(signed),
             "currency": currency,
             "period_key": period.period_key,
@@ -1708,11 +1708,10 @@ def _pair_settlement_source_for_period(
 
 
 def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, currency: str) -> list[dict]:
-    """Open pair debts: expense-aware group transfers + direct friend bills.
+    """Friend total sources: Who pays whom (per shared group) + direct private bills.
 
-    Group lines reuse the group Balances → Who pays whom plan (payer edges from
-    real expenses — never invented co-participant pairs). Friend tab total is
-    simply those group lines plus direct one-to-one bills in this currency.
+    Individual shared group expenses are NOT listed here — those are view-only on
+    the Friends ledger via group-contributions and must not be double-counted.
     """
     currency = _normalize_currency(currency, "USD")
     sources: list[dict] = []
@@ -1739,8 +1738,6 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
             continue
         direct_by_month[month_key] = direct_by_month.get(month_key, Decimal("0.00")) + _viewer_direct_effect(split, participant, account_id)
 
-    # Confirmed pair payments allocated to a direct month reduce only that
-    # month's open amount. A pending claim never changes either person's debt.
     payments = db.query(models.PairPayment).filter_by(
         account_one_id=one, account_two_id=two, status="CONFIRMED", currency=currency,
     ).all()
@@ -1761,8 +1758,7 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
                 "currency": currency, "period_key": month_key, "group_id": None, "settlement_ready": True,
             })
 
-    # Shared groups: settled periods are payment-ready; open periods are preview-only.
-    # Both use Who-pays-whom edges so a Friend total matches the group card.
+    # One Who-pays-whom edge per shared group period (same plan as the group Balances card).
     group_member_rows = db.query(models.GroupMember).filter(
         models.GroupMember.account_id.in_((account_id, friend_id)),
     ).all()
@@ -2004,10 +2000,10 @@ def get_consolidated_friend_balance(
 def get_friend_group_contributions(
     friend_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
 ):
-    """Live, read-only pair portions from shared group expenses.
+    """Read-only shared group bills for the Friends ledger (do not affect Friend balance).
 
-    An entry exists when one of these two people covered part of the other's share.
-    Bills paid only by a third group member are not a debt between this pair.
+    Lists expenses where both people participated. pair_amount is contextual only
+    when one of them covered the other's share; it is never settled from Friends.
     """
     if friend_id == account.id or not db.query(models.Account).get(friend_id):
         raise HTTPException(404, "Friend not found")
@@ -2038,13 +2034,15 @@ def get_friend_group_contributions(
     for expense, period, group in rows:
         my_member = mine[group.id]
         friend_member = theirs[group.id]
-        amount = _pair_expense_amount(my_member.id, friend_member.id, split_map.get(expense.id, {}), payments.get(expense.id, {}))
-        if amount is None:
+        shares = split_map.get(expense.id, {})
+        if my_member.id not in shares or friend_member.id not in shares:
             continue
+        amount = _pair_expense_amount(my_member.id, friend_member.id, shares, payments.get(expense.id, {}))
         result.append(schemas.FriendGroupContributionOut(
             group_id=group.id, group_name=group.name, expense_id=expense.id,
             title=expense.store_name, bill_date=expense.bill_date, period_key=period.period_key,
-            currency=expense.currency or group.currency or "USD", pair_amount=float(amount),
+            currency=expense.currency or group.currency or "USD",
+            pair_amount=float(amount) if amount is not None else 0.0,
         ))
     return result
 
@@ -2059,7 +2057,7 @@ def record_consolidated_friend_payment(
         Decimal(str(source["amount"])) for source in sources if source.get("settlement_ready") is not False
     ), Decimal("0.00")).quantize(Decimal("0.01"))
     if not settleable_balance:
-        raise HTTPException(400, "There is no payment-ready balance. Current group shares can be paid after the group period is settled.")
+        raise HTTPException(400, "There is no payment-ready balance. Open group Who-pays-whom amounts become payable after that group period is settled.")
     payer_id = account.id if settleable_balance < 0 else friend_id
     recipient_id = friend_id if settleable_balance < 0 else account.id
     amount = Decimal(str(payload.amount)).quantize(Decimal("0.01"))

@@ -76,11 +76,15 @@
     </section>
 
     <section id="expenseFriendsPanel" class="expense-view-panel hidden" data-expense-panel="friends">
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <p class="text-xs text-ink/55">Open a friend to review balances, add a bill, or settle.</p>
+        <a href="/friends.html" class="bb-btn-secondary !py-1.5 !px-3 text-[11px] shrink-0">Manage friends</a>
+      </div>
       <div id="friendSplitsGrid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
       <div id="emptyFriendSplits" class="hidden bb-card text-center py-7">
         <p class="font-mono font-bold text-sm">No friend expenses yet</p>
         <p class="text-xs text-ink/60 mt-1">Add a friend, then create a private two-person bill.</p>
-        <a href="/friends.html" class="bb-btn-secondary inline-flex mt-3 !py-1.5 !px-3 text-[11px]">Open friends</a>
+        <a href="/friends.html" class="bb-btn-secondary inline-flex mt-3 !py-1.5 !px-3 text-[11px]">Manage friends</a>
       </div>
     </section>
   </main>

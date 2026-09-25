@@ -254,8 +254,8 @@ class ConsolidatedSourceOut(BaseModel):
 class ConsolidatedFriendBalanceOut(BaseModel):
     friend_id: int
     balance: float
-    # The amount that can be recorded as a consolidated payment today. Live
-    # group shares are reflected in balance but stay read-only until settled.
+    # Payable today: direct bills + settled group Who-pays-whom edges.
+    # Open group periods still appear in balance/sources but stay non-payable.
     settleable_balance: float
     currency: str
     payer_account_id: Optional[int] = None
