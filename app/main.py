@@ -35,7 +35,7 @@ from .config import (
     TMP_UPLOADS_DIR,
     UPLOADS_DIR,
 )
-from .database import engine, get_db, Base
+from .database import engine, get_db, Base, SessionLocal
 from .auth import (
     get_current_account,
     hash_password,
@@ -61,7 +61,6 @@ from .pdf_gen import generate_monthly_pdf, generate_personal_pdf, pdf_reports_av
 from .emailer import (
     is_email_configured,
     send_invite_email,
-    send_friend_invite_email,
     send_quick_split_email,
     send_monthly_report_email,
     send_password_reset_email,
@@ -276,6 +275,9 @@ def _ensure_schema():
         ("account_settings", "preferred_currency", "VARCHAR(10) DEFAULT 'USD'"),
         ("pending_uploads", "account_id", "INTEGER"),
         ("accounts", "avatar_path", "VARCHAR"),
+        ("accounts", "deletion_requested_at", "DATETIME"),
+        ("accounts", "deletion_purge_after", "DATETIME"),
+        ("accounts", "deletion_completed_at", "DATETIME"),
         ("groups", "cover_image_path", "VARCHAR"),
         ("group_members", "is_active", "BOOLEAN DEFAULT TRUE"),
         ("pending_uploads", "ocr_store_name", "VARCHAR(150)"),
@@ -760,6 +762,103 @@ def build_balances_and_settlements(
 # ---------------------------------------------------------------------------
 # Auth Endpoints
 # ---------------------------------------------------------------------------
+def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _finalize_account_deletion(db: Session, account: models.Account) -> None:
+    """Irreversibly erase sign-in and personal data while preserving shared ledgers."""
+    if account.deletion_completed_at:
+        return
+    for expense in db.query(models.PersonalExpense).filter_by(account_id=account.id).all():
+        if expense.image_path and os.path.exists(expense.image_path):
+            try:
+                os.remove(expense.image_path)
+            except OSError:
+                pass
+        db.delete(expense)
+    if account.avatar_path and os.path.exists(account.avatar_path):
+        try:
+            os.remove(account.avatar_path)
+        except OSError:
+            pass
+    for upload in db.query(models.PendingUpload).filter_by(account_id=account.id).all():
+        if upload.file_path and os.path.exists(upload.file_path):
+            try:
+                os.remove(upload.file_path)
+            except OSError:
+                pass
+        db.delete(upload)
+    for membership in db.query(models.GroupMember).filter_by(account_id=account.id).all():
+        if membership.role == "owner":
+            replacement = db.query(models.GroupMember).filter(
+                models.GroupMember.group_id == membership.group_id,
+                models.GroupMember.account_id != account.id,
+                models.GroupMember.is_active.is_(True),
+            ).first()
+            if replacement:
+                replacement.role = "owner"
+        membership.is_active = False
+        membership.role = "member"
+        membership.display_name = "Deleted member"
+    for settings in db.query(models.GroupMemberSettings).filter_by(account_id=account.id).all():
+        settings.vlm_api_key_encrypted = None
+    settings = db.query(models.AccountSettings).filter_by(account_id=account.id).first()
+    if settings:
+        settings.vlm_api_key_encrypted = None
+        settings.use_own_vlm = False
+        settings.email_monthly_reports = False
+    db.query(models.FriendConnection).filter(
+        or_(models.FriendConnection.account_one_id == account.id, models.FriendConnection.account_two_id == account.id)
+    ).update({models.FriendConnection.status: "REMOVED"}, synchronize_session=False)
+    db.query(models.AccountVendor).filter_by(account_id=account.id).delete(synchronize_session=False)
+    account.avatar_path = None
+    account.display_name = "Deleted member"
+    account.email = f"deleted-{account.id}-{secrets.token_hex(8)}@deleted.invalid"
+    account.password_hash = hash_password(secrets.token_urlsafe(32))
+    account.deletion_completed_at = datetime.now(timezone.utc)
+    account.deletion_purge_after = None
+
+
+def _purge_expired_account_deletions() -> None:
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        accounts = db.query(models.Account).filter(
+            models.Account.deletion_purge_after.isnot(None),
+            models.Account.deletion_completed_at.is_(None),
+        ).all()
+        for account in accounts:
+            due = _as_utc(account.deletion_purge_after)
+            if due and due <= now:
+                _finalize_account_deletion(db, account)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Could not finalize scheduled account deletions")
+    finally:
+        db.close()
+
+
+account_cleanup_scheduler = BackgroundScheduler()
+
+
+@app.on_event("startup")
+def start_account_deletion_cleanup() -> None:
+    _purge_expired_account_deletions()
+    if not DISABLE_SCHEDULER and not account_cleanup_scheduler.running:
+        account_cleanup_scheduler.add_job(_purge_expired_account_deletions, "interval", hours=24, id="account-deletion-cleanup", replace_existing=True)
+        account_cleanup_scheduler.start()
+
+
+@app.on_event("shutdown")
+def stop_account_deletion_cleanup() -> None:
+    if account_cleanup_scheduler.running:
+        account_cleanup_scheduler.shutdown(wait=False)
+
+
 @app.post("/api/auth/register", response_model=schemas.TokenResponse)
 def register(payload: schemas.RegisterRequest, request: Request, db: Session = Depends(get_db)):
     check_rate_limit(request, limit=10, window_seconds=60)
@@ -799,10 +898,39 @@ def login(payload: schemas.LoginRequest, request: Request, db: Session = Depends
     account = db.query(models.Account).filter_by(email=email_clean).first()
     if not account or not verify_password(payload.password, account.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+    if account.deletion_completed_at:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+    deletion_deadline = _as_utc(account.deletion_purge_after)
+    if deletion_deadline:
+        if deletion_deadline <= datetime.now(timezone.utc):
+            _finalize_account_deletion(db, account)
+            db.commit()
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This account is scheduled for deletion. Restore it within 30 days from the login page.")
 
     process_pending_invites(db, account)
     token = create_access_token(account.id)
     return schemas.TokenResponse(access_token=token)
+
+
+@app.post("/api/auth/restore-account", response_model=schemas.TokenResponse)
+def restore_account(payload: schemas.AccountRestoreRequest, request: Request, db: Session = Depends(get_db)):
+    check_rate_limit(request, limit=10, window_seconds=60)
+    account = db.query(models.Account).filter_by(email=str(payload.email).lower().strip()).first()
+    if not account or not verify_password(payload.password, account.password_hash):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+    deadline = _as_utc(account.deletion_purge_after)
+    if not deadline or account.deletion_completed_at:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No restorable account was found")
+    if deadline <= datetime.now(timezone.utc):
+        _finalize_account_deletion(db, account)
+        db.commit()
+        raise HTTPException(status.HTTP_410_GONE, "The 30-day recovery period has ended")
+    account.deletion_requested_at = None
+    account.deletion_purge_after = None
+    db.commit()
+    process_pending_invites(db, account)
+    return schemas.TokenResponse(access_token=create_access_token(account.id))
 
 
 @app.get("/api/auth/me", response_model=schemas.MeOut)
@@ -874,6 +1002,21 @@ def update_profile(
         display_name=account.display_name,
         has_avatar=bool(getattr(account, "avatar_path", None) and os.path.exists(account.avatar_path or "")),
     )
+
+
+@app.post("/api/auth/me/delete-account", response_model=schemas.MessageResponse)
+def request_account_deletion(
+    payload: schemas.AccountDeletionRequest,
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    if not verify_password(payload.current_password, account.password_hash):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect")
+    now = datetime.now(timezone.utc)
+    account.deletion_requested_at = now
+    account.deletion_purge_after = now + timedelta(days=30)
+    db.commit()
+    return schemas.MessageResponse(message="Your account is scheduled for permanent deletion in 30 days. You can restore it by signing in from the login page before then.")
 
 
 @app.post("/api/auth/me/avatar", response_model=schemas.AccountOut)
@@ -1587,35 +1730,11 @@ def invite_friend(
     if email == account.email.lower():
         raise HTTPException(400, "You cannot add yourself as a friend")
     existing = db.query(models.Account).filter_by(email=email).first() if email else None
-    if existing:
-        _activate_friendship(db, account.id, existing.id)
-        db.commit()
-        return schemas.FriendInviteOut(status="ACTIVE", email=email, message=f"{existing.display_name} was added as a friend")
-    invite = models.FriendInvite(inviter_account_id=account.id, email=email)
-    db.add(invite)
-    db.commit(); db.refresh(invite)
-    url = f"{str(request.base_url).rstrip('/')}/friend-join.html?code={invite.invite_code}"
-    email_sent = False
-    if email and is_email_configured():
-        try:
-            email_sent = bool(send_friend_invite_email(email, url, account.display_name))
-        except Exception:
-            logger.exception("Failed to send friend invite email to %s", email)
-    message = "Friend invite emailed." if email_sent else "Friend invite created. Copy the link or send it by email."
-    return schemas.FriendInviteOut(status="PENDING", email=email, invite_url=url, email_sent=email_sent, message=message)
-
-
-@app.post("/api/friends/invites/{invite_code}/accept", response_model=schemas.MessageResponse)
-def accept_friend_invite(invite_code: str, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
-    invite = db.query(models.FriendInvite).filter_by(invite_code=invite_code, status="PENDING").first()
-    if not invite:
-        raise HTTPException(404, "Friend invite not found or already used")
-    if invite.email and invite.email.lower() != account.email.lower():
-        raise HTTPException(403, "This friend invite was sent to another email address")
-    _activate_friendship(db, invite.inviter_account_id, account.id)
-    invite.status = "ACCEPTED"
+    if not existing:
+        raise HTTPException(404, "No ShareSquad account uses that email yet. Ask them to create an account first, then add them directly.")
+    _activate_friendship(db, account.id, existing.id)
     db.commit()
-    return schemas.MessageResponse(message="You are now friends")
+    return schemas.FriendInviteOut(status="ACTIVE", email=email, message=f"{existing.display_name} was added as a friend")
 
 
 def _friend_settlement_out(row: models.FriendMonthlySettlement) -> schemas.FriendSettlementOut:
@@ -1978,10 +2097,27 @@ def list_groups(account: models.Account = Depends(get_current_account), db: Sess
 @app.post("/api/groups", response_model=schemas.GroupOut)
 def create_group(
     payload: schemas.GroupCreate,
+    request: Request,
     account: models.Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ):
     curr = _normalize_currency(payload.currency, "USD")
+    friend_ids = list(dict.fromkeys(member_id for member_id in payload.friend_ids if member_id != account.id))
+    invite_emails = list(dict.fromkeys(str(email).strip().lower() for email in payload.invite_emails if str(email).strip()))
+    if len(friend_ids) + len(invite_emails) > 50:
+        raise HTTPException(400, "You can add up to 50 people when creating a group")
+    for email in invite_emails:
+        _validate_invite_email(email, account, -1, db)
+
+    valid_friend_ids = set()
+    for friend_id in friend_ids:
+        pair = _friend_pair(account.id, friend_id)
+        if db.query(models.FriendConnection).filter_by(account_one_id=pair[0], account_two_id=pair[1], status="ACTIVE").first():
+            valid_friend_ids.add(friend_id)
+    invalid_friend_ids = set(friend_ids) - valid_friend_ids
+    if invalid_friend_ids:
+        raise HTTPException(400, "Choose people from your current Friends list")
+
     last_error = None
     for attempt in range(2):
         group = models.Group(
@@ -1999,7 +2135,35 @@ def create_group(
                 role="owner",
             )
             db.add(member)
+            db.flush()
+
+            added_accounts: dict[int, models.Account] = {}
+            for friend_id in valid_friend_ids:
+                friend = db.query(models.Account).get(friend_id)
+                if friend:
+                    db.add(models.GroupMember(group_id=group.id, account_id=friend.id, display_name=friend.display_name, role="member"))
+                    added_accounts[friend.id] = friend
+
+            for email in invite_emails:
+                invited_account = db.query(models.Account).filter_by(email=email).first()
+                if invited_account:
+                    if invited_account.id != account.id and invited_account.id not in added_accounts:
+                        db.add(models.GroupMember(group_id=group.id, account_id=invited_account.id, display_name=invited_account.display_name, role="member"))
+                        added_accounts[invited_account.id] = invited_account
+                else:
+                    db.add(models.GroupInvite(group_id=group.id, email=email, status="pending"))
+
+            for invited_account in added_accounts.values():
+                _record_activity(db, group.id, account, "member_added", f"{account.display_name} added {invited_account.display_name} to the group", "member", None)
+                _notify_group_members(db, group.id, f"{account.display_name} added {invited_account.display_name} to the group.", _group_focus_link(group.id, "members", "groupMembers"), exclude_account_id=account.id)
             db.commit()
+            invite_url = _invite_url(request, group.invite_code)
+            for email in invite_emails:
+                if is_email_configured():
+                    try:
+                        send_invite_email(email, group.name, invite_url, account.display_name)
+                    except Exception:
+                        logger.exception("Failed to send initial group invite email to %s", email)
             db.refresh(group)
             return group
         except Exception as err:
@@ -2350,108 +2514,91 @@ def create_group_invite(
     db: Session = Depends(get_db),
 ):
     check_rate_limit(request, limit=10, window_seconds=60)
+    email = str(payload.email).strip().lower()
     require_group_member(group_id, account, db)
     group = db.query(models.Group).get(group_id)
     if not group:
         raise HTTPException(404, "Group not found")
-
-    email = str(payload.email).strip().lower()
     _validate_invite_email(email, account, group_id, db)
     invite_url = _invite_url(request, group.invite_code)
-
-    already_member = False
-    member_added = False
     existing_account = db.query(models.Account).filter_by(email=email).first()
     if existing_account:
-        membership = db.query(models.GroupMember).filter_by(group_id=group.id, account_id=existing_account.id).first()
-        if membership:
-            membership.is_active = True
-            membership.display_name = existing_account.display_name
-        else:
-            db.add(models.GroupMember(group_id=group.id, account_id=existing_account.id, display_name=existing_account.display_name, role="member"))
-        member_added = True
-        pending = (
-            db.query(models.GroupInvite)
-            .filter_by(group_id=group.id, email=email)
-            .first()
-        )
-        if pending: pending.status = "accepted"
-        already_member = True
+        result = _add_existing_group_member(group_id, existing_account.id, account, db)
+        pending = db.query(models.GroupInvite).filter_by(group_id=group_id, email=email).first()
+        if pending:
+            pending.status = "accepted"
+            db.commit()
     else:
-        invite = (
-            db.query(models.GroupInvite)
-            .filter_by(group_id=group.id, email=email)
-            .first()
-        )
-        if invite:
-            invite.status = "pending"
+        pending = db.query(models.GroupInvite).filter_by(group_id=group_id, email=email).first()
+        if pending:
+            pending.status = "pending"
         else:
-            db.add(models.GroupInvite(group_id=group.id, email=email, status="pending"))
-
-    if member_added:
-        _record_activity(db, group_id, account, "member_added", f"{account.display_name} added {existing_account.display_name} to the group", "member", None)
-        _notify_group_members(db, group_id, f"{account.display_name} added {existing_account.display_name} to the group.", _group_focus_link(group_id, "members", "groupMembers"), exclude_account_id=account.id)
-    db.commit()
-    if member_added:
-        notify_group_change(group_id, "member-added")
+            db.add(models.GroupInvite(group_id=group_id, email=email, status="pending"))
+        db.commit()
+        result = schemas.InviteCreateOut(
+            email=email,
+            email_sent=False,
+            already_member=False,
+            invite_url=invite_url,
+            message="",
+        )
 
     email_sent = False
     if is_email_configured():
         try:
-            email_sent = bool(
-                send_invite_email(
-                    to_email=email,
-                    group_name=group.name,
-                    invite_url=invite_url,
-                    inviter_name=account.display_name,
-                )
-            )
+            email_sent = bool(send_invite_email(email, group.name, invite_url, account.display_name))
         except Exception:
-            logger.exception("Failed to send invite email to %s", email)
+            logger.exception("Failed to send group invite email to %s", email)
 
-    if already_member and email_sent:
-        message = f"{email} was added to the group and emailed a join link."
-    elif already_member:
-        message = f"{email} was added to the group. Email is not configured — share the invite link if they need it."
-    elif email_sent:
-        message = f"Invite emailed to {email}."
-    else:
+    if existing_account:
         message = (
-            f"Invite saved for {email}. Email is not configured on this server — "
-            "copy the invite link below and send it yourself."
+            f"{existing_account.display_name} is already in this group."
+            if result.already_member
+            else f"{existing_account.display_name} was added to the group."
         )
+        if email_sent:
+            message += " A group link was emailed."
+    elif email_sent:
+        message = "Invite email sent. They will be added automatically when they sign in with this email."
+    else:
+        message = "Invite saved. Share the group link; signing in with this email will add them automatically."
 
     return schemas.InviteCreateOut(
         email=email,
         email_sent=email_sent,
-        already_member=already_member,
+        already_member=result.already_member,
         invite_url=invite_url,
         message=message,
     )
 
 
-@app.get("/api/group-invites")
-def list_group_invites(account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
-    rows = db.query(models.GroupInvite).filter_by(email=account.email.lower(), status="pending").all()
-    return [{"id": row.id, "group_id": row.group_id, "group_name": row.group.name} for row in rows if row.group]
+def _add_existing_group_member(group_id: int, member_account_id: int, actor: models.Account, db: Session) -> schemas.InviteCreateOut:
+    require_group_member(group_id, actor, db)
+    group = db.query(models.Group).get(group_id)
+    target = db.query(models.Account).get(member_account_id)
+    if not group or not target:
+        raise HTTPException(404, "Group member not found")
+    if target.id == actor.id:
+        raise HTTPException(400, "You are already in this group")
+    membership = db.query(models.GroupMember).filter_by(group_id=group.id, account_id=target.id).first()
+    already_member = bool(membership and membership.is_active)
+    if membership:
+        membership.is_active = True
+        membership.display_name = target.display_name
+    else:
+        db.add(models.GroupMember(group_id=group.id, account_id=target.id, display_name=target.display_name, role="member"))
+    if not already_member:
+        _record_activity(db, group_id, actor, "member_added", f"{actor.display_name} added {target.display_name} to the group", "member", None)
+        _notify_group_members(db, group_id, f"{actor.display_name} added {target.display_name} to the group.", _group_focus_link(group_id, "members", "groupMembers"), exclude_account_id=actor.id)
+    db.commit()
+    if not already_member:
+        notify_group_change(group_id, "member-added")
+    return schemas.InviteCreateOut(email=target.email, email_sent=False, already_member=already_member, invite_url="", message=f"{target.display_name} was added to the group.")
 
 
-@app.post("/api/group-invites/{invite_id}/accept")
-def accept_group_invite(invite_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
-    invite = db.query(models.GroupInvite).filter_by(id=invite_id, email=account.email.lower(), status="pending").first()
-    if not invite: raise HTTPException(404, "Group invitation not found")
-    if not db.query(models.GroupMember).filter_by(group_id=invite.group_id, account_id=account.id).first():
-        db.add(models.GroupMember(group_id=invite.group_id, account_id=account.id, display_name=account.display_name, role="member"))
-    invite.status = "accepted"; db.commit(); notify_group_change(invite.group_id, "member-joined")
-    return {"ok": True}
-
-
-@app.post("/api/group-invites/{invite_id}/decline")
-def decline_group_invite(invite_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
-    invite = db.query(models.GroupInvite).filter_by(id=invite_id, email=account.email.lower(), status="pending").first()
-    if not invite: raise HTTPException(404, "Group invitation not found")
-    invite.status = "declined"; db.commit()
-    return {"ok": True}
+@app.post("/api/groups/{group_id}/members", response_model=schemas.InviteCreateOut)
+def add_existing_group_member(group_id: int, payload: schemas.GroupMemberAddRequest, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    return _add_existing_group_member(group_id, payload.account_id, account, db)
 
 
 @app.post("/api/groups/join", response_model=schemas.GroupOut)
@@ -2464,19 +2611,14 @@ def join_group(
     if not group:
         raise HTTPException(404, "Invalid invite code")
 
-    existing = (
-        db.query(models.GroupMember)
-        .filter_by(group_id=group.id, account_id=account.id)
-        .first()
-    )
-    if not existing:
-        member = models.GroupMember(
-            group_id=group.id,
-            account_id=account.id,
-            display_name=account.display_name,
-            role="member",
-        )
-        db.add(member)
+    membership = db.query(models.GroupMember).filter_by(group_id=group.id, account_id=account.id).first()
+    newly_joined = not membership or not membership.is_active
+    if membership:
+        membership.is_active = True
+        membership.display_name = account.display_name
+    else:
+        db.add(models.GroupMember(group_id=group.id, account_id=account.id, display_name=account.display_name, role="member"))
+    if newly_joined:
         _record_activity(db, group.id, account, "member_joined", f"{account.display_name} joined the group", "member", None)
         _notify_group_members(db, group.id, f"{account.display_name} joined the group.", _group_focus_link(group.id, "members", "groupMembers"), exclude_account_id=account.id)
         db.commit()

@@ -51,6 +51,9 @@
       <p id="backToSignInRow" class="hidden text-center mt-4">
         <span id="backToSignIn" class="auth-toggle">Back to sign in</span>
       </p>
+      <p id="restoreAccountRow" class="text-center mt-3">
+        <span id="restoreAccountBtn" class="auth-toggle text-[10px] normal-case tracking-normal">Restore a deleted account</span>
+      </p>
     </div>
   </div>
 
@@ -59,20 +62,20 @@
     const PENDING_INVITE_KEY = "sharesquad_pending_invite";
     const PENDING_QUICK_SPLIT_KEY = "sharesquad_pending_quick_split";
     const PENDING_QUICK_SPLIT_SLOT_KEY = "sharesquad_pending_quick_split_slot";
-    const PENDING_FRIEND_INVITE_KEY = "sharesquad_pending_friend_invite";
 
     if (ShareSquad.getToken()) {
       window.location.href = "/index.html";
     }
 
-    let mode = "signin"; // signin | register | forgot
+    let mode = "signin"; // signin | register | forgot | restore
 
     function setMode(next) {
       mode = next;
       const isRegister = mode === "register";
       const isForgot = mode === "forgot";
+      const isRestore = mode === "restore";
 
-      $("#formTitle").textContent = isRegister ? "Create Account" : isForgot ? "Reset Password" : "Sign In";
+      $("#formTitle").textContent = isRegister ? "Create Account" : isForgot ? "Reset Password" : isRestore ? "Restore Account" : "Sign In";
       $("#nameField").classList.toggle("hidden", !isRegister);
       $("#passwordField").classList.toggle("hidden", isForgot);
       $("#passwordHint").classList.toggle("hidden", !isRegister);
@@ -83,9 +86,10 @@
         $("#password").removeAttribute("minlength");
         $("#password").autocomplete = "current-password";
       }
-      $("#toggleRow").classList.toggle("hidden", isForgot);
-      $("#backToSignInRow").classList.toggle("hidden", !isForgot);
-      $("#submitBtn").textContent = isRegister ? "Create Account" : isForgot ? "Send reset link" : "Sign In";
+      $("#toggleRow").classList.toggle("hidden", isForgot || isRestore);
+      $("#backToSignInRow").classList.toggle("hidden", !isForgot && !isRestore);
+      $("#restoreAccountRow").classList.toggle("hidden", isForgot || isRestore);
+      $("#submitBtn").textContent = isRegister ? "Create Account" : isForgot ? "Send reset link" : isRestore ? "Restore account" : "Sign In";
       $("#toggleMode").textContent = isRegister ? "Already have an account? Sign in" : "Create an account";
       $("#password").required = !isForgot;
       $("#authMsg").textContent = "";
@@ -101,7 +105,11 @@
       );
     }
 
-    if (new URLSearchParams(window.location.search).get("mode") === "signup") {
+    if (new URLSearchParams(window.location.search).get("recovery") === "1") {
+      setMode("restore");
+      $("#authMsg").textContent = "Use the same email and password to restore your account within 30 days.";
+      $("#authMsg").className = "text-xs font-mono text-ink/60";
+    } else if (new URLSearchParams(window.location.search).get("mode") === "signup") {
       setMode("register");
     } else {
       setMode("signin");
@@ -113,6 +121,7 @@
 
     $("#forgotPasswordBtn").addEventListener("click", () => setMode("forgot"));
     $("#backToSignIn").addEventListener("click", () => setMode("signin"));
+    $("#restoreAccountBtn").addEventListener("click", () => setMode("restore"));
 
     $("#authForm").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -154,6 +163,7 @@
       const password = $("#password").value;
       const displayName = $("#displayName").value.trim();
       const isRegister = mode === "register";
+      const isRestore = mode === "restore";
 
       if (isRegister && !displayName) {
         msg.textContent = "Enter your display name.";
@@ -166,7 +176,7 @@
         return;
       }
 
-      const endpoint = isRegister ? "/api/auth/register" : "/api/auth/login";
+      const endpoint = isRegister ? "/api/auth/register" : isRestore ? "/api/auth/restore-account" : "/api/auth/login";
       const body = isRegister
         ? { email, password, display_name: displayName }
         : { email, password };
@@ -192,10 +202,7 @@
           localStorage.removeItem(PENDING_INVITE_KEY);
           const joinRes = await fetch("/api/groups/join", {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${data.access_token}`,
-            },
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${data.access_token}` },
             body: JSON.stringify({ invite_code: inviteCode }),
           });
           if (joinRes.ok) {
@@ -219,16 +226,6 @@
             const quickSplit = await quickRes.json();
             redirect = `/quick-split.html?id=${quickSplit.id}`;
           }
-        }
-
-        const friendInviteCode = localStorage.getItem(PENDING_FRIEND_INVITE_KEY);
-        if (friendInviteCode) {
-          localStorage.removeItem(PENDING_FRIEND_INVITE_KEY);
-          const friendRes = await fetch(`/api/friends/invites/${encodeURIComponent(friendInviteCode)}/accept`, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${data.access_token}` },
-          });
-          if (friendRes.ok) redirect = "/friends.html";
         }
 
         window.location.href = redirect;

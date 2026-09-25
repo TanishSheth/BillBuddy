@@ -30,40 +30,35 @@
   <script src="/api.js?v=20260918g"></script>
   <script>
     const PENDING_INVITE_KEY = "sharesquad_pending_invite";
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get("code");
-
+    const code = new URLSearchParams(window.location.search).get("code");
     const msg = document.getElementById("statusMsg");
 
     if (!code) {
-      msg.textContent = "No invite code found in the link.";
+      msg.textContent = "No group link was found.";
     } else {
       localStorage.setItem(PENDING_INVITE_KEY, code);
       const token = ShareSquad.getToken();
-      if (token) {
+      if (!token) {
+        msg.textContent = "Sign in or create an account to join this group automatically.";
+      } else {
         fetch("/api/groups/join", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify({ invite_code: code }),
         })
           .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
           .then(({ ok, data }) => {
-            if (!ok) throw new Error(data.detail || "Failed to join");
+            if (!ok) throw new Error(data.detail || "Could not join the group");
             localStorage.removeItem(PENDING_INVITE_KEY);
             ShareSquad.setStoredGroupId(data.id);
-            msg.textContent = `Joined "${data.name}"! Redirecting…`;
+            msg.textContent = `Joined “${data.name}”. Opening the group…`;
             msg.className = "font-mono text-sm balance-positive mb-4";
-            setTimeout(() => { window.location.href = "/group.html"; }, 1000);
+            setTimeout(() => { window.location.href = "/group.html"; }, 700);
           })
           .catch((err) => {
             msg.textContent = err.message;
             msg.className = "font-mono text-sm balance-negative mb-4";
           });
-      } else {
-        msg.textContent = "Sign in or create an account to join this group.";
       }
     }
   </script>

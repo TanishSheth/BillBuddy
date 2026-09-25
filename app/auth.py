@@ -72,17 +72,29 @@ def get_current_account(
     account = db.query(models.Account).get(account_id)
     if not account:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account not found")
+    if account.deletion_requested_at or account.deletion_completed_at:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This account is not active")
     return account
 
 
 def process_pending_invites(db: Session, account: models.Account) -> list[models.GroupMember]:
     added: list[models.GroupMember] = []
+    # Email invitations add the matching account automatically on sign-in.
+    # There is intentionally no accept-or-decline decision in this flow.
     invites = db.query(models.GroupInvite).filter_by(email=account.email.lower(), status="pending").all()
     for invite in invites:
-        if not db.query(models.GroupMember).filter_by(group_id=invite.group_id, account_id=account.id).first():
-            db.add(models.GroupMember(group_id=invite.group_id, account_id=account.id, display_name=account.display_name, role="member"))
+        membership = db.query(models.GroupMember).filter_by(group_id=invite.group_id, account_id=account.id).first()
+        if membership:
+            membership.is_active = True
+            membership.display_name = account.display_name
+        else:
+            member = models.GroupMember(group_id=invite.group_id, account_id=account.id, display_name=account.display_name, role="member")
+            db.add(member)
+            added.append(member)
         invite.status = "accepted"
-    if invites: db.commit()
+    if invites:
+        db.commit()
+
     # Quick Split invitations do not create a group membership. Claim any
     # pending shares addressed to this account as soon as they sign in.
     quick_participants = (

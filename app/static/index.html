@@ -65,7 +65,7 @@
     <div id="emptyGroups" class="hidden bb-card max-w-md mx-auto text-center py-10">
       <div class="stamp-mark mx-auto mb-3">$</div>
       <h2 class="font-mono uppercase text-xs tracking-widest text-ink/50 mb-2">No groups yet</h2>
-      <p class="text-sm text-ink/60 mb-4">Create a group for trips, roommates, or projects, or join one using an invite code.</p>
+      <p class="text-sm text-ink/60 mb-4">Create a group for trips, roommates, or projects, or open a group link someone shared with you.</p>
       <button id="createFirstGroupBtn" class="bb-btn-primary">
         <i data-lucide="plus" class="w-4 h-4"></i> Create First Group
       </button>
@@ -82,7 +82,7 @@
   </main>
 
   <div id="createGroupModal" class="modal-overlay hidden">
-    <div class="bb-card modal-card">
+    <div class="bb-card modal-card max-h-[85vh] overflow-y-auto">
       <div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3">
         <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Create a New Group</h2>
         <button type="button" id="closeCreateModalBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button>
@@ -97,6 +97,24 @@
           <select id="createGroupCurrency" class="bb-input" data-currency-select></select>
           <p class="text-[10px] text-ink/40 mt-1">Default for new expenses. You can still log INR, EUR, and other currencies inside the group when traveling.</p>
         </div>
+        <div class="border-t border-ink/10 pt-4 space-y-3">
+          <div>
+            <label class="bb-label">Group members <span class="normal-case text-ink/45">(optional)</span></label>
+            <p class="text-[10px] text-ink/50 mt-1">Choose friends now, or add anyone by email. They are added automatically—there is no accept or decline step.</p>
+          </div>
+          <div>
+            <label class="bb-label !text-[10px]">Your friends</label>
+            <div id="createGroupFriends" class="max-h-32 overflow-y-auto space-y-1 pr-1 text-sm"></div>
+          </div>
+          <div>
+            <label class="bb-label !text-[10px]">Add someone by email</label>
+            <div class="invite-email-row">
+              <input id="createGroupMemberEmail" type="email" class="bb-input flex-1" placeholder="friend@email.com" />
+              <button id="addCreateGroupEmailBtn" type="button" class="bb-btn-secondary !py-2 !px-3 text-[11px]">Add email</button>
+            </div>
+          </div>
+          <div id="createGroupMemberChips" class="flex flex-wrap gap-2"></div>
+        </div>
         <p id="createGroupMsg" class="text-xs font-mono"></p>
         <div class="flex gap-2 justify-end pt-2">
           <button type="button" id="cancelCreateGroupBtn" class="bb-btn-secondary">Cancel</button>
@@ -106,8 +124,8 @@
     </div>
   </div>
 
-  <script src="/api.js?v=20260919c"></script>
-  <script src="/dashboard.js?v=20260918g"></script>
+  <script src="/api.js?v=20260925email"></script>
+  <script src="/dashboard.js?v=20260925email"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

@@ -105,7 +105,7 @@
       <!-- Add / Scan Expense Tab -->
       <section id="tab-upload" class="tab-panel">
         <div id="draftGroupNotice" class="how-it-works mb-5 hidden">
-          <p><strong>This group is being set up.</strong> Invite at least one member from <strong>Members</strong> before adding shared expenses. You can still change the group name or photo and share the invite link.</p>
+          <p><strong>This group is being set up.</strong> Add at least one member from <strong>Members</strong>—directly, by email, or with a group link—before adding shared expenses. You can still change the group name or photo.</p>
         </div>
         <div class="grid md:grid-cols-2 gap-6">
           <div>
@@ -359,24 +359,37 @@
             <div id="memberList" class="space-y-2 mb-4 font-mono text-sm"></div>
           </div>
           <div class="bb-card">
-            <h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Invite Members</h3>
-            <p class="text-xs text-ink/50 mb-3">Send an email invite, or share the direct invite link with friends via WhatsApp or messaging apps.</p>
+            <h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Add Members</h3>
+            <p class="text-xs text-ink/50 mb-3">Add a friend immediately, send an email, or share a group link. Email and link joins add members automatically.</p>
+            <div class="pb-4 mb-4 border-b border-ink/10">
+              <label class="bb-label">Your friends</label>
+              <div class="invite-email-row">
+                <select id="existingFriendSelect" class="bb-input flex-1"></select>
+                <button id="addExistingFriendBtn" type="button" class="bb-btn-primary !px-4 w-full sm:w-auto"><i data-lucide="user-plus" class="w-4 h-4"></i> Add friend</button>
+              </div>
+              <p id="existingFriendMsg" class="text-xs font-mono mt-2"></p>
+            </div>
+            <div class="flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Invite method">
+              <button id="showInviteEmailBtn" type="button" class="bb-btn-secondary !py-2 !px-3 text-xs">Send email</button>
+              <button id="showInviteLinkBtn" type="button" class="bb-btn-secondary !py-2 !px-3 text-xs">Share link</button>
+            </div>
             <form id="inviteForm" class="space-y-3">
               <div>
-                <label class="bb-label">Invite by email</label>
+                <label class="bb-label">Recipient email</label>
                 <div class="invite-email-row">
                   <input id="inviteEmail" type="email" placeholder="friend@gmail.com" class="bb-input flex-1" required />
-                  <button type="submit" class="bb-btn-primary !px-4 w-full sm:w-auto"><i data-lucide="send" class="w-4 h-4"></i> Send Invite</button>
+                  <button type="submit" class="bb-btn-primary !px-4 w-full sm:w-auto"><i data-lucide="mail" class="w-4 h-4"></i> Send email</button>
                 </div>
               </div>
               <p id="inviteMsg" class="text-xs font-mono"></p>
             </form>
-            <div class="mt-4 pt-4 border-t border-ink/10">
-              <label class="bb-label">Shareable Invite Link</label>
-              <div class="invite-link-row mt-1">
-                <input id="inviteLink" class="bb-input text-xs flex-1" readonly />
-                <button id="copyInviteBtn" type="button" class="bb-btn-secondary !px-4 w-full sm:w-auto"><i data-lucide="copy" class="w-4 h-4"></i> Copy</button>
+            <div id="inviteLinkPanel" class="hidden space-y-2">
+              <label class="bb-label">Shareable group link</label>
+              <div class="invite-email-row">
+                <input id="inviteLink" type="text" class="bb-input flex-1" readonly />
+                <button id="copyInviteLinkBtn" type="button" class="bb-btn-primary !px-4 w-full sm:w-auto"><i data-lucide="copy" class="w-4 h-4"></i> Copy link</button>
               </div>
+              <p class="text-xs text-ink/50">Anyone who opens this link while signed in is added to the group automatically.</p>
             </div>
           </div>
         </div>
@@ -465,8 +478,8 @@
     </div>
   </div>
 
-  <script src="/api.js?v=20260919g"></script>
-  <script src="/group.js?v=20260921a"></script>
+  <script src="/api.js?v=20260925email"></script>
+  <script src="/group.js?v=20260925email"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

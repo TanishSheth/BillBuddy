@@ -60,7 +60,7 @@ const GROUP_PAGE_HELP = {
   insights: "<strong>Insights:</strong> See this month's spending total, top categories, and largest expenses.",
   activity: "<strong>Activity:</strong> Follow group changes, expenses, comments, and payment updates in time order.",
   reports: "<strong>PDF Reports:</strong> Generate or download a clear monthly record of expenses, balances, and confirmed settlements.",
-  members: "<strong>Members:</strong> Invite people, share the invite link, and manage the group roster. Only the owner can remove members or change group details.",
+  members: "<strong>Members:</strong> Add friends directly, send an email, or share a link. Email and link joins add members automatically. Only the owner can remove members or change group details.",
 };
 
 function updateGroupPageHelp(tabName) {
@@ -1157,6 +1157,9 @@ async function loadMembers() {
   const group = await ShareSquad.api(`/groups/${gid()}`);
   state.members = group.members;
 
+  const inviteLink = $("#inviteLink");
+  if (inviteLink) inviteLink.value = `${window.location.origin}/join.html?code=${encodeURIComponent(group.invite_code)}`;
+
   const list = $("#memberList");
   if (!list) return;
   const isOwner = state.myRole === "owner";
@@ -1173,7 +1176,7 @@ async function loadMembers() {
           <span class="font-bold text-ink">${ShareSquad.escapeHtml(m.display_name)}</span>
           ${m.role === "owner" ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-brand/10 text-brand font-bold ml-1.5 uppercase">Owner</span>' : ""}
           ${inactive ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-ink/10 text-ink/50 font-bold ml-1.5 uppercase">Removed</span>' : ""}
-          <span class="member-email">${ShareSquad.escapeHtml(m.email)}</span>
+          <span class="member-email">${ShareSquad.escapeHtml(ShareSquad.maskEmail(m.email))}</span>
           </div>
         </div>
         ${canRemove ? `<button type="button" class="remove-member bb-btn-secondary !py-1 !px-2 text-[10px] text-stamp border-stamp/30" data-id="${m.id}" data-name="${ShareSquad.escapeHtml(m.display_name)}">Remove</button>` : ""}
@@ -1201,8 +1204,16 @@ async function loadMembers() {
     });
   });
 
-  const url = `${window.location.origin}/join.html?code=${group.invite_code}`;
-  $("#inviteLink").value = url;
+  const friendSelect = $("#existingFriendSelect");
+  if (friendSelect) {
+    const activeAccountIds = new Set(group.members.filter((member) => member.is_active !== false).map((member) => Number(member.account_id)));
+    const friends = await ShareSquad.api("/friends").catch(() => []);
+    const available = friends.filter((friend) => !activeAccountIds.has(Number(friend.id)));
+    friendSelect.innerHTML = available.length
+      ? available.map((friend) => `<option value="${friend.id}">${ShareSquad.escapeHtml(friend.display_name)} · ${ShareSquad.escapeHtml(ShareSquad.maskEmail(friend.email))}</option>`).join("")
+      : '<option value="">No available friends</option>';
+    $("#addExistingFriendBtn").disabled = !available.length;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1461,6 +1472,32 @@ async function handleReceiptUpload(file) {
   // Generate Report
   $("#generateReportBtn").addEventListener("click", generateReport);
 
+  function setInviteMethod(method) {
+    const emailMode = method === "email";
+    $("#inviteForm")?.classList.toggle("hidden", !emailMode);
+    $("#inviteLinkPanel")?.classList.toggle("hidden", emailMode);
+    $("#showInviteEmailBtn")?.classList.toggle("bb-btn-primary", emailMode);
+    $("#showInviteEmailBtn")?.classList.toggle("bb-btn-secondary", !emailMode);
+    $("#showInviteLinkBtn")?.classList.toggle("bb-btn-primary", !emailMode);
+    $("#showInviteLinkBtn")?.classList.toggle("bb-btn-secondary", emailMode);
+  }
+
+  $("#showInviteEmailBtn")?.addEventListener("click", () => setInviteMethod("email"));
+  $("#showInviteLinkBtn")?.addEventListener("click", () => setInviteMethod("link"));
+  $("#copyInviteLinkBtn")?.addEventListener("click", async () => {
+    const link = $("#inviteLink")?.value;
+    if (!link) return;
+    try {
+      await navigator.clipboard.writeText(link);
+      ShareSquad.showToast("Group link copied", "success");
+    } catch {
+      $("#inviteLink").select();
+      document.execCommand("copy");
+      ShareSquad.showToast("Group link copied", "success");
+    }
+  });
+  setInviteMethod("email");
+
   // Invite Form
   $("#inviteForm").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1473,13 +1510,12 @@ async function handleReceiptUpload(file) {
         method: "POST",
         body: JSON.stringify({ email }),
       });
-      msg.textContent = result.message || `Invite sent to ${email}!`;
-      msg.className = result.email_sent || result.already_member
-        ? "text-xs font-mono balance-positive font-bold"
-        : "text-xs font-mono text-ink/70";
-      ShareSquad.showToast(result.message, result.email_sent || result.already_member ? "success" : "info");
+      msg.textContent = result.message || `${email} was added.`;
+      msg.className = "text-xs font-mono balance-positive font-bold";
+      ShareSquad.showToast(result.message, "success");
       $("#inviteEmail").value = "";
-      if (result.already_member) await loadMembers();
+      await loadGroup();
+      await loadMembers();
     } catch (err) {
       msg.textContent = err.message;
       msg.className = "text-xs font-mono balance-negative";
@@ -1489,11 +1525,22 @@ async function handleReceiptUpload(file) {
     }
   });
 
-  $("#copyInviteBtn").addEventListener("click", () => {
-    const input = $("#inviteLink");
-    input.select();
-    navigator.clipboard.writeText(input.value);
-    ShareSquad.showToast("Invite link copied to clipboard!", "success");
+  $("#addExistingFriendBtn")?.addEventListener("click", async () => {
+    const friendId = Number($("#existingFriendSelect").value);
+    const msg = $("#existingFriendMsg");
+    if (!friendId) return;
+    try {
+      const result = await ShareSquad.api(`/groups/${gid()}/members`, { method: "POST", body: JSON.stringify({ account_id: friendId }) });
+      msg.textContent = result.message;
+      msg.className = "text-xs font-mono balance-positive font-bold";
+      ShareSquad.showToast(result.message, "success");
+      await loadGroup();
+      await loadMembers();
+    } catch (err) {
+      msg.textContent = err.message;
+      msg.className = "text-xs font-mono balance-negative";
+      ShareSquad.showToast(err.message, "error");
+    }
   });
 
   $("#logoutBtn")?.addEventListener("click", () => {

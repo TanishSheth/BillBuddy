@@ -14,7 +14,7 @@ function splitRow(split) {
   const person = split.participants[0]; if (!person) return null;
   let friend; let balance;
   if (split.is_payer) {
-    friend = { id: person.account_id || null, name: person.display_name || person.email || "Friend", hasAvatar: !!person.has_avatar };
+    friend = { id: person.account_id || null, name: person.display_name || ShareSquad.maskEmail(person.email) || "Friend", hasAvatar: !!person.has_avatar };
     // A Friends balance stays open until the month is confirmed by both people.
     balance = person.share_amount;
   } else if (person.is_me) {
@@ -63,7 +63,7 @@ function statusForBill(row) {
 
 function renderList() {
   const grid = $("#friendsGrid");
-  if (!friends.length) { grid.innerHTML = '<div class="bb-card sm:col-span-2 lg:col-span-3 text-center py-10"><p class="font-mono font-bold">No friends yet</p><p class="text-sm text-ink/60 mt-2">Add a friend by email or private link. Group members will also appear here automatically.</p></div>'; return; }
+  if (!friends.length) { grid.innerHTML = '<div class="bb-card sm:col-span-2 lg:col-span-3 text-center py-10"><p class="font-mono font-bold">No friends yet</p><p class="text-sm text-ink/60 mt-2">Add an existing ShareSquad user by email. Group members will also appear here automatically.</p></div>'; return; }
   grid.innerHTML = friends.map((friend) => `<article class="bb-card border border-ink/10"><div class="flex items-center justify-between gap-3"><button class="text-left grow flex items-center gap-3" data-friend-key="${friend.key}">${friendAvatar(friend.friend)}<p class="font-mono font-bold text-base">${ShareSquad.escapeHtml(friend.friend.name)}</p></button><button type="button" class="remove-friend bb-btn-secondary !py-1.5 !px-2.5 text-[10px] text-stamp border-stamp/30" data-remove-friend="${friend.friend.id}">Remove</button></div><button type="button" class="invite-friend-group bb-btn-secondary w-full !py-1.5 mt-3 text-[10px]" data-invite-friend="${friend.friend.id}">Invite to group</button></article>`).join("");
   loadFriendAvatars(grid);
   grid.querySelectorAll("[data-friend-key]").forEach((button) => button.onclick = () => openFriend(button.dataset.friendKey));
@@ -77,12 +77,15 @@ async function inviteFriendToGroup(friendId) {
   try {
     const groups = await ShareSquad.api("/groups");
     if (!groups.length) return ShareSquad.showToast("Create a group before inviting a friend.", "error");
+    const groupDetails = await Promise.all(groups.map((group) => ShareSquad.api(`/groups/${group.id}`).catch(() => null)));
+    const availableGroups = groupDetails.filter((group) => group && !group.members.some((member) => Number(member.account_id) === Number(friend.id) && member.is_active !== false));
+    if (!availableGroups.length) return ShareSquad.showToast(`${friend.name} is already in all of your groups.`, "info");
     const picker = document.createElement("div");
     picker.className = "fixed inset-0 z-50 bg-ink/50 flex items-center justify-center p-4";
-    picker.innerHTML = `<div class="bb-card w-full max-w-sm"><h2 class="font-mono font-bold text-brand">Invite ${ShareSquad.escapeHtml(friend.name)} to a group</h2><select class="bb-input w-full mt-4">${groups.map((group) => `<option value="${group.id}">${ShareSquad.escapeHtml(group.name)}</option>`).join("")}</select><div class="flex gap-2 mt-4"><button class="bb-btn-primary flex-1 send">Send invite</button><button class="bb-btn-secondary cancel">Cancel</button></div></div>`;
+    picker.innerHTML = `<div class="bb-card w-full max-w-sm"><h2 class="font-mono font-bold text-brand">Invite ${ShareSquad.escapeHtml(friend.name)} to a group</h2><select class="bb-input w-full mt-4">${availableGroups.map((group) => `<option value="${group.id}">${ShareSquad.escapeHtml(group.name)}</option>`).join("")}</select><div class="flex gap-2 mt-4"><button class="bb-btn-primary flex-1 send">Send invite</button><button class="bb-btn-secondary cancel">Cancel</button></div></div>`;
     document.body.appendChild(picker);
     picker.querySelector(".cancel").onclick = () => picker.remove();
-    picker.querySelector(".send").onclick = async () => { const group = groups.find((item) => item.id === Number(picker.querySelector("select").value)); if (!group) return; try { await ShareSquad.api(`/groups/${group.id}/invites`, { method: "POST", body: JSON.stringify({ email: friend.email }) }); picker.remove(); ShareSquad.showToast(`${friend.name} was invited to ${group.name}.`, "success"); } catch (error) { ShareSquad.showToast(error.message || "Could not invite this friend", "error"); } };
+    picker.querySelector(".send").onclick = async () => { const group = availableGroups.find((item) => item.id === Number(picker.querySelector("select").value)); if (!group) return; try { await ShareSquad.api(`/groups/${group.id}/invites`, { method: "POST", body: JSON.stringify({ email: friend.email }) }); picker.remove(); ShareSquad.showToast(`${friend.name} was added to ${group.name}.`, "success"); } catch (error) { ShareSquad.showToast(error.message || "Could not add this friend", "error"); } };
   } catch (error) { ShareSquad.showToast(error.message || "Could not invite this friend", "error"); }
 }
 
@@ -218,7 +221,6 @@ async function createFriendInvite(email = "") {
     const result = await ShareSquad.api("/friends/invites", { method: "POST", body: JSON.stringify(email ? { email } : {}) });
     $("#friendInviteMsg").textContent = result.message;
     $("#friendInviteMsg").className = "text-xs font-mono mt-3 balance-positive";
-    if (result.invite_url) { $("#friendInviteLink").value = result.invite_url; $("#friendInviteLinkWrap").classList.remove("hidden"); }
     if (result.status === "ACTIVE") { closeFriendInvite(); await refresh(); }
   } catch (error) { $("#friendInviteMsg").textContent = error.message || "Could not add friend"; $("#friendInviteMsg").className = "text-xs font-mono mt-3 balance-negative"; }
 }
@@ -252,8 +254,6 @@ if (legacySplitButton) {
 }
 $("#closeFriendInviteBtn").onclick = closeFriendInvite;
 $("#friendInviteModal").onclick = (event) => { if (event.target.id === "friendInviteModal") closeFriendInvite(); };
-$("#sendFriendInviteBtn").onclick = () => { const email = $("#friendInviteEmail").value.trim(); if (!email) { $("#friendInviteMsg").textContent = "Enter an email address, or use Create link."; return; } createFriendInvite(email); };
-$("#createFriendLinkBtn").onclick = () => createFriendInvite();
-$("#copyFriendInviteBtn").onclick = async () => { try { await navigator.clipboard.writeText($("#friendInviteLink").value); ShareSquad.showToast("Friend invite link copied", "success"); } catch { $("#friendInviteLink").select(); document.execCommand("copy"); } };
+$("#sendFriendInviteBtn").onclick = () => { const email = $("#friendInviteEmail").value.trim(); if (!email) { $("#friendInviteMsg").textContent = "Enter an existing user's email address."; return; } createFriendInvite(email); };
 $("#friendExpenseForm").onsubmit = async (event) => { event.preventDefault(); const friendId = Number(event.currentTarget.dataset.friendId); const type = $("#friendExpenseType").value; const friendPaid = $("#friendPaidBy").value === "friend"; try { await ShareSquad.api("/quick-splits", { method: "POST", body: JSON.stringify({ title: $("#friendExpenseTitle").value.trim(), total_amount: Number($("#friendExpenseAmount").value), currency: $("#friendExpenseCurrency").value, bill_date: $("#friendExpenseDate").value, category: "General", split_type: type, payer_value: type === "EQUAL" ? null : Number($("#friendPayerValue").value), payer_account_id: friendPaid ? friendId : null, silent_invite: true, participants: [{ account_id: friendPaid ? me.account.id : friendId, value: type === "EQUAL" ? null : Number($("#friendOtherValue").value) }] }) }); ShareSquad.showToast("Added to this friend’s history", "success"); $("#friendExpenseForm").reset(); $("#friendExpenseDate").value = todayISO(); await refresh(); openFriend(`account-${friendId}`); } catch (err) { $("#friendMsg").textContent = err.message; $("#friendMsg").className = "text-xs font-mono balance-negative"; } };
 (async () => { if (!ShareSquad.getToken()) { location.href = "/login.html"; return; } ShareSquad.fillAllCurrencySelects(); $("#friendExpenseDate").max = todayISO(); $("#friendExpenseDate").value = todayISO(); renderValues(); try { me = await ShareSquad.api("/auth/me"); $("#headerInitials").textContent = ShareSquad.initials(me.account.display_name); if (me.account.has_avatar) { ShareSquad.setAuthImage($("#headerAvatar"), "/auth/me/avatar"); $("#headerInitials").classList.add("hidden"); } await refresh(); const selectedFriendId = Number(new URLSearchParams(location.search).get("friend")); if (selectedFriendId) openFriend(`account-${selectedFriendId}`); } catch (err) { ShareSquad.showToast(err.message || "Could not load friend splits", "error"); } if (window.lucide) lucide.createIcons(); })();

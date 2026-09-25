@@ -72,6 +72,18 @@
         <button type="button" id="saveProfileBtn" class="bb-btn-primary text-[11px]">Save profile</button>
         <p id="profileMsg" class="text-xs font-mono"></p>
       </div>
+      <section class="bb-card border border-stamp/30 bg-stamp/5 space-y-3">
+        <div>
+          <h2 class="font-mono uppercase text-xs tracking-widest text-stamp font-bold">Delete account</h2>
+          <p class="text-xs text-ink/65 mt-1.5 leading-relaxed">Your sign-in and access will stop immediately. You can restore the account by signing in from the recovery option within 30 days. After that, your personal data is permanently removed; shared group history remains as “Deleted member”.</p>
+        </div>
+        <div>
+          <label class="bb-label">Current password</label>
+          <input id="deleteAccountPassword" type="password" class="bb-input" autocomplete="current-password" placeholder="Required to delete your account">
+        </div>
+        <button type="button" id="deleteAccountBtn" class="bb-btn-danger text-[11px]">Delete my account</button>
+        <p id="deleteAccountMsg" class="text-xs font-mono"></p>
+      </section>
     </section>
 
     <section id="tab-scan" class="settings-panel hidden space-y-4">
@@ -194,8 +206,8 @@
 
   </main>
 
-  <script src="/api.js?v=20260919g"></script>
-  <script src="/settings.js?v=20260919a"></script>
+  <script src="/api.js?v=20260925email"></script>
+  <script src="/settings.js?v=20260925email"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

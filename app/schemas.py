@@ -55,6 +55,15 @@ class AccountProfileUpdate(BaseModel):
     new_password: Optional[str] = Field(default=None, min_length=8, max_length=128)
 
 
+class AccountDeletionRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+
+
+class AccountRestoreRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
+
+
 class MeOut(BaseModel):
     account: AccountOut
     groups: List["GroupOut"]
@@ -64,6 +73,8 @@ class MeOut(BaseModel):
 class GroupCreate(BaseModel):
     name: str = Field(min_length=1, max_length=150)
     currency: str = Field(default="USD", max_length=10)
+    friend_ids: list[int] = Field(default_factory=list)
+    invite_emails: list[str] = Field(default_factory=list)
 
 
 class GroupOut(BaseModel):
@@ -102,6 +113,10 @@ class MemberOut(BaseModel):
 
 class InviteByEmailRequest(BaseModel):
     email: EmailStr
+
+
+class GroupMemberAddRequest(BaseModel):
+    account_id: int
 
 
 class InviteCreateOut(BaseModel):

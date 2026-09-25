@@ -5,10 +5,53 @@ function openGroup(groupId) {
   window.location.href = "/group.html";
 }
 
+let createGroupFriends = [];
+let createGroupEmails = [];
+let createGroupSelectedFriendIds = new Set();
+
+function renderCreateGroupMembers() {
+  const friendList = $("#createGroupFriends");
+  const chips = $("#createGroupMemberChips");
+  if (friendList) {
+    friendList.innerHTML = createGroupFriends.length
+      ? createGroupFriends.map((friend) => `<label class="flex items-center gap-2 rounded px-2 py-1.5 hover:bg-ink/[0.03] cursor-pointer"><input type="checkbox" class="create-group-friend" value="${friend.id}" ${createGroupSelectedFriendIds.has(Number(friend.id)) ? "checked" : ""}><span class="min-w-0 truncate">${ShareSquad.escapeHtml(friend.display_name)} <span class="text-ink/45 text-xs">${ShareSquad.escapeHtml(ShareSquad.maskEmail(friend.email))}</span></span></label>`).join("")
+      : '<p class="text-xs text-ink/45">No friends available yet. Add someone by email instead.</p>';
+    friendList.querySelectorAll(".create-group-friend").forEach((input) => {
+      input.addEventListener("change", () => {
+        const friendId = Number(input.value);
+        if (input.checked) createGroupSelectedFriendIds.add(friendId);
+        else createGroupSelectedFriendIds.delete(friendId);
+      });
+    });
+  }
+  if (chips) {
+    chips.innerHTML = createGroupEmails.map((email) => `<span class="inline-flex items-center gap-1.5 rounded-full bg-brand/10 text-brand px-2.5 py-1 text-xs font-mono">${ShareSquad.escapeHtml(ShareSquad.maskEmail(email))}<button type="button" class="remove-create-group-email text-brand/70 hover:text-stamp" data-email="${ShareSquad.escapeHtml(email)}" aria-label="Remove ${ShareSquad.escapeHtml(ShareSquad.maskEmail(email))}">×</button></span>`).join("");
+    chips.querySelectorAll(".remove-create-group-email").forEach((button) => {
+      button.addEventListener("click", () => {
+        createGroupEmails = createGroupEmails.filter((email) => email !== button.dataset.email);
+        renderCreateGroupMembers();
+      });
+    });
+  }
+}
+
+async function loadCreateGroupFriends() {
+  try {
+    createGroupFriends = await ShareSquad.api("/friends");
+  } catch {
+    createGroupFriends = [];
+  }
+  renderCreateGroupMembers();
+}
+
 function showCreateGroupModal() {
   $("#createGroupModal").classList.remove("hidden");
   $("#createGroupName").value = "";
   $("#createGroupMsg").textContent = "";
+  $("#createGroupMemberEmail").value = "";
+  createGroupEmails = [];
+  createGroupSelectedFriendIds = new Set();
+  loadCreateGroupFriends();
   $("#createGroupName").focus();
 }
 
@@ -31,7 +74,7 @@ function renderQuickSplits(_splits, contacts = [], settlementsByFriend = new Map
   const people = new Map();
   splits.forEach((split) => {
     const other = split.is_payer ? split.participants?.find((person) => !person.is_me) : { id: split.payer_account_id, display_name: split.payer_name || "Friend" };
-    const personName = other?.display_name || other?.email || "Friend";
+    const personName = other?.display_name || ShareSquad.maskEmail(other?.email) || "Friend";
     const key = other?.account_id || other?.id || `split-${split.id}`;
     const entry = people.get(key) || { id: other?.account_id || other?.id || null, name: personName, balance: 0, count: 0, currency: split.currency || "USD", splitId: split.id };
     const share = Number(split.participants?.find((person) => split.is_payer ? !person.is_me : person.is_me)?.share_amount || 0);
@@ -216,6 +259,7 @@ async function submitCreateGroup(e) {
   e.preventDefault();
   const name = $("#createGroupName").value.trim();
   const currency = $("#createGroupCurrency").value || "USD";
+  const friend_ids = [...createGroupSelectedFriendIds];
   const msg = $("#createGroupMsg");
 
   if (!name) {
@@ -228,7 +272,7 @@ async function submitCreateGroup(e) {
   try {
     const group = await ShareSquad.api("/groups", {
       method: "POST",
-      body: JSON.stringify({ name, currency }),
+      body: JSON.stringify({ name, currency, friend_ids, invite_emails: createGroupEmails }),
     });
     hideCreateGroupModal();
     ShareSquad.showToast(`Group "${group.name}" created!`, "success");
@@ -252,6 +296,24 @@ async function submitCreateGroup(e) {
   $("#settingsBtn")?.addEventListener("click", () => { window.location.href = "/settings.html"; });
   $("#createFirstGroupBtn")?.addEventListener("click", showCreateGroupModal);
   $("#createGroupForm")?.addEventListener("submit", submitCreateGroup);
+  $("#addCreateGroupEmailBtn")?.addEventListener("click", () => {
+    const input = $("#createGroupMemberEmail");
+    const email = input.value.trim().toLowerCase();
+    if (!email) return;
+    if (!input.checkValidity()) {
+      input.reportValidity();
+      return;
+    }
+    if (!createGroupEmails.includes(email)) createGroupEmails.push(email);
+    input.value = "";
+    renderCreateGroupMembers();
+  });
+  $("#createGroupMemberEmail")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      $("#addCreateGroupEmailBtn")?.click();
+    }
+  });
   $("#cancelCreateGroupBtn")?.addEventListener("click", hideCreateGroupModal);
   $("#closeCreateModalBtn")?.addEventListener("click", hideCreateGroupModal);
   $("#createGroupModal")?.addEventListener("click", (e) => {

@@ -48,6 +48,13 @@ function initials(name) {
   return String(name || "?").trim().split(/\s+/).slice(0, 2).map((part) => part[0] || "").join("").toUpperCase() || "?";
 }
 
+function maskEmail(email) {
+  const value = String(email || "").trim();
+  if (!value) return "";
+  if (value.length <= 7) return "•••";
+  return `${value.slice(0, 3)}•••${value.slice(-4)}`;
+}
+
 function showToast(msg, type = "info", duration = 3500) {
   let container = $("#toastContainer");
   if (!container) {
@@ -530,6 +537,7 @@ window.ShareSquad = {
   formatDate,
   escapeHtml,
   initials,
+  maskEmail,
   CURRENCIES,
   CURRENCY_SYMBOLS,
   currencySymbol,

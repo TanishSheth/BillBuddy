@@ -19,6 +19,9 @@ class Account(Base):
     display_name = Column(String(100), nullable=False)
     avatar_path = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+    deletion_requested_at = Column(DateTime, nullable=True)
+    deletion_purge_after = Column(DateTime, nullable=True)
+    deletion_completed_at = Column(DateTime, nullable=True)
 
     memberships = relationship("GroupMember", back_populates="account")
     groups_created = relationship("Group", back_populates="creator")

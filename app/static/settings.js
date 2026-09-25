@@ -7,6 +7,7 @@ const state = {
   selectedGroupId: null,
   groupSettings: null,
 };
+let currentProfileEmail = "";
 
 function switchSettingsTab(tabName) {
   $$("[data-settings-tab]").forEach((btn) => {
@@ -37,7 +38,11 @@ function renderModelSelect(selectEl, providerId, selectedModelId) {
 async function loadProfile() {
   const me = await ShareSquad.api("/auth/me");
   if ($("#profileName")) $("#profileName").value = me.account.display_name || "";
-  if ($("#profileEmail")) $("#profileEmail").value = me.account.email || "";
+  currentProfileEmail = me.account.email || "";
+  if ($("#profileEmail")) {
+    $("#profileEmail").value = "";
+    $("#profileEmail").placeholder = ShareSquad.maskEmail(currentProfileEmail);
+  }
   if (me.account.has_avatar) {
     ShareSquad.setAuthImage($("#profileAvatar"), "/auth/me/avatar");
   }
@@ -50,7 +55,7 @@ async function saveProfile() {
   msg.className = "text-xs font-mono text-ink/50";
   const body = {
     display_name: $("#profileName").value.trim(),
-    email: $("#profileEmail").value.trim(),
+    email: $("#profileEmail").value.trim() || currentProfileEmail,
   };
   const current = $("#profileCurrentPassword").value;
   const next = $("#profileNewPassword").value;
@@ -69,7 +74,10 @@ async function saveProfile() {
     body.new_password = next;
   }
   try {
-    await ShareSquad.api("/auth/me", { method: "PATCH", body: JSON.stringify(body) });
+    const updated = await ShareSquad.api("/auth/me", { method: "PATCH", body: JSON.stringify(body) });
+    currentProfileEmail = updated.email || currentProfileEmail;
+    $("#profileEmail").value = "";
+    $("#profileEmail").placeholder = ShareSquad.maskEmail(currentProfileEmail);
     $("#profileCurrentPassword").value = "";
     $("#profileNewPassword").value = "";
     msg.textContent = "Profile saved.";
@@ -77,6 +85,37 @@ async function saveProfile() {
     ShareSquad.showToast("Profile saved", "success");
   } catch (err) {
     msg.textContent = err.message;
+    msg.className = "text-xs font-mono balance-negative";
+  }
+}
+
+async function requestAccountDeletion() {
+  const password = $("#deleteAccountPassword")?.value || "";
+  const msg = $("#deleteAccountMsg");
+  if (!password) {
+    msg.textContent = "Enter your current password to continue.";
+    msg.className = "text-xs font-mono balance-negative";
+    return;
+  }
+  const accepted = await ShareSquad.confirmDialog({
+    title: "Schedule account deletion?",
+    message: "You will be signed out now. You can still restore this account from the login page for the next 30 days.",
+    confirmLabel: "Delete account",
+    danger: true,
+  });
+  if (!accepted) return;
+  try {
+    const result = await ShareSquad.api("/auth/me/delete-account", {
+      method: "POST",
+      body: JSON.stringify({ current_password: password }),
+    });
+    msg.textContent = result.message;
+    msg.className = "text-xs font-mono balance-positive";
+    ShareSquad.removeToken();
+    ShareSquad.removeStoredGroupId();
+    window.location.href = "/login.html?recovery=1";
+  } catch (err) {
+    msg.textContent = err.message || "Could not schedule account deletion.";
     msg.className = "text-xs font-mono balance-negative";
   }
 }
@@ -304,6 +343,7 @@ async function clearGroupKey() {
   $("#equalSplitDefault")?.addEventListener("change", saveGroupSettings);
   $("#clearGroupKeyBtn").addEventListener("click", clearGroupKey);
   $("#saveProfileBtn")?.addEventListener("click", saveProfile);
+  $("#deleteAccountBtn")?.addEventListener("click", requestAccountDeletion);
   $("#profileAvatarInput")?.addEventListener("change", async (e) => {
     const file = e.target.files[0];
     e.target.value = "";
