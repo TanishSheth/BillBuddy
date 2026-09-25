@@ -13,13 +13,14 @@ function loadFriendAvatars(root = document) { root.querySelectorAll("[data-frien
 function splitRow(split) {
   const person = split.participants[0]; if (!person) return null;
   let friend; let balance;
+  const total = Number(split.total_amount);
+  const payerPaid = split.payer_paid_amount == null ? total : Number(split.payer_paid_amount);
   if (split.is_payer) {
     friend = { id: person.account_id || null, name: person.display_name || ShareSquad.maskEmail(person.email) || "Friend", hasAvatar: !!person.has_avatar };
-    // A Friends balance stays open until the month is confirmed by both people.
-    balance = person.share_amount;
+    balance = cents(payerPaid - Number(split.payer_share_amount));
   } else if (person.is_me) {
     friend = { id: split.payer_account_id, name: split.payer_name || "Friend", hasAvatar: !!split.payer_has_avatar };
-    balance = -person.share_amount;
+    balance = cents((total - payerPaid) - Number(person.share_amount));
   }
   return friend && friend.id !== me.account.id ? { split, person, friend, balance } : null;
 }
@@ -90,11 +91,18 @@ async function inviteFriendToGroup(friendId) {
 }
 
 function renderValues() {
-  const friendPaid = $("#friendPaidBy").value === "friend";
+  const paidBy = $("#friendPaidBy").value;
+  const friendPaid = paidBy === "friend";
   $("#friendValues").classList.toggle("hidden", $("#friendExpenseType").value === "EQUAL");
+  $("#friendPaySplit").classList.toggle("hidden", paidBy !== "both");
   const name = activeFriend?.friend?.name || "Friend";
   $("#friendPayerValueLabel").textContent = friendPaid ? `${name}'s value` : "Your value";
   $("#friendOtherValueLabel").textContent = friendPaid ? "Your value" : `${name}'s value`;
+  const total = Number($("#friendExpenseAmount").value) || 0;
+  const mine = Number($("#friendMyPaid").value) || 0;
+  const theirs = Number($("#friendTheirPaid").value) || 0;
+  const notice = $("#friendPayNotice");
+  if (notice) notice.textContent = total ? `Paid ${cents(mine + theirs).toFixed(2)} of ${total.toFixed(2)}.` : "Enter the cash each of you paid. The two amounts must add up to the bill.";
 }
 
 function monthName(month) {
@@ -123,7 +131,7 @@ function renderLedger(friend) {
   $("#friendLedger").innerHTML = entries.length ? entries.map((entry) => {
     if (entry.kind === "direct") {
       const bill = statusForBill(entry.row);
-      return `<div class="member-row"><div><p class="font-semibold text-sm">${ShareSquad.escapeHtml(entry.row.split.title)}</p><p class="text-xs text-ink/55">${ShareSquad.formatDate(entry.row.split.bill_date)} · ${entry.row.split.is_payer ? "You paid" : `${ShareSquad.escapeHtml(friend.friend.name)} paid`} ${money(entry.row.split.total_amount, entry.row.split.currency)}</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${bill.tone}">${bill.text}</p><p class="text-[10px] text-ink/50">${bill.hint}</p></div></div>`;
+      return `<div class="member-row"><div><p class="font-semibold text-sm">${ShareSquad.escapeHtml(entry.row.split.title)}</p><p class="text-xs text-ink/55">${ShareSquad.formatDate(entry.row.split.bill_date)} · ${entry.row.split.payer_paid_amount == null ? (entry.row.split.is_payer ? "You paid" : `${ShareSquad.escapeHtml(friend.friend.name)} paid`) : "You both paid"} ${money(entry.row.split.total_amount, entry.row.split.currency)}</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${bill.tone}">${bill.text}</p><p class="text-[10px] text-ink/50">${bill.hint}</p></div></div>`;
     }
     const contribution = entry.row; const positive = Number(contribution.pair_amount) > 0;
     return `<button type="button" class="member-row group-ledger-row w-full text-left" data-group-id="${contribution.group_id}" data-expense-id="${contribution.expense_id}"><div><p class="font-semibold text-sm">${ShareSquad.escapeHtml(contribution.title)}</p><p class="text-xs text-ink/55"><span class="group-source-label">From ${ShareSquad.escapeHtml(contribution.group_name)}</span> · ${ShareSquad.formatDate(contribution.bill_date)} · ${ShareSquad.escapeHtml(contribution.period_key)}</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${positive ? "text-green-700" : "text-red-700"}">${positive ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(contribution.pair_amount), contribution.currency)}</p><p class="text-[10px] text-ink/50">${positive ? "They owe you" : "You owe them"}</p></div></button>`;
@@ -179,7 +187,11 @@ function setupHistory(friend) {
 function openFriend(key) {
   const friend = friends.find((item) => item.key === key); if (!friend) return;
   activeFriend = friend;
-  $("#friendsListPane").classList.add("hidden"); $("#friendDetailPane").classList.remove("hidden");
+  $("#friendsListPane").classList.add("hidden");
+  const pane = $("#friendDetailPane");
+  pane.classList.remove("hidden");
+  pane.classList.add("sliding-in");
+  pane.addEventListener("animationend", () => pane.classList.remove("sliding-in"), { once: true });
   const state = statusFor(friend); const balance = cents(friend.balance); $("#friendName").textContent = friend.friend.name; $("#friendBalance").innerHTML = state.text; $("#friendBalance").className = `font-mono font-bold text-xl mt-3 ${balance > 0 ? "text-green-700" : balance < 0 ? "text-red-700" : "text-ink/60"}`; $("#friendBalanceHelp").textContent = balance > 0 ? "Green means they should pay you overall." : balance < 0 ? "Red means you should pay them overall." : "Grey means you are settled overall."; renderConsolidated(friend);
   setupHistory(friend);
   $("#friendExpensePanel").classList.toggle("hidden", !friend.friend.id); $("#friendExpenseForm").dataset.friendId = friend.friend.id || ""; $("#friendPaidBy").options[1].textContent = `${friend.friend.name} paid`; ShareSquad.fillCurrencySelect($("#friendExpenseCurrency"), friend.currency); renderValues();
@@ -208,10 +220,33 @@ async function refresh() {
 }
 
 async function removeFriend(friendId) {
-  const friend = friends.find((entry) => entry.friend.id === friendId)?.friend;
-  if (!friend || !await ShareSquad.confirmDialog({ title: `Remove ${friend.name}?`, message: "This only removes them from your Friends list. Group memberships and past expenses remain available.", confirmLabel: "Remove friend" })) return;
-  try { await ShareSquad.api(`/friends/${friendId}`, { method: "DELETE" }); ShareSquad.showToast(`${friend.name} was removed from Friends`, "success"); await refresh(); }
-  catch (error) { ShareSquad.showToast(error.message || "Could not remove friend", "error"); }
+  const entry = friends.find((item) => item.friend.id === friendId);
+  const friend = entry?.friend;
+  if (!friend || !await ShareSquad.confirmDialog({
+    title: `Remove ${friend.name}?`,
+    message: "This only removes them from your Friends list. You can undo for a few seconds.",
+    confirmLabel: "Remove friend",
+  })) return;
+  const snapshot = friends.slice();
+  const wasActive = activeFriend?.friend?.id === friendId;
+  ShareSquad.runWithUndo({
+    message: `${friend.name} was removed from Friends`,
+    onHide: () => {
+      friends = friends.filter((item) => item.friend.id !== friendId);
+      renderList();
+      if (wasActive) {
+        activeFriend = null;
+        $("#friendDetailPane")?.classList.add("hidden");
+        $("#friendsListPane")?.classList.remove("hidden");
+      }
+    },
+    onUndo: async () => {
+      friends = snapshot;
+      renderList();
+      await refresh();
+    },
+    onCommit: () => ShareSquad.api(`/friends/${friendId}`, { method: "DELETE" }),
+  });
 }
 
 function openFriendInvite() { $("#friendInviteModal").classList.remove("hidden"); $("#friendInviteMsg").textContent = ""; $("#friendInviteEmail").focus(); }
@@ -242,6 +277,9 @@ $("#historyMonth").onchange = () => { if (activeFriend) renderLedger(activeFrien
 $("#openAddBill").onclick = () => { const panel = $("#friendExpensePanel"); if (panel.classList.contains("hidden")) return; panel.scrollIntoView({ behavior: "smooth", block: "start" }); setTimeout(() => $("#friendExpenseTitle").focus(), 350); };
 $("#friendExpenseType").onchange = renderValues;
 $("#friendPaidBy").onchange = renderValues;
+$("#friendExpenseAmount").oninput = renderValues;
+$("#friendMyPaid").oninput = renderValues;
+$("#friendTheirPaid").oninput = renderValues;
 $("#settingsBtn").onclick = () => { location.href = "/settings.html"; };
 $("#logoutBtn")?.addEventListener("click", () => { ShareSquad.removeToken(); ShareSquad.removeStoredGroupId(); location.href = "/login.html"; });
 $("#addFriendBtn").onclick = openFriendInvite;
@@ -255,5 +293,38 @@ if (legacySplitButton) {
 $("#closeFriendInviteBtn").onclick = closeFriendInvite;
 $("#friendInviteModal").onclick = (event) => { if (event.target.id === "friendInviteModal") closeFriendInvite(); };
 $("#sendFriendInviteBtn").onclick = () => { const email = $("#friendInviteEmail").value.trim(); if (!email) { $("#friendInviteMsg").textContent = "Enter an existing user's email address."; return; } createFriendInvite(email); };
-$("#friendExpenseForm").onsubmit = async (event) => { event.preventDefault(); const friendId = Number(event.currentTarget.dataset.friendId); const type = $("#friendExpenseType").value; const friendPaid = $("#friendPaidBy").value === "friend"; try { await ShareSquad.api("/quick-splits", { method: "POST", body: JSON.stringify({ title: $("#friendExpenseTitle").value.trim(), total_amount: Number($("#friendExpenseAmount").value), currency: $("#friendExpenseCurrency").value, bill_date: $("#friendExpenseDate").value, category: "General", split_type: type, payer_value: type === "EQUAL" ? null : Number($("#friendPayerValue").value), payer_account_id: friendPaid ? friendId : null, silent_invite: true, participants: [{ account_id: friendPaid ? me.account.id : friendId, value: type === "EQUAL" ? null : Number($("#friendOtherValue").value) }] }) }); ShareSquad.showToast("Added to this friend’s history", "success"); $("#friendExpenseForm").reset(); $("#friendExpenseDate").value = todayISO(); await refresh(); openFriend(`account-${friendId}`); } catch (err) { $("#friendMsg").textContent = err.message; $("#friendMsg").className = "text-xs font-mono balance-negative"; } };
+$("#friendExpenseForm").onsubmit = async (event) => {
+  event.preventDefault();
+  const friendId = Number(event.currentTarget.dataset.friendId);
+  const type = $("#friendExpenseType").value;
+  const paidBy = $("#friendPaidBy").value;
+  const total = Number($("#friendExpenseAmount").value);
+  let payerAccountId = paidBy === "friend" ? friendId : null;
+  let payerPaidAmount = null;
+  let participantId = paidBy === "friend" ? me.account.id : friendId;
+  if (paidBy === "both") {
+    const mine = cents(Number($("#friendMyPaid").value));
+    const theirs = cents(Number($("#friendTheirPaid").value));
+    if (mine <= 0 || theirs <= 0 || cents(mine + theirs) !== cents(total)) {
+      $("#friendMsg").textContent = "The two payments must both be greater than zero and add up to the bill.";
+      $("#friendMsg").className = "text-xs font-mono balance-negative";
+      return;
+    }
+    payerAccountId = null;
+    participantId = friendId;
+    payerPaidAmount = mine;
+  }
+  try {
+    await ShareSquad.api("/quick-splits", { method: "POST", body: JSON.stringify({ title: $("#friendExpenseTitle").value.trim(), total_amount: total, currency: $("#friendExpenseCurrency").value, bill_date: $("#friendExpenseDate").value, category: "General", split_type: type, payer_value: type === "EQUAL" ? null : Number($("#friendPayerValue").value), payer_account_id: payerAccountId, payer_paid_amount: payerPaidAmount, silent_invite: true, participants: [{ account_id: participantId, value: type === "EQUAL" ? null : Number($("#friendOtherValue").value) }] }) });
+    ShareSquad.showToast("Added to this friend’s history", "success");
+    $("#friendExpenseForm").reset();
+    $("#friendExpenseDate").value = todayISO();
+    renderValues();
+    await refresh();
+    openFriend(`account-${friendId}`);
+  } catch (err) {
+    $("#friendMsg").textContent = err.message;
+    $("#friendMsg").className = "text-xs font-mono balance-negative";
+  }
+};
 (async () => { if (!ShareSquad.getToken()) { location.href = "/login.html"; return; } ShareSquad.fillAllCurrencySelects(); $("#friendExpenseDate").max = todayISO(); $("#friendExpenseDate").value = todayISO(); renderValues(); try { me = await ShareSquad.api("/auth/me"); $("#headerInitials").textContent = ShareSquad.initials(me.account.display_name); if (me.account.has_avatar) { ShareSquad.setAuthImage($("#headerAvatar"), "/auth/me/avatar"); $("#headerInitials").classList.add("hidden"); } await refresh(); const selectedFriendId = Number(new URLSearchParams(location.search).get("friend")); if (selectedFriendId) openFriend(`account-${selectedFriendId}`); } catch (err) { ShareSquad.showToast(err.message || "Could not load friend splits", "error"); } if (window.lucide) lucide.createIcons(); })();

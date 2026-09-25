@@ -10,6 +10,9 @@ const state = {
   currentUploadId: null,
   editingExpenseId: null,
   splitType: "EQUAL", // EQUAL | PERCENTAGE | EXACT | SHARES
+  payMode: "single",
+  settlementMode: localStorage.getItem("sharesquad_settlement_mode") === "simplified" ? "simplified" : "smart",
+  lastBalances: [],
   selectedSplit: new Set(),
   splitValues: {}, // { member_id: number }
   myMemberId: null,
@@ -435,6 +438,47 @@ function renderPayerOptions() {
   sel.innerHTML = list
     .map((m) => `<option value="${m.id}" ${m.id === state.myMemberId ? "selected" : ""}>${ShareSquad.escapeHtml(m.display_name)}</option>`)
     .join("");
+  renderMultiPayers();
+}
+
+function setPayMode(mode) {
+  state.payMode = mode === "multi" ? "multi" : "single";
+  $$("#payModeSelector .split-type-pill").forEach((btn) => btn.classList.toggle("active", btn.dataset.payMode === state.payMode));
+  $("#f_payer").classList.toggle("hidden", state.payMode === "multi");
+  $("#multiPayerBox").classList.toggle("hidden", state.payMode !== "multi");
+  renderMultiPayers();
+}
+
+function payerLines(expense) {
+  const names = new Map(state.members.map((member) => [Number(member.id), member.display_name]));
+  const currency = expense.currency || groupCurrency();
+  if (expense.payers?.length) {
+    return expense.payers.map((payer) => ({
+      name: names.get(Number(payer.member_id)) || "Member",
+      amount: ShareSquad.formatMoneyText(payer.amount_paid, currency),
+    }));
+  }
+  return [{ name: names.get(Number(expense.payer_member_id)) || "Unknown", amount: "" }];
+}
+
+function renderMultiPayers() {
+  const box = $("#multiPayerBox");
+  if (!box) return;
+  const members = activeMembers();
+  const existing = [...box.querySelectorAll(".payer-amount")].map((input) => input.dataset.member).join(",");
+  const next = members.map((member) => String(member.id)).join(",");
+  if (existing !== next) {
+    box.innerHTML = members.map((member) => {
+      const value = state.payerAmounts?.[member.id] ?? "";
+      return `<label class="flex items-center gap-2 text-sm"><span class="min-w-0 flex-1 truncate">${ShareSquad.escapeHtml(member.display_name)}</span><input class="bb-input payer-amount !w-28 shrink-0" data-member="${member.id}" type="text" inputmode="decimal" placeholder="0.00" value="${value}"></label>`;
+    }).join("");
+    box.querySelectorAll(".payer-amount").forEach((input) => {
+      input.addEventListener("input", () => {
+        state.payerAmounts = state.payerAmounts || {};
+        state.payerAmounts[input.dataset.member] = input.value;
+      });
+    });
+  }
 }
 
 function renderSplitOptions() {
@@ -485,7 +529,7 @@ function renderSplitOptions() {
     row.innerHTML = `
       <span class="font-semibold text-ink">${label}</span>
       <div class="flex items-center gap-1.5 w-36">
-        <input type="number" step="${state.splitType === 'SHARES' ? '1' : '0.01'}" min="0" 
+        <input type="text" step="${state.splitType === 'SHARES' ? '1' : '0.01'}" min="0" inputmode="decimal"
                class="split-val-input bb-input !p-1 text-right font-bold bg-white rounded border border-line" 
                data-id="${m.id}" value="${val}">
         <span class="text-ink/60 text-[11px] font-bold w-10">${unit}</span>
@@ -505,33 +549,71 @@ function renderSplitOptions() {
 
 function updateSplitNotice() {
   const notice = $("#splitStatusNotice");
+  if (!notice) return;
   const totalAmt = parseFloat($("#f_amount").value) || 0;
   const curr = expenseCurrency();
 
   if (state.splitType === "PERCENTAGE") {
     const sumPct = Object.values(state.splitValues).reduce((a, b) => a + Number(b), 0);
     const diff = (100 - sumPct).toFixed(1);
-    if (Math.abs(sumPct - 100) < 0.01) {
-      notice.textContent = `Total: 100% (Balanced)`;
-      notice.className = "text-[10px] font-mono mb-2 text-emerald-700 font-bold";
-    } else {
-      notice.textContent = `Total: ${sumPct.toFixed(1)}% (${diff}% remaining to reach 100%)`;
-      notice.className = "text-[10px] font-mono mb-2 text-stamp font-bold";
-    }
+    const ok = Math.abs(sumPct - 100) < 0.01;
+    notice.textContent = ok ? "Total: 100% (Balanced)" : `Total: ${sumPct.toFixed(1)}% (${diff}% remaining to reach 100%)`;
+    notice.className = `split-total-bar ${ok ? "ok" : sumPct > 100 ? "over" : "under"}`;
   } else if (state.splitType === "EXACT") {
     const sumAmt = Object.values(state.splitValues).reduce((a, b) => a + Number(b), 0);
     const diff = (totalAmt - sumAmt).toFixed(2);
-    if (Math.abs(sumAmt - totalAmt) < 0.01) {
-      notice.textContent = `Total: ${curr} ${sumAmt.toFixed(2)} (Matches bill total)`;
-      notice.className = "text-[10px] font-mono mb-2 text-emerald-700 font-bold";
-    } else {
-      notice.textContent = `Total: ${curr} ${sumAmt.toFixed(2)} (${curr} ${diff} remaining to match total ${curr} ${totalAmt.toFixed(2)})`;
-      notice.className = "text-[10px] font-mono mb-2 text-stamp font-bold";
-    }
+    const ok = Math.abs(sumAmt - totalAmt) < 0.01;
+    notice.textContent = ok
+      ? `Total: ${ShareSquad.formatMoneyText(sumAmt, curr)} (Matches bill total)`
+      : `Total: ${ShareSquad.formatMoneyText(sumAmt, curr)} (${ShareSquad.formatMoneyText(Math.abs(diff), curr)} ${Number(diff) >= 0 ? "remaining" : "over"})`;
+    notice.className = `split-total-bar ${ok ? "ok" : sumAmt > totalAmt ? "over" : "under"}`;
   } else if (state.splitType === "SHARES") {
     const totalShares = Object.values(state.splitValues).reduce((a, b) => a + Number(b), 0);
-    notice.textContent = `Total Shares: ${totalShares}. Each share is worth approximately ${curr} ${(totalAmt / (totalShares || 1)).toFixed(2)}`;
-    notice.className = "text-[10px] font-mono mb-2 text-ink/70 font-semibold";
+    notice.textContent = `Total shares: ${totalShares}. Each share ≈ ${ShareSquad.formatMoneyText(totalAmt / (totalShares || 1), curr)}`;
+    notice.className = "split-total-bar ok";
+  } else {
+    notice.textContent = "";
+    notice.className = "text-[10px] font-mono mb-2 text-ink/60";
+  }
+}
+
+function renderBalanceStrip(balances) {
+  const strip = $("#balanceStrip");
+  if (!strip) return;
+  state.lastBalances = Array.isArray(balances) ? balances : [];
+  if (!state.lastBalances.length) {
+    strip.classList.add("hidden");
+    strip.innerHTML = "";
+    return;
+  }
+  const chips = state.lastBalances.map((b) => {
+    const net = b.converted_net_balance != null ? b.converted_net_balance : b.net_balance;
+    const curr = b.converted_currency || b.currency || groupCurrency();
+    const tone = net > 0.009 ? "owed" : net < -0.009 ? "owe" : "settled";
+    const label = net > 0.009 ? "is owed" : net < -0.009 ? "owes" : "settled";
+    const amount = Math.abs(net) < 0.005 ? ShareSquad.formatMoneyText(0, curr) : ShareSquad.formatMoneyText(Math.abs(net), curr);
+    const mine = Number(b.member_id) === Number(state.myMemberId) ? " is-me" : "";
+    return `<button type="button" class="balance-chip ${tone}${mine}" data-tab-jump="balances" title="${ShareSquad.escapeHtml(b.name)} ${label} ${amount}">
+      <span class="balance-chip-name">${ShareSquad.escapeHtml(b.name)}</span>
+      <span class="balance-chip-amt">${tone === "settled" ? "✓" : (tone === "owed" ? "+" : "−")}${tone === "settled" ? "" : amount}</span>
+    </button>`;
+  }).join("");
+  strip.innerHTML = `<div class="balance-strip-label">This month</div><div class="balance-strip-row">${chips}</div>`;
+  strip.classList.remove("hidden");
+  strip.querySelectorAll("[data-tab-jump]").forEach((btn) => {
+    btn.addEventListener("click", () => switchTab("balances"));
+  });
+}
+
+function syncSettlementModeUI() {
+  $$("#settlementModeSelector .split-type-pill").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.settlementMode === state.settlementMode);
+  });
+  const help = $("#settlementModeHelp");
+  if (help) {
+    help.textContent = state.settlementMode === "simplified"
+      ? "Fewest payments nets all balances into the smallest transfer list."
+      : "Expense-aware keeps transfers aligned with who shared each bill.";
   }
 }
 
@@ -563,9 +645,10 @@ async function loadExpenses() {
   const memberMap = new Map(state.members.map((m) => [m.id, m.display_name]));
 
   expenses.forEach((e) => {
-    const payerName = memberMap.get(e.payer_member_id) || "Unknown";
+    const payers = payerLines(e);
+    const payerHtml = payers.map((payer) => `<div class="whitespace-nowrap">${ShareSquad.escapeHtml(payer.name)}${payer.amount ? ` <span class="text-ink/55">${ShareSquad.escapeHtml(payer.amount)}</span>` : ""}</div>`).join("");
     const splitNames = e.splits.map((s) => memberMap.get(s.member_id) || "?").join(", ");
-    const catClass = `cat-${(e.category || "General").split(" ")[0]}`;
+    const catClass = ShareSquad.categoryClass(e.category);
 
     // Desktop Row
     const tr = document.createElement("tr");
@@ -575,7 +658,7 @@ async function loadExpenses() {
       <td class="py-2.5 pr-3 text-ink/70">${e.bill_date}</td>
       <td class="py-2.5 pr-3 font-bold text-ink">${ShareSquad.escapeHtml(e.store_name)}</td>
       <td class="py-2.5 pr-3"><span class="category-tag ${catClass}">${ShareSquad.escapeHtml(e.category)}</span></td>
-      <td class="py-2.5 pr-3 text-ink/80">${ShareSquad.escapeHtml(payerName)}</td>
+      <td class="py-2.5 pr-3 text-ink/80">${payerHtml}</td>
       <td class="py-2.5 pr-3 text-ink/60 text-[11px]">${ShareSquad.escapeHtml(e.split_type || "EQUAL")} (${splitNames})</td>
       <td class="py-2.5 pr-3 text-right font-bold text-brand">${ShareSquad.formatMoney(e.total_amount, e.currency || groupCurrency())}</td>
       <td class="py-2.5 text-right">
@@ -601,7 +684,8 @@ async function loadExpenses() {
         <div class="card-amount text-brand">${ShareSquad.formatMoney(e.total_amount, e.currency || groupCurrency())}</div>
       </div>
       <div class="card-meta">
-        <div>${e.bill_date} &bull; Paid by ${ShareSquad.escapeHtml(payerName)}</div>
+        <div>${e.bill_date} &bull; Paid by</div>
+        <div class="mt-1">${payerHtml}</div>
         <div class="text-[10px] text-ink/40 mt-0.5">Split: ${splitNames}</div>
       </div>
       <div class="card-actions">
@@ -626,15 +710,30 @@ async function loadExpenses() {
     btn.addEventListener("click", async () => {
       const name = btn.dataset.name;
       const id = Number(btn.dataset.id);
-      if (!await ShareSquad.confirmDialog({ title: `Delete “${name}”?`, message: "This expense will be deleted and every member's balance will update.", confirmLabel: "Delete expense" })) return;
-      try {
-        const override = state.myRole === "owner" ? "?owner_override=true" : "";
-        await ShareSquad.api(`/groups/${gid()}/expenses/${id}${override}`, { method: "DELETE" });
-        ShareSquad.showToast("Expense deleted", "info");
-        await loadExpenses();
-      } catch (err) {
-        ShareSquad.showToast(err.message, "error");
-      }
+      if (!await ShareSquad.confirmDialog({
+        title: `Delete “${name}”?`,
+        message: "This expense will be removed and balances will update. You can undo for a few seconds.",
+        confirmLabel: "Delete expense",
+      })) return;
+      const override = state.myRole === "owner" ? "?owner_override=true" : "";
+      ShareSquad.runWithUndo({
+        message: `Expense “${name}” deleted`,
+        onHide: () => {
+          state.currentExpenses = state.currentExpenses.filter((x) => x.id !== id);
+          $$(`.delete-exp[data-id="${id}"]`).forEach((el) => {
+            el.closest("tr")?.remove();
+            el.closest(".bb-mobile-card")?.remove();
+          });
+          if (!state.currentExpenses.length) $("#expensesEmpty")?.classList.remove("hidden");
+        },
+        onUndo: () => loadExpenses(),
+        onCommit: async () => {
+          await ShareSquad.api(`/groups/${gid()}/expenses/${id}${override}`, { method: "DELETE" });
+          if (typeof loadBalances === "function") {
+            try { await loadBalances(); } catch (_) {}
+          }
+        },
+      });
     });
   });
 
@@ -647,11 +746,20 @@ function startEditExpense(exp) {
   $("#extractionPanelTitle").textContent = "Edit Expense";
   $("#f_store").value = exp.store_name;
   $("#f_date").value = exp.bill_date;
+  $("#f_date")._flatpickr?.setDate(exp.bill_date, true);
+  ShareSquad.clampDateInputToToday($("#f_date"));
   $("#f_amount").value = exp.total_amount;
   ShareSquad.fillCurrencySelect($("#f_currency"), exp.currency || groupCurrency());
   syncExpenseCurrencyUI();
-  $("#f_category").value = exp.category || "General";
+  ShareSquad.fillCategorySelect($("#f_category"), exp.category || "General", { allowCustom: true });
+  if (!ShareSquad.isKnownCategory(exp.category) && $("#f_category_custom")) {
+    $("#f_category_custom").value = exp.category || "";
+  }
+  ShareSquad.clearOcrFieldMarks($("#extractionPanel") || document);
   $("#f_payer").value = exp.payer_member_id;
+  state.payerAmounts = {};
+  (exp.payers || []).forEach((payer) => { state.payerAmounts[payer.member_id] = payer.amount_paid; });
+  setPayMode(exp.payers?.length > 1 ? "multi" : "single");
 
   setSplitType(exp.split_type || "EQUAL");
 
@@ -711,65 +819,92 @@ async function submitComment(event) {
 // ---------------------------------------------------------------------------
 // Save Expense
 // ---------------------------------------------------------------------------
-async function saveExpense() {
-  if (state.isDraft) {
-    const draftMessage = $("#saveMsg");
-    draftMessage.textContent = "Invite at least one member before adding shared expenses.";
-    draftMessage.className = "text-xs mt-2 font-mono balance-negative";
-    return;
-  }
-  const store = $("#f_store").value.trim();
-  const billDate = $("#f_date").value;
-  const totalAmount = parseFloat($("#f_amount").value);
-  const payerId = Number($("#f_payer").value);
-  const category = $("#f_category").value;
+function saveExpenseError(message) {
   const msg = $("#saveMsg");
-
-  if (!store || !billDate || !totalAmount || !payerId) {
-    msg.textContent = "Please fill in all required fields.";
+  if (msg) {
+    msg.textContent = message;
     msg.className = "text-xs mt-2 font-mono balance-negative";
-    return;
   }
+  ShareSquad.showToast(message, "error");
+}
 
-  let splitDetails = [];
-  let splitWith = [];
+function readExpenseBillDate() {
+  return ShareSquad.clampDateInputToToday($("#f_date"));
+}
 
-  if (state.splitType === "EQUAL") {
-    splitWith = Array.from(state.selectedSplit);
-    if (!splitWith.length) {
-      msg.textContent = "Select at least one member to split with.";
-      msg.className = "text-xs mt-2 font-mono balance-negative";
-      return;
-    }
-  } else {
-    state.members.forEach((m) => {
-      const val = state.splitValues[m.id];
-      if (val !== undefined && val > 0) {
-        splitDetails.push({ member_id: m.id, value: val });
-      }
-    });
-    if (!splitDetails.length) {
-      msg.textContent = "Enter split proportions for group members.";
-      msg.className = "text-xs mt-2 font-mono balance-negative";
-      return;
-    }
-  }
-
-  const payload = {
-    upload_id: state.currentUploadId || null,
-    store_name: store,
-    bill_date: billDate,
-    total_amount: totalAmount,
-    currency: expenseCurrency(),
-    category: category,
-    split_type: state.splitType,
-    payer_member_id: payerId,
-    split_with: splitWith.length ? splitWith : null,
-    split_details: splitDetails.length ? splitDetails : null,
-    period_key: state.currentPeriod,
-  };
+async function saveExpense() {
+  const msg = $("#saveMsg");
+  if (msg) msg.textContent = "";
 
   try {
+    if (state.isDraft) {
+      saveExpenseError("Invite at least one member before adding shared expenses.");
+      return;
+    }
+
+    const store = ($("#f_store")?.value || "").trim();
+    const billDate = readExpenseBillDate();
+    const totalAmount = parseFloat($("#f_amount")?.value);
+    let payerId = Number($("#f_payer")?.value);
+    let payers = null;
+
+    if (state.payMode === "multi") {
+      payers = [...document.querySelectorAll(".payer-amount")]
+        .map((input) => ({ member_id: Number(input.dataset.member), amount: parseFloat(input.value) || 0 }))
+        .filter((payer) => payer.amount > 0);
+      const paid = Math.round(payers.reduce((sum, payer) => sum + payer.amount, 0) * 100) / 100;
+      const due = Math.round((totalAmount || 0) * 100) / 100;
+      if (payers.length < 2 || paid !== due) {
+        saveExpenseError("Several people must pay, and their amounts must add up to the bill total.");
+        return;
+      }
+      payerId = payers.slice().sort((a, b) => b.amount - a.amount)[0].member_id;
+    }
+
+    const category = ShareSquad.resolveCategoryValue($("#f_category"), $("#f_category_custom"));
+
+    if (!store || !billDate || !(totalAmount > 0) || !payerId) {
+      saveExpenseError("Please fill in merchant, date, amount, and who paid.");
+      return;
+    }
+
+    let splitDetails = [];
+    let splitWith = [];
+
+    if (state.splitType === "EQUAL") {
+      splitWith = Array.from(state.selectedSplit);
+      if (!splitWith.length) {
+        saveExpenseError("Select at least one member to split with.");
+        return;
+      }
+    } else {
+      state.members.forEach((m) => {
+        const val = state.splitValues[m.id];
+        if (val !== undefined && val > 0) {
+          splitDetails.push({ member_id: m.id, value: val });
+        }
+      });
+      if (!splitDetails.length) {
+        saveExpenseError("Enter split proportions for group members.");
+        return;
+      }
+    }
+
+    const payload = {
+      upload_id: state.currentUploadId || null,
+      store_name: store,
+      bill_date: billDate,
+      total_amount: totalAmount,
+      currency: expenseCurrency(),
+      category: category,
+      split_type: state.splitType,
+      payer_member_id: payerId,
+      payers,
+      split_with: splitWith.length ? splitWith : null,
+      split_details: splitDetails.length ? splitDetails : null,
+      period_key: state.currentPeriod,
+    };
+
     if (state.editingExpenseId) {
       await ShareSquad.api(`/groups/${gid()}/expenses/${state.editingExpenseId}${state.myRole === "owner" ? "?owner_override=true" : ""}`, {
         method: "PUT",
@@ -788,8 +923,7 @@ async function saveExpense() {
     await loadPeriods();
     switchTab("expenses");
   } catch (err) {
-    msg.textContent = err.message;
-    msg.className = "text-xs mt-2 font-mono balance-negative";
+    saveExpenseError(err.message || "Could not save expense.");
   }
 }
 
@@ -797,11 +931,14 @@ async function saveExpense() {
 // Balances & Currency Auto-Conversion
 // ---------------------------------------------------------------------------
 async function loadBalances() {
+  const mode = state.settlementMode === "simplified" ? "simplified" : "smart";
   const [balances, settlements, payments] = await Promise.all([
     ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/balances`),
-    ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/settlements`),
+    ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/settlements?mode=${mode}`),
     ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments`),
   ]);
+  renderBalanceStrip(balances);
+  syncSettlementModeUI();
 
   const tbody = $("#balanceBody");
   tbody.innerHTML = "";
@@ -846,7 +983,6 @@ async function loadBalances() {
     setEmpty.classList.remove("hidden");
   } else {
     setEmpty.classList.add("hidden");
-    const settlementActionsOpen = isCurrentPeriodSettled();
     settlements.forEach((s) => {
       fxRate = s.exchange_rate;
       const settleCurr = s.converted_currency || s.currency || baseCurr;
@@ -858,9 +994,6 @@ async function loadBalances() {
 
       const div = document.createElement("div");
       div.className = "p-3 rounded-lg bg-ink/5 flex flex-col gap-1";
-      const pendingPayment = payments.find((payment) => payment.status === "PAID" && Number(payment.payer_member_id) === Number(s.from_member_id) && Number(payment.recipient_member_id) === Number(s.to_member_id));
-      const payerAction = "";
-      const recipientAction = "";
       div.innerHTML = `
         <div class="flex items-center justify-between text-xs font-mono gap-3">
           <span><strong class="text-ink">${ShareSquad.escapeHtml(s.from_name)}</strong> <span class="text-stamp font-bold">&rarr; pays</span> <strong class="text-ink">${ShareSquad.escapeHtml(s.to_name)}</strong></span>
@@ -889,36 +1022,7 @@ async function loadBalances() {
     banner.classList.add("hidden");
   }
 
-  $$(".mark-payment").forEach((button) => button.addEventListener("click", async () => {
-    const amount = Number(prompt(`How much of the ${button.dataset.currency} ${Number(button.dataset.amount).toFixed(2)} balance did you pay?`, button.dataset.amount));
-    if (!Number.isFinite(amount) || amount <= 0) return;
-    if (amount > Number(button.dataset.amount)) return ShareSquad.showToast("A partial payment cannot exceed the remaining balance.", "error");
-    button.disabled = true;
-    button.textContent = "Request sent";
-    try {
-      await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments`, {
-        method: "POST",
-        body: JSON.stringify({ payer_member_id: Number(button.dataset.payer), recipient_member_id: Number(button.dataset.recipient), amount, currency: button.dataset.currency }),
-      });
-      ShareSquad.showToast("Payment request sent to the recipient.", "success");
-      await loadBalances();
-    } catch (err) { ShareSquad.showToast(err.message, "error"); button.disabled = false; button.textContent = "Mark paid - request confirmation"; }
-  }));
-  $$(".mark-received").forEach((button) => button.addEventListener("click", async () => {
-    const amount = Number(prompt(`How much of the ${button.dataset.currency} ${Number(button.dataset.amount).toFixed(2)} balance did you receive?`, button.dataset.amount));
-    if (!Number.isFinite(amount) || amount <= 0) return;
-    if (amount > Number(button.dataset.amount)) return ShareSquad.showToast("A partial payment cannot exceed the remaining balance.", "error");
-    button.disabled = true;
-    button.textContent = "Paid";
-    try {
-      await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments/received`, {
-        method: "POST",
-        body: JSON.stringify({ payer_member_id: Number(button.dataset.payer), recipient_member_id: Number(button.dataset.recipient), amount, currency: button.dataset.currency }),
-      });
-      ShareSquad.showToast("Payment recorded as paid and balances recalculated.", "success");
-      await loadBalances();
-    } catch (err) { ShareSquad.showToast(err.message, "error"); button.disabled = false; button.textContent = "Mark received & settle"; }
-  }));
+  // Keep payment history wiring from previous implementation.
   await loadPaymentHistory(payments);
 }
 
@@ -1001,7 +1105,7 @@ async function fetchLiveRate() {
     $("#customRateInput").value = rate ?? "";
     $("#rateSourceHint").textContent = `Live rate: 1 ${baseCurr} = ${rate} ${targetCurr}`;
   } catch (err) {
-    console.error("Could not fetch rate:", err);
+    console.error("Could not fetch rate");
   }
 }
 
@@ -1044,8 +1148,8 @@ async function loadInsights() {
     const categoryRows = Object.entries(data.category_totals || {}).sort((a, b) => b[1] - a[1]);
     const top = data.largest_expenses || [];
     root.innerHTML = `
-      <div class="insight-kpis"><article class="bb-card"><p class="insight-label">Total spending</p><p class="insight-value">${ShareSquad.formatMoney(data.total_spent, data.currency)}</p><p class="text-xs text-ink/45">${state.currentPeriod}</p></article><article class="bb-card"><p class="insight-label">Top category</p><p class="insight-value text-lg">${ShareSquad.escapeHtml(categoryRows[0]?.[0] || "No expenses")}</p><p class="text-xs text-ink/45">${categoryRows[0] ? ShareSquad.formatMoney(categoryRows[0][1], data.currency) : ""}</p></article></div>
-      <div class="grid md:grid-cols-2 gap-4"><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">By category</h3>${categoryRows.length ? categoryRows.map(([name, amount]) => `<div class="insight-row"><span>${ShareSquad.escapeHtml(name)}</span><strong>${ShareSquad.formatMoney(amount, data.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses in this period.</p>'}</article><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Largest expenses</h3>${top.length ? top.map((expense) => `<div class="insight-row"><span>${ShareSquad.escapeHtml(expense.store_name)}</span><strong>${ShareSquad.formatMoney(expense.total_amount, expense.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses in this period.</p>'}</article></div>`;
+      <div class="insight-kpis"><article class="bb-card"><p class="insight-label">Total spending</p><p class="insight-value">${ShareSquad.formatMoney(data.total_spent, data.currency)}</p><p class="text-xs text-ink/45">${state.currentPeriod}</p></article><article class="bb-card"><p class="insight-label">Top category</p><p class="insight-value text-lg"><span class="category-tag ${ShareSquad.categoryClass(categoryRows[0]?.[0] || "General")}">${ShareSquad.escapeHtml(categoryRows[0]?.[0] || "No expenses")}</span></p><p class="text-xs text-ink/45">${categoryRows[0] ? ShareSquad.formatMoney(categoryRows[0][1], data.currency) : ""}</p></article></div>
+      <div class="grid md:grid-cols-2 gap-4"><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">By category</h3>${categoryRows.length ? categoryRows.map(([name, amount]) => `<div class="insight-row cat-row"><span class="inline-flex items-center gap-2 min-w-0"><span class="category-dot ${ShareSquad.categoryClass(name)}"></span><span class="truncate">${ShareSquad.escapeHtml(name)}</span></span><strong>${ShareSquad.formatMoney(amount, data.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses in this period.</p>'}</article><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Largest expenses</h3>${top.length ? top.map((expense) => `<div class="insight-row cat-row"><span class="inline-flex items-center gap-2 min-w-0"><span class="category-tag ${ShareSquad.categoryClass(expense.category)}">${ShareSquad.escapeHtml(expense.category || "General")}</span><span class="truncate">${ShareSquad.escapeHtml(expense.store_name)}</span></span><strong>${ShareSquad.formatMoney(expense.total_amount, expense.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses in this period.</p>'}</article></div>`;
   } catch (err) { root.innerHTML = `<div class="bb-card balance-negative">${ShareSquad.escapeHtml(err.message)}</div>`; }
 }
 
@@ -1192,15 +1296,24 @@ async function loadMembers() {
 
   list.querySelectorAll(".remove-member").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      if (!await ShareSquad.confirmDialog({ title: `Remove ${btn.dataset.name}?`, message: "Their active-period expenses will be removed. Completed history and reports remain available.", confirmLabel: "Remove member" })) return;
-      try {
-        await ShareSquad.api(`/groups/${gid()}/members/${btn.dataset.id}`, { method: "DELETE" });
-        ShareSquad.showToast(`${btn.dataset.name} was removed`, "success");
-        await loadGroup();
-        await loadMembers();
-      } catch (err) {
-        ShareSquad.showToast(err.message, "error");
-      }
+      const memberId = Number(btn.dataset.id);
+      const memberName = btn.dataset.name;
+      if (!await ShareSquad.confirmDialog({
+        title: `Remove ${memberName}?`,
+        message: "Their active-period expenses will be removed. Completed history remains. You can undo for a few seconds.",
+        confirmLabel: "Remove member",
+      })) return;
+      const row = btn.closest(".member-row");
+      ShareSquad.runWithUndo({
+        message: `${memberName} was removed`,
+        onHide: () => { row?.remove(); },
+        onUndo: async () => { await loadGroup(); await loadMembers(); },
+        onCommit: async () => {
+          await ShareSquad.api(`/groups/${gid()}/members/${memberId}`, { method: "DELETE" });
+          await loadGroup();
+          await loadMembers();
+        },
+      });
     });
   });
 
@@ -1250,17 +1363,36 @@ async function handleReceiptUpload(file) {
     $("#extractionPanel").classList.remove("hidden");
 
     if (data.extraction) {
-      if (data.extraction.store_name) $("#f_store").value = data.extraction.store_name;
-      if (data.extraction.bill_date) $("#f_date").value = data.extraction.bill_date;
-      if (data.extraction.total_amount) $("#f_amount").value = data.extraction.total_amount;
-      if (data.extraction.category) $("#f_category").value = data.extraction.category;
-      ShareSquad.fillCurrencySelect($("#f_currency"), groupCurrency());
+      const ex = data.extraction;
+      ShareSquad.clearOcrFieldMarks($("#extractionPanel") || document);
+      if (ex.store_name) $("#f_store").value = ex.store_name;
+      if (ex.bill_date) {
+        const billDate = ex.bill_date > ShareSquad.todayISODate() ? ShareSquad.todayISODate() : ex.bill_date;
+        $("#f_date").value = billDate;
+        $("#f_date")._flatpickr?.setDate(billDate, true);
+        ShareSquad.clampDateInputToToday($("#f_date"));
+      }
+      if (ex.total_amount) $("#f_amount").value = ex.total_amount;
+      if (ex.category) ShareSquad.fillCategorySelect($("#f_category"), ex.category, { allowCustom: true });
+      ShareSquad.fillCurrencySelect($("#f_currency"), ShareSquad.pickScannedCurrency(ex, groupCurrency()));
       syncExpenseCurrencyUI();
+      ShareSquad.markOcrFields({
+        "#f_store": Boolean(ex.store_name),
+        "#f_date": Boolean(ex.bill_date),
+        "#f_amount": Boolean(ex.total_amount),
+        "#f_category": Boolean(ex.category),
+      });
+      const found = ["Merchant", "Date", "Total", "Category"].filter((label, i) => [ex.store_name, ex.bill_date, ex.total_amount, ex.category][i]);
+      $("#sourceTag").textContent = found.length ? `Scanned · ${found.join(" · ")} found — check before saving` : "Scanned";
+    } else {
+      $("#sourceTag").textContent = "Scanned";
     }
 
-    $("#sourceTag").textContent = "Scanned";
     applyDefaultSplit();
+    renderPayerOptions();
+    setPayMode("single");
     renderSplitOptions();
+    if ($("#saveMsg")) $("#saveMsg").textContent = "";
     const warn = Boolean(data.message);
     ShareSquad.showToast(
       data.message || "Receipt scanned. Please verify and save.",
@@ -1283,6 +1415,7 @@ async function handleReceiptUpload(file) {
   }
 
   ShareSquad.fillAllCurrencySelects();
+  ShareSquad.bindAllCategorySelects();
 
   const storedGid = ShareSquad.getStoredGroupId();
   if (!storedGid) {
@@ -1326,9 +1459,22 @@ async function handleReceiptUpload(file) {
   $$("#splitTypeSelector .split-type-pill").forEach((btn) => {
     btn.addEventListener("click", () => setSplitType(btn.dataset.type));
   });
+  $$("#payModeSelector .split-type-pill").forEach((btn) => {
+    btn.addEventListener("click", () => setPayMode(btn.dataset.payMode));
+  });
+  $$("#settlementModeSelector .split-type-pill").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.settlementMode = btn.dataset.settlementMode === "simplified" ? "simplified" : "smart";
+      localStorage.setItem("sharesquad_settlement_mode", state.settlementMode);
+      syncSettlementModeUI();
+      loadBalances().catch(() => {});
+    });
+  });
+  syncSettlementModeUI();
 
   $("#f_amount").addEventListener("input", () => {
     if (state.splitType !== "EQUAL") renderSplitOptions();
+    if (state.payMode === "multi") renderMultiPayers();
   });
   $("#f_currency")?.addEventListener("change", () => {
     syncExpenseCurrencyUI();
@@ -1344,19 +1490,30 @@ async function handleReceiptUpload(file) {
     $("#previewImg").classList.add("hidden");
     $("#receiptPreviewWrap")?.classList.add("hidden");
     setScanBusy(false);
+    ShareSquad.clearOcrFieldMarks($("#extractionPanel") || document);
     $("#f_store").value = "";
-    $("#f_date").value = new Date().toISOString().split("T")[0];
+    const today = new Date().toISOString().split("T")[0];
+    $("#f_date").value = today;
+    $("#f_date")._flatpickr?.setDate(today, true);
     $("#f_amount").value = "";
-    $("#f_category").value = "Food & Dining";
+    ShareSquad.fillCategorySelect($("#f_category"), "Food & Dining", { allowCustom: true });
+    if ($("#f_category_custom")) $("#f_category_custom").value = "";
     ShareSquad.fillCurrencySelect($("#f_currency"), groupCurrency());
     syncExpenseCurrencyUI();
     applyDefaultSplit();
+    state.payerAmounts = {};
+    renderPayerOptions();
+    setPayMode("single");
     renderSplitOptions();
+    if ($("#saveMsg")) $("#saveMsg").textContent = "";
     requestAnimationFrame(() => { $("#extractionPanel").scrollIntoView({ behavior: "smooth", block: "start" }); setTimeout(() => $("#f_store").focus(), 300); });
   });
 
   $("#cancelEditBtn").addEventListener("click", cancelEdit);
-  $("#saveExpenseBtn").addEventListener("click", saveExpense);
+  $("#saveExpenseBtn")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    saveExpense();
+  });
 
   // File dropzone
   const dropzone = $("#dropzone");
@@ -1549,6 +1706,28 @@ async function handleReceiptUpload(file) {
     window.location.href = "/login.html";
   });
 
+  // Mobile FAB: jump to Add/Scan tab and open manual entry
+  document.getElementById("mobileFab")?.addEventListener("click", () => {
+    switchTab("upload");
+    setTimeout(() => {
+      document.getElementById("manualEntryBtn")?.click();
+    }, 80);
+  });
+
+  // Swipe left/right to navigate between group tabs on touch screens
+  const TAB_ORDER = ["upload", "expenses", "balances", "insights", "activity", "reports", "members"];
+  let _swipeStartX = 0;
+  document.addEventListener("touchstart", (e) => { _swipeStartX = e.touches[0].clientX; }, { passive: true });
+  document.addEventListener("touchend", (e) => {
+    const diff = _swipeStartX - e.changedTouches[0].clientX;
+    if (Math.abs(diff) < 60) return;
+    const active = $$(".tab-btn").find ? Array.from($$(".tab-btn")).find((b) => b.classList.contains("active")) : null;
+    if (!active) return;
+    const idx = TAB_ORDER.indexOf(active.dataset.tab);
+    if (idx === -1) return;
+    const next = diff > 0 ? TAB_ORDER[idx + 1] : TAB_ORDER[idx - 1];
+    if (next) switchTab(next);
+  }, { passive: true });
 
   await loadGroupSettings();
   await loadGroup();

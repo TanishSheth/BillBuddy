@@ -53,11 +53,11 @@ function renderSummary(summary) {
       bar.className = "space-y-1";
       bar.innerHTML = `
         <div class="flex justify-between items-center text-xs font-mono">
-          <span class="font-semibold text-ink">${ShareSquad.escapeHtml(cat)}</span>
+          <span class="inline-flex items-center gap-2 font-semibold text-ink"><span class="category-tag ${ShareSquad.categoryClass(cat)}">${ShareSquad.escapeHtml(cat)}</span></span>
           <span class="text-ink/60">${ShareSquad.formatMoney(amt, currency)} (${pct}%)</span>
         </div>
         <div class="w-full h-2 bg-ink/5 rounded-full overflow-hidden">
-          <div class="h-full bg-brand rounded-full transition-all duration-500" style="width: ${pct}%"></div>
+          <div class="category-bar-fill ${ShareSquad.categoryClass(cat)}" style="width: ${pct}%"></div>
         </div>
       `;
       barsContainer.appendChild(bar);
@@ -85,7 +85,7 @@ function filterAndRenderExpenses() {
   empty.classList.add("hidden");
 
   filtered.forEach((e) => {
-    const catClass = `cat-${(e.category || "General").split(" ")[0]}`;
+    const catClass = ShareSquad.categoryClass(e.category);
 
     const tr = document.createElement("tr");
     tr.className = "border-b border-ink/5 hover:bg-ink/5 transition-colors";
@@ -146,18 +146,31 @@ async function handleExpenseAction(event) {
   }
 
   const name = expense.store_name || btn.dataset.name || "this expense";
-  if (!await ShareSquad.confirmDialog({ title: `Delete “${name}”?`, message: "This personal expense will be permanently deleted.", confirmLabel: "Delete expense" })) return;
-  btn.disabled = true;
-  btn.setAttribute("aria-busy", "true");
-  try {
-    await ShareSquad.api(`/personal/expenses/${id}`, { method: "DELETE" });
-    ShareSquad.showToast("Expense deleted", "success");
-    await loadPersonalSummary($("#monthPicker").value);
-  } catch (err) {
-    btn.disabled = false;
-    btn.removeAttribute("aria-busy");
-    ShareSquad.showToast(err.message || "Could not delete the expense.", "error");
-  }
+  if (!await ShareSquad.confirmDialog({
+    title: `Delete “${name}”?`,
+    message: "This personal expense will be removed. You can undo for a few seconds.",
+    confirmLabel: "Delete expense",
+  })) return;
+  const periodKey = $("#monthPicker").value;
+  ShareSquad.runWithUndo({
+    message: `Expense “${name}” deleted`,
+    onHide: () => {
+      if (currentSummary?.expenses) {
+        currentSummary.expenses = currentSummary.expenses.filter((item) => item.id !== id);
+        currentSummary.expense_count = currentSummary.expenses.length;
+        currentSummary.total_spent = currentSummary.expenses.reduce((sum, item) => sum + Number(item.total_amount || 0), 0);
+        const breakdown = {};
+        currentSummary.expenses.forEach((item) => {
+          const cat = item.category || "General";
+          breakdown[cat] = (breakdown[cat] || 0) + Number(item.total_amount || 0);
+        });
+        currentSummary.category_breakdown = breakdown;
+        renderSummary(currentSummary);
+      }
+    },
+    onUndo: () => loadPersonalSummary(periodKey),
+    onCommit: () => ShareSquad.api(`/personal/expenses/${id}`, { method: "DELETE" }),
+  });
 }
 
 function openExpenseModal(expense = null) {
@@ -172,8 +185,14 @@ function openExpenseModal(expense = null) {
     $("#expenseId").value = expense.id;
     $("#storeName").value = expense.store_name;
     $("#billDate").value = expense.bill_date;
+    $("#billDate")._flatpickr?.setDate(expense.bill_date, true);
+    ShareSquad.clampDateInputToToday($("#billDate"));
     $("#totalAmount").value = expense.total_amount;
-    $("#expenseCategory").value = expense.category || "General";
+    ShareSquad.fillCategorySelect($("#expenseCategory"), expense.category || "General", { allowCustom: true });
+    if (!ShareSquad.isKnownCategory(expense.category) && $("#expenseCategoryCustom")) {
+      $("#expenseCategoryCustom").value = expense.category || "";
+    }
+    ShareSquad.clearOcrFieldMarks($("#expenseModal") || document);
     ShareSquad.fillCurrencySelect($("#expenseCurrency"), expense.currency || "USD");
     $("#expenseNotes").value = expense.notes || "";
     $("#uploadId").value = "";
@@ -186,8 +205,12 @@ function openExpenseModal(expense = null) {
     $("#expenseId").value = "";
     $("#storeName").value = "";
     $("#billDate").value = new Date().toISOString().split("T")[0];
+    $("#billDate")._flatpickr?.setDate($("#billDate").value, true);
+    ShareSquad.clampDateInputToToday($("#billDate"));
     $("#totalAmount").value = "";
-    $("#expenseCategory").value = "Food & Dining";
+    ShareSquad.fillCategorySelect($("#expenseCategory"), "Food & Dining", { allowCustom: true });
+    if ($("#expenseCategoryCustom")) $("#expenseCategoryCustom").value = "";
+    ShareSquad.clearOcrFieldMarks($("#expenseModal") || document);
     ShareSquad.fillCurrencySelect($("#expenseCurrency"), currentSummary?.currency || "USD");
     $("#expenseNotes").value = "";
     $("#uploadId").value = "";
@@ -233,16 +256,29 @@ async function handleReceiptUpload(file) {
     const data = await ShareSquad.uploadReceipt("/personal/receipts/upload", file);
     $("#uploadId").value = data.upload_id;
     if (data.extraction) {
-      if (data.extraction.store_name) $("#storeName").value = data.extraction.store_name;
-      if (data.extraction.bill_date) $("#billDate").value = data.extraction.bill_date;
-      if (data.extraction.total_amount != null && data.extraction.total_amount !== "") {
-        $("#totalAmount").value = data.extraction.total_amount;
+      const ex = data.extraction;
+      ShareSquad.clearOcrFieldMarks($("#expenseModal") || document);
+      if (ex.store_name) $("#storeName").value = ex.store_name;
+      if (ex.bill_date) {
+        const billDate = ex.bill_date > ShareSquad.todayISODate() ? ShareSquad.todayISODate() : ex.bill_date;
+        $("#billDate").value = billDate;
+        $("#billDate")._flatpickr?.setDate(billDate, true);
+        ShareSquad.clampDateInputToToday($("#billDate"));
       }
-      if (data.extraction.category) $("#expenseCategory").value = data.extraction.category;
+      if (ex.total_amount != null && ex.total_amount !== "") {
+        $("#totalAmount").value = ex.total_amount;
+      }
+      if (ex.category) ShareSquad.fillCategorySelect($("#expenseCategory"), ex.category, { allowCustom: true });
       ShareSquad.fillCurrencySelect(
         $("#expenseCurrency"),
-        currentSummary?.currency || "USD"
+        ShareSquad.pickScannedCurrency(ex, currentSummary?.currency || "USD")
       );
+      ShareSquad.markOcrFields({
+        "#storeName": Boolean(ex.store_name),
+        "#billDate": Boolean(ex.bill_date),
+        "#totalAmount": Boolean(ex.total_amount != null && ex.total_amount !== ""),
+        "#expenseCategory": Boolean(ex.category),
+      });
     }
     const warn = Boolean(data.message);
     ShareSquad.showToast(
@@ -269,7 +305,7 @@ async function submitExpenseForm(e) {
     store_name: $("#storeName").value.trim(),
     bill_date: $("#billDate").value,
     total_amount: parseFloat($("#totalAmount").value),
-    category: $("#expenseCategory").value,
+    category: ShareSquad.resolveCategoryValue($("#expenseCategory"), $("#expenseCategoryCustom")),
     currency: $("#expenseCurrency").value,
     notes: $("#expenseNotes").value.trim() || null,
     upload_id: $("#uploadId").value || null,
@@ -304,6 +340,7 @@ async function submitExpenseForm(e) {
   }
 
   ShareSquad.fillAllCurrencySelects();
+  ShareSquad.bindAllCategorySelects();
 
   const initialMonth = getCurrentMonthKey();
   const monthPicker = $("#monthPicker");

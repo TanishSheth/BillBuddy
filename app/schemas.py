@@ -153,6 +153,8 @@ class QuickSplitCreate(BaseModel):
     split_type: str = Field(default="EQUAL", max_length=20)
     payer_value: Optional[float] = None
     payer_account_id: Optional[int] = None
+    # Set only when both people paid part of the same bill. It is the recorded payer's cash.
+    payer_paid_amount: Optional[float] = None
     silent_invite: bool = False
     # A quick split is deliberately a one-to-one expense.  Shared expenses
     # with two or more other people belong in a group.
@@ -191,6 +193,7 @@ class QuickSplitOut(BaseModel):
     category: str
     split_type: str
     payer_share_amount: float
+    payer_paid_amount: Optional[float] = None
     payer_name: str
     payer_account_id: int
     payer_email: Optional[str] = None
@@ -318,6 +321,11 @@ class SplitDetailInput(BaseModel):
     value: Optional[float] = None  # Percentage, exact amount, or share weight
 
 
+class ExpensePayerInput(BaseModel):
+    member_id: int
+    amount: float = Field(gt=0)
+
+
 class ExpenseCreate(BaseModel):
     upload_id: Optional[str] = None
     store_name: str
@@ -327,6 +335,7 @@ class ExpenseCreate(BaseModel):
     category: Optional[str] = "General"
     split_type: Optional[str] = "EQUAL"  # EQUAL, PERCENTAGE, EXACT, SHARES
     payer_member_id: int
+    payers: Optional[List[ExpensePayerInput]] = None
     split_with: Optional[List[int]] = None
     split_details: Optional[List[SplitDetailInput]] = None
     period_key: Optional[str] = None
@@ -340,6 +349,7 @@ class ExpenseUpdate(BaseModel):
     category: Optional[str] = "General"
     split_type: Optional[str] = "EQUAL"
     payer_member_id: int
+    payers: Optional[List[ExpensePayerInput]] = None
     split_with: Optional[List[int]] = None
     split_details: Optional[List[SplitDetailInput]] = None
     period_key: Optional[str] = None
@@ -352,6 +362,12 @@ class SplitOut(BaseModel):
     split_value: Optional[float] = None
 
 
+class ExpensePayerOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    member_id: int
+    amount_paid: float
+
+
 class ExpenseOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -362,6 +378,7 @@ class ExpenseOut(BaseModel):
     category: str = "General"
     split_type: str = "EQUAL"
     payer_member_id: int
+    payers: List[ExpensePayerOut] = []
     image_path: Optional[str]
     created_at: datetime
     splits: List[SplitOut]

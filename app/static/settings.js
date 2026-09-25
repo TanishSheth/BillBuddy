@@ -242,7 +242,7 @@ async function loadGroupSettings(groupId) {
     $("#groupKeyStatus").textContent = settings.has_api_key ? "✓ Group API key configured." : "Using global or server key.";
     toggleGroupVlmFields();
   } catch (err) {
-    console.error("Failed to load group settings:", err);
+    console.error("Failed to load group settings");
   }
 }
 
@@ -321,7 +321,7 @@ async function clearGroupKey() {
   try {
     state.catalog = await ShareSquad.api("/vlm/providers");
   } catch (err) {
-    console.error("Failed to load VLM catalog:", err);
+    console.error("Failed to load VLM catalog");
   }
 
   $("#useOwnVlm").addEventListener("change", toggleGeneralVlmFields);
@@ -369,6 +369,30 @@ async function clearGroupKey() {
       ShareSquad.showToast("Profile photo removed", "success");
     } catch (err) { ShareSquad.showToast(err.message, "error"); }
   });
+
+  function syncThemePicker() {
+    const preference = ShareSquad.getThemePreference();
+    $$(".theme-option").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.theme === preference);
+      btn.setAttribute("aria-pressed", btn.dataset.theme === preference ? "true" : "false");
+    });
+    const msg = $("#themeMsg");
+    if (!msg) return;
+    const resolved = ShareSquad.resolveTheme(preference);
+    msg.textContent = preference === "system"
+      ? `Following system · currently ${resolved}`
+      : `Using ${preference} mode`;
+  }
+
+  $$(".theme-option").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      ShareSquad.setThemePreference(btn.dataset.theme);
+      syncThemePicker();
+      ShareSquad.showToast(`Theme set to ${btn.dataset.theme}`, "success");
+    });
+  });
+  window.addEventListener("sharesquad:theme", syncThemePicker);
+  syncThemePicker();
 
   await loadProfile();
   await loadGeneralSettings();

@@ -51,11 +51,18 @@ function initials(name) {
 function maskEmail(email) {
   const value = String(email || "").trim();
   if (!value) return "";
-  if (value.length <= 7) return "•••";
-  return `${value.slice(0, 3)}•••${value.slice(-4)}`;
+  const at = value.lastIndexOf("@");
+  if (at <= 0 || at === value.length - 1) {
+    if (value.length <= 8) return value;
+    return `${value.slice(0, 4)}••••${value.slice(-4)}`;
+  }
+  const local = value.slice(0, at);
+  const domain = value.slice(at + 1);
+  if (local.length <= 8) return `${local}@${domain}`;
+  return `${local.slice(0, 4)}••••${local.slice(-4)}@${domain}`;
 }
 
-function showToast(msg, type = "info", duration = 3500) {
+function showToast(msg, type = "info", duration = 3500, undoCallback = null) {
   let container = $("#toastContainer");
   if (!container) {
     container = document.createElement("div");
@@ -65,27 +72,121 @@ function showToast(msg, type = "info", duration = 3500) {
   }
 
   const toast = document.createElement("div");
-  const bg = type === "error" ? "bg-red-800 text-white" : type === "success" ? "bg-emerald-700 text-white" : "bg-ink text-white";
-  toast.className = `p-3 rounded-lg shadow-xl text-xs font-mono transition-all transform duration-300 opacity-0 translate-y-2 pointer-events-auto flex items-center justify-between gap-2 ${bg}`;
-    toast.innerHTML = `<span>${escapeHtml(String(msg).slice(0, 180))}</span><button class="opacity-70 hover:opacity-100 font-bold">&times;</button>`;
-  
-  toast.querySelector("button").onclick = () => {
+  const kind = type === "error" ? "toast-error" : type === "success" ? "toast-success" : "toast-info";
+  toast.className = `toast-msg ${kind} p-3 rounded-lg shadow-xl text-xs font-mono transition-all transform duration-300 opacity-0 translate-y-2 pointer-events-auto flex items-center justify-between gap-2`;
+  const undoHtml = undoCallback ? `<button type="button" class="underline font-bold whitespace-nowrap opacity-90 hover:opacity-100 undo-toast-btn">Undo</button>` : "";
+  toast.innerHTML = `<span>${escapeHtml(String(msg).slice(0, 180))}</span><div class="flex items-center gap-2 shrink-0">${undoHtml}<button type="button" class="opacity-70 hover:opacity-100 font-bold toast-close-btn" aria-label="Dismiss">&times;</button></div>`;
+
+  let closed = false;
+  let remaining = duration;
+  let startedAt = Date.now();
+  let timer = null;
+
+  const dismiss = () => {
+    if (closed) return;
+    closed = true;
+    clearTimeout(timer);
     toast.classList.add("opacity-0", "translate-y-2");
     setTimeout(() => toast.remove(), 300);
   };
 
+  const schedule = () => {
+    clearTimeout(timer);
+    startedAt = Date.now();
+    timer = setTimeout(dismiss, Math.max(remaining, 0));
+  };
+
+  toast.querySelector(".toast-close-btn").onclick = dismiss;
+  if (undoCallback) {
+    toast.querySelector(".undo-toast-btn").onclick = () => {
+      Promise.resolve(undoCallback()).catch(() => {});
+      dismiss();
+    };
+    toast.addEventListener("mouseenter", () => {
+      remaining -= Date.now() - startedAt;
+      clearTimeout(timer);
+    });
+    toast.addEventListener("mouseleave", schedule);
+  }
+
   container.appendChild(toast);
-  requestAnimationFrame(() => {
-    toast.classList.remove("opacity-0", "translate-y-2");
+  requestAnimationFrame(() => { toast.classList.remove("opacity-0", "translate-y-2"); });
+  schedule();
+  return { dismiss, el: toast };
+}
+
+const pendingUndoCommits = new Set();
+
+/**
+ * Optimistic delete with Undo. UI hides immediately; the API delete runs after
+ * the toast window unless the user taps Undo (or the page is unloading, in
+ * which case pending deletes are flushed).
+ */
+function runWithUndo({
+  message,
+  duration = 7000,
+  onHide,
+  onUndo,
+  onCommit,
+} = {}) {
+  let settled = false;
+  let timer = null;
+  let remaining = duration;
+  let startedAt = Date.now();
+
+  const settleCommit = async () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    pendingUndoCommits.delete(handle);
+    try {
+      await onCommit?.();
+    } catch (err) {
+      try { await onUndo?.(); } catch (_) {}
+      showToast(err?.message || "Could not complete delete", "error");
+    }
+  };
+
+  const settleUndo = async () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    pendingUndoCommits.delete(handle);
+    try { await onUndo?.(); } catch (_) {}
+  };
+
+  const handle = { commit: settleCommit };
+  pendingUndoCommits.add(handle);
+
+  try { onHide?.(); } catch (_) {}
+  try { haptic(30); } catch (_) {}
+
+  const toast = showToast(message, "info", duration, settleUndo);
+  timer = setTimeout(settleCommit, duration);
+
+  // Keep commit timer in sync with toast hover pause.
+  toast?.el?.addEventListener("mouseenter", () => {
+    remaining -= Date.now() - startedAt;
+    clearTimeout(timer);
+  });
+  toast?.el?.addEventListener("mouseleave", () => {
+    startedAt = Date.now();
+    if (!settled) timer = setTimeout(settleCommit, Math.max(remaining, 0));
   });
 
-  setTimeout(() => {
-    if (toast.parentElement) {
-      toast.classList.add("opacity-0", "translate-y-2");
-      setTimeout(() => toast.remove(), 300);
-    }
-  }, duration);
+  return handle;
 }
+
+function flushPendingUndos() {
+  [...pendingUndoCommits].forEach((entry) => {
+    try { entry.commit(); } catch (_) {}
+  });
+}
+
+try {
+  window.addEventListener("pagehide", flushPendingUndos);
+  window.addEventListener("beforeunload", flushPendingUndos);
+} catch (_) {}
 
 // A shared, accessible replacement for browser confirm() dialogs. Keeping it
 // here means every destructive workflow speaks and behaves the same way.
@@ -221,7 +322,13 @@ function initSearchPalette() {
   overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
 }
 
-document.addEventListener("DOMContentLoaded", () => setTimeout(() => { initGlobalNotifications(); initMobileQuickAction(); initSearchPalette(); if (!/(^|\/)index\.html$|\/$/.test(window.location.pathname)) $("#logoutBtn")?.remove(); }, 0));
+document.addEventListener("DOMContentLoaded", () => setTimeout(() => {
+  initGlobalNotifications();
+  initMobileQuickAction();
+  initSearchPalette();
+  initDatePickers();
+  if (!/(^|\/)index\.html$|\/$/.test(window.location.pathname)) $("#logoutBtn")?.remove();
+}, 0));
 
 async function api(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
@@ -510,6 +617,225 @@ function bindReceiptCamera(opts) {
   });
 }
 
+const CATEGORIES = [
+  { id: "Food & Dining", slug: "Food", label: "Food & Dining" },
+  { id: "Groceries", slug: "Groceries", label: "Groceries" },
+  { id: "Travel", slug: "Travel", label: "Travel" },
+  { id: "Transit", slug: "Transit", label: "Transit" },
+  { id: "Housing", slug: "Housing", label: "Housing" },
+  { id: "Utilities", slug: "Utilities", label: "Utilities" },
+  { id: "Entertainment", slug: "Entertainment", label: "Entertainment" },
+  { id: "Shopping", slug: "Shopping", label: "Shopping" },
+  { id: "Healthcare", slug: "Healthcare", label: "Healthcare" },
+  { id: "General", slug: "General", label: "General / Other" },
+];
+const CUSTOM_CATEGORY_VALUE = "__custom__";
+
+function isKnownCategory(name) {
+  const value = String(name || "").trim();
+  return CATEGORIES.some((cat) => cat.id === value || cat.label === value);
+}
+
+function categorySlug(name) {
+  const value = String(name || "General").trim();
+  const match = CATEGORIES.find((cat) => cat.id === value || cat.label === value || value.startsWith(cat.slug));
+  if (match) return match.slug;
+  const cleaned = value.replace(/[^a-zA-Z0-9]+/g, "").slice(0, 12) || "Custom";
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
+function categoryClass(name) {
+  const slug = categorySlug(name);
+  return CATEGORIES.some((cat) => cat.slug === slug) ? `cat-${slug}` : "cat-General";
+}
+
+function fillCategorySelect(select, selected = "", { includeAll = false, allLabel = "All Categories", allowCustom = !includeAll } = {}) {
+  if (!select) return;
+  const current = selected || select.value || (includeAll ? "All" : "Food & Dining");
+  const options = includeAll
+    ? [{ id: "All", slug: "", label: allLabel }, ...CATEGORIES]
+    : [...CATEGORIES];
+  if (allowCustom && !includeAll) {
+    options.push({ id: CUSTOM_CATEGORY_VALUE, slug: "General", label: "Custom…" });
+  }
+  const known = options.some((cat) => cat.id === current);
+  const useCustom = allowCustom && !includeAll && current && current !== "All" && !isKnownCategory(current);
+  select.innerHTML = options.map((cat) => {
+    const cls = cat.slug ? ` class="${escapeHtml(categoryClass(cat.id === CUSTOM_CATEGORY_VALUE ? "General" : cat.id))}"` : "";
+    return `<option value="${escapeHtml(cat.id)}"${cls}>${escapeHtml(cat.label)}</option>`;
+  }).join("");
+  select.value = useCustom ? CUSTOM_CATEGORY_VALUE : (known ? current : options[0].id);
+  const customInput = document.getElementById(select.dataset.customInput || "") || select.parentElement?.querySelector("[data-category-custom], #f_category_custom, #expenseCategoryCustom, #qsCategoryCustom");
+  const customWrap = customInput?.closest("#customCategoryWrap, .custom-category-wrap") || document.getElementById(select.dataset.customWrap || "");
+  if (customInput) {
+    if (useCustom) customInput.value = current;
+    if (customWrap) customWrap.classList.toggle("hidden", select.value !== CUSTOM_CATEGORY_VALUE);
+  }
+  syncCategorySelect(select);
+}
+
+function syncCategorySelect(select) {
+  if (!select) return;
+  select.classList.remove(...CATEGORIES.map((cat) => `cat-${cat.slug}`), "cat-General");
+  const value = select.value;
+  if (value && value !== "All" && value !== CUSTOM_CATEGORY_VALUE) select.classList.add(categoryClass(value));
+  else if (value === CUSTOM_CATEGORY_VALUE) select.classList.add("cat-General");
+  const customInput = document.getElementById(select.dataset.customInput || "") || select.parentElement?.querySelector("[data-category-custom], #f_category_custom, #expenseCategoryCustom, #qsCategoryCustom");
+  const customWrap = customInput?.closest("#customCategoryWrap, .custom-category-wrap") || document.getElementById(select.dataset.customWrap || "");
+  if (customWrap) customWrap.classList.toggle("hidden", value !== CUSTOM_CATEGORY_VALUE);
+}
+
+function resolveCategoryValue(select, customInput) {
+  if (!select) return "General";
+  if (select.value === CUSTOM_CATEGORY_VALUE) {
+    const custom = (customInput?.value || "").trim().slice(0, 50);
+    return custom || "General";
+  }
+  return select.value || "General";
+}
+
+function bindCategorySelect(select, { includeAll = false, allowCustom = !includeAll } = {}) {
+  if (!select || select.dataset.categoryBound === "1") return;
+  select.dataset.categoryBound = "1";
+  fillCategorySelect(select, select.value, { includeAll, allowCustom });
+  select.addEventListener("change", () => syncCategorySelect(select));
+}
+
+function bindAllCategorySelects(root = document) {
+  root.querySelectorAll("select#f_category, select#expenseCategory, select#qsCategory, select[data-category-select]").forEach((select) => {
+    bindCategorySelect(select, { includeAll: false, allowCustom: true });
+  });
+  root.querySelectorAll("select#groupCategoryFilter, select#categoryFilter").forEach((select) => {
+    bindCategorySelect(select, { includeAll: true, allowCustom: false });
+  });
+}
+
+function markOcrFields(fieldMap = {}) {
+  Object.entries(fieldMap).forEach(([selector, filled]) => {
+    const el = $(selector);
+    if (!el) return;
+    el.classList.toggle("ocr-filled", Boolean(filled));
+    el.classList.toggle("ocr-defaulted", !filled);
+  });
+}
+
+function clearOcrFieldMarks(root = document) {
+  root.querySelectorAll(".ocr-filled, .ocr-defaulted").forEach((el) => {
+    el.classList.remove("ocr-filled", "ocr-defaulted");
+  });
+}
+
+function todayISODate() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function clampDateInputToToday(input) {
+  if (!input) return "";
+  const today = todayISODate();
+  if (!input.max || input.max > today) input.max = today;
+  const raw = (input.value || "").trim();
+  if (raw && raw > today) {
+    input.value = today;
+    input._flatpickr?.setDate(today, true);
+  }
+  return input.value;
+}
+
+function initDatePickers(root = document) {
+  const inputs = root.querySelectorAll('input[type="date"], input[data-datepicker]');
+  if (!inputs.length) return;
+  const today = todayISODate();
+  const enhance = () => {
+    if (!window.flatpickr) return false;
+    inputs.forEach((input) => {
+      if (!input.max || input.max > today) input.max = today;
+      clampDateInputToToday(input);
+      if (input._flatpickr) {
+        input._flatpickr.set("maxDate", today);
+        return;
+      }
+      window.flatpickr(input, {
+        dateFormat: "Y-m-d",
+        allowInput: true,
+        disableMobile: true,
+        maxDate: today,
+        defaultDate: input.value || undefined,
+        onChange(selectedDates, dateStr) {
+          if (dateStr && dateStr > today) {
+            input._flatpickr?.setDate(today, false);
+            input.value = today;
+          }
+        },
+        onClose() {
+          clampDateInputToToday(input);
+        },
+      });
+    });
+    return true;
+  };
+  if (enhance()) return;
+  if (document.querySelector('script[data-flatpickr]')) {
+    const timer = setInterval(() => { if (enhance()) clearInterval(timer); }, 200);
+    setTimeout(() => clearInterval(timer), 8000);
+    return;
+  }
+  const css = document.createElement("link");
+  css.rel = "stylesheet";
+  css.href = "https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css";
+  document.head.appendChild(css);
+  const script = document.createElement("script");
+  script.src = "https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js";
+  script.dataset.flatpickr = "1";
+  script.onload = enhance;
+  document.head.appendChild(script);
+}
+
+function haptic(pattern = 30) {
+  try { navigator.vibrate?.(pattern); } catch (_) {}
+}
+
+const THEME_KEY = "sharesquad_theme";
+
+function getThemePreference() {
+  const value = localStorage.getItem(THEME_KEY);
+  return value === "light" || value === "dark" || value === "system" ? value : "system";
+}
+
+function resolveTheme(preference = getThemePreference()) {
+  if (preference === "light") return "light";
+  if (preference === "dark") return "dark";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function applyTheme(preference = getThemePreference()) {
+  const resolved = resolveTheme(preference);
+  document.documentElement.classList.toggle("theme-dark", resolved === "dark");
+  document.documentElement.classList.toggle("theme-light", resolved === "light");
+  document.documentElement.dataset.theme = resolved;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", resolved === "dark" ? "#0B1220" : "#F8FAFC");
+  return resolved;
+}
+
+function setThemePreference(preference) {
+  const next = preference === "light" || preference === "dark" || preference === "system" ? preference : "system";
+  localStorage.setItem(THEME_KEY, next);
+  applyTheme(next);
+  window.dispatchEvent(new CustomEvent("sharesquad:theme", { detail: { preference: next, resolved: resolveTheme(next) } }));
+  return next;
+}
+
+applyTheme();
+try {
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (getThemePreference() === "system") applyTheme("system");
+  });
+} catch (_) {}
+
 window.ShareSquad = {
   $,
   $$,
@@ -521,6 +847,7 @@ window.ShareSquad = {
   setStoredGroupId,
   removeStoredGroupId,
   showToast,
+  runWithUndo,
   confirmDialog,
   renderSkeleton,
   initGlobalNotifications,
@@ -546,4 +873,23 @@ window.ShareSquad = {
   pickScannedCurrency,
   fillAllCurrencySelects,
   downloadBlob,
+  haptic,
+  CATEGORIES,
+  categorySlug,
+  categoryClass,
+  isKnownCategory,
+  fillCategorySelect,
+  syncCategorySelect,
+  resolveCategoryValue,
+  bindCategorySelect,
+  bindAllCategorySelects,
+  markOcrFields,
+  clearOcrFieldMarks,
+  initDatePickers,
+  todayISODate,
+  clampDateInputToToday,
+  getThemePreference,
+  setThemePreference,
+  applyTheme,
+  resolveTheme,
 };

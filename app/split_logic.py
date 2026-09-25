@@ -179,9 +179,11 @@ def compute_balances(
     }
 
     for exp in expenses:
-        payer_id = exp["payer_id"]
-        if payer_id in balances:
-            balances[payer_id]["total_paid"] += Decimal(str(exp["total_amount"]))
+        payments = exp.get("payments") or [{"payer_id": exp["payer_id"], "amount": exp["total_amount"]}]
+        for payment in payments:
+            payer_id = payment["payer_id"]
+            if payer_id in balances:
+                balances[payer_id]["total_paid"] += Decimal(str(payment["amount"]))
         for split in exp["splits"]:
             mid = split["user_id"]
             if mid in balances:
@@ -311,14 +313,16 @@ def graph_constrained_settlements(
 
     edges = set()
     for exp in expenses:
-        payer = exp["payer_id"]
-        if payer not in lenders:
-            continue
-        for split in exp.get("splits") or []:
-            participant = split["user_id"]
-            owed = int(round(float(split.get("share_amount") or 0) * 100))
-            if participant in debtors and owed > 0:
-                edges.add((participant, payer))
+        payments = exp.get("payments") or [{"payer_id": exp["payer_id"], "amount": exp["total_amount"]}]
+        for payment in payments:
+            payer = payment["payer_id"]
+            if payer not in lenders:
+                continue
+            for split in exp.get("splits") or []:
+                participant = split["user_id"]
+                owed = int(round(float(split.get("share_amount") or 0) * 100))
+                if participant in debtors and participant != payer and owed > 0:
+                    edges.add((participant, payer))
 
     # Edmonds-Karp on source -> debtors -> eligible creditors -> sink.
     source, sink = "source", "sink"

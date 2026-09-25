@@ -177,8 +177,23 @@ class Expense(Base):
 
     period = relationship("MonthlyPeriod", back_populates="expenses")
     payer = relationship("GroupMember", back_populates="expenses_paid")
+    payers = relationship("ExpensePayer", back_populates="expense", cascade="all, delete-orphan")
     splits = relationship("ExpenseSplit", back_populates="expense", cascade="all, delete-orphan")
     comments = relationship("ExpenseComment", back_populates="expense", cascade="all, delete-orphan")
+
+
+class ExpensePayer(Base):
+    """One contribution toward a bill. A single-payer expense has no rows here."""
+    __tablename__ = "expense_payers"
+    __table_args__ = (UniqueConstraint("expense_id", "member_id", name="uq_expense_payer"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    expense_id = Column(Integer, ForeignKey("expenses.id", ondelete="CASCADE"), nullable=False, index=True)
+    member_id = Column(Integer, ForeignKey("group_members.id", ondelete="CASCADE"), nullable=False)
+    amount_paid = Column(Numeric(10, 2), nullable=False)
+
+    expense = relationship("Expense", back_populates="payers")
+    member = relationship("GroupMember")
 
 
 class ExpenseSplit(Base):
@@ -290,6 +305,8 @@ class QuickSplit(Base):
     category = Column(String(50), default="General")
     split_type = Column(String(20), default="EQUAL", nullable=False)
     payer_share_amount = Column(Numeric(10, 2), default=0, nullable=False)
+    # Amount the recorded payer actually handed over. Empty means they paid the full bill.
+    payer_paid_amount = Column(Numeric(10, 2), nullable=True)
     created_by_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True)
     payer_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     invite_code = Column(String(64), unique=True, nullable=False, default=generate_invite_code)

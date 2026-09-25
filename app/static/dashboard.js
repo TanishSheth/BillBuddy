@@ -77,7 +77,10 @@ function renderQuickSplits(_splits, contacts = [], settlementsByFriend = new Map
     const personName = other?.display_name || ShareSquad.maskEmail(other?.email) || "Friend";
     const key = other?.account_id || other?.id || `split-${split.id}`;
     const entry = people.get(key) || { id: other?.account_id || other?.id || null, name: personName, balance: 0, count: 0, currency: split.currency || "USD", splitId: split.id };
-    const share = Number(split.participants?.find((person) => split.is_payer ? !person.is_me : person.is_me)?.share_amount || 0);
+    const personShare = Number(split.participants?.find((person) => split.is_payer ? !person.is_me : person.is_me)?.share_amount || 0);
+    const billTotal = Number(split.total_amount || 0);
+    const payerPaid = split.payer_paid_amount == null ? billTotal : Number(split.payer_paid_amount);
+    const share = split.is_payer ? payerPaid - Number(split.payer_share_amount || 0) : (billTotal - payerPaid) - personShare;
     const monthKey = String(split.bill_date).slice(0, 7);
     const settlement = settlementsByFriend.get(entry.id)?.get(monthKey);
     const wasIncludedInSettlement = settlement?.status === "SETTLED"
@@ -103,10 +106,31 @@ function renderQuickSplits(_splits, contacts = [], settlementsByFriend = new Map
   empty.classList.add("hidden");
   grid.innerHTML = [...people.values()].map((person) => {
     const amount = ShareSquad.formatMoney(Math.abs(person.balance), person.currency);
-    const status = person.balance > 0 ? `${ShareSquad.escapeHtml(person.name)} owes you ${amount}` : person.balance < 0 ? `You owe ${ShareSquad.escapeHtml(person.name)} ${amount}` : "No one owes anything";
-    const tone = person.balance > 0 ? "bg-green-600/10 border-green-700/30" : person.balance < 0 ? "bg-red-600/10 border-red-700/30" : "bg-slate-500/[0.04] border-slate-400/20";
+    const isPositive = person.balance > 0;
+    const isNegative = person.balance < 0;
+    const status = isPositive
+      ? `${ShareSquad.escapeHtml(person.name)} owes you ${amount}`
+      : isNegative
+        ? `You owe ${ShareSquad.escapeHtml(person.name)} ${amount}`
+        : "Settled up";
+    const leftBorder = isPositive ? "border-l-emerald-500" : isNegative ? "border-l-red-500" : "border-l-slate-300";
+    const amtCls     = isPositive ? "text-emerald-700"    : isNegative ? "text-red-700"      : "text-slate-500";
+    const badgeCls   = isPositive ? "bg-emerald-500 text-white" : isNegative ? "bg-red-500 text-white" : "bg-slate-200 text-slate-600";
+    const icon       = isPositive ? "↓ they owe"          : isNegative ? "↑ you owe"         : "✓ settled";
     const href = person.id ? `/friends.html?friend=${encodeURIComponent(person.id)}` : `/quick-split.html?id=${encodeURIComponent(person.splitId)}`;
-    return `<div class="bb-card friend-split-card flex flex-col justify-between gap-3 border-l-4 border-brand/60 cursor-pointer ${tone}" data-href="${href}" role="link" tabindex="0"><div><p class="font-mono text-[10px] tracking-widest text-brand">FRIEND TOTAL</p><h3 class="font-mono font-bold text-base leading-tight text-ink mt-1">${ShareSquad.escapeHtml(person.name)}</h3><p class="text-sm font-semibold mt-3">${status}</p><p class="text-[10px] font-mono mt-2 text-ink/55">${person.hasConsolidatedBalance ? "Group and direct balances combined" : `${person.count} direct bill${person.count === 1 ? "" : "s"} in history`}</p></div><a class="bb-btn-secondary w-full !py-1.5 text-[11px]" href="${href}"><i data-lucide="receipt-text" class="w-3.5 h-3.5"></i> Open friend details</a></div>`;
+    return `<div class="bb-card friend-split-card flex flex-col justify-between gap-3 border-l-4 cursor-pointer ${leftBorder}" style="border-top-color:var(--line);border-right-color:var(--line);border-bottom-color:var(--line);" data-href="${href}" role="link" tabindex="0">
+  <div>
+    <div class="flex items-center justify-between gap-2">
+      <p class="font-mono text-[10px] tracking-widest text-brand uppercase">Friend</p>
+      <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${badgeCls}">${icon}</span>
+    </div>
+    <h3 class="font-mono font-bold text-base leading-tight text-ink mt-2">${ShareSquad.escapeHtml(person.name)}</h3>
+    <p class="text-xl font-bold font-mono mt-2 ${amtCls}">${isPositive || isNegative ? amount : "—"}</p>
+    <p class="text-xs mt-1 text-ink/60">${status}</p>
+    <p class="text-[10px] font-mono mt-2 text-ink/40">${person.hasConsolidatedBalance ? "Groups + direct bills combined" : `${person.count} direct bill${person.count === 1 ? "" : "s"} in history`}</p>
+  </div>
+  <a class="bb-btn-secondary w-full !py-1.5 text-[11px]" href="${href}"><i data-lucide="receipt-text" class="w-3.5 h-3.5"></i> Open details</a>
+</div>`;
   }).join("");
   grid.querySelectorAll(".friend-split-card").forEach((card) => {
     const open = () => { window.location.href = card.dataset.href; };
@@ -116,11 +140,14 @@ function renderQuickSplits(_splits, contacts = [], settlementsByFriend = new Map
   lucide.createIcons();
 }
 
+let dashboardGroups = [];
+
 function renderGroups(groups) {
+  dashboardGroups = Array.isArray(groups) ? groups : [];
   const grid = $("#groupsGrid");
   const empty = $("#emptyGroups");
 
-  if (!groups || !groups.length) {
+  if (!dashboardGroups.length) {
     grid.innerHTML = "";
     empty.classList.remove("hidden");
     lucide.createIcons();
@@ -128,7 +155,7 @@ function renderGroups(groups) {
   }
 
   empty.classList.add("hidden");
-  grid.innerHTML = groups
+  grid.innerHTML = dashboardGroups
     .map(
       (g) => `<div class="bb-card group-card flex flex-col justify-between gap-3 cursor-pointer" data-id="${g.id}" role="link" tabindex="0">
         <div>
@@ -185,14 +212,18 @@ function renderGroups(groups) {
     btn.addEventListener("click", async () => {
       const name = btn.dataset.name;
       const id = Number(btn.dataset.id);
-      if (!await ShareSquad.confirmDialog({ title: `Delete “${name}”?`, message: "This permanently removes the group, its expenses, reports, and members.", confirmLabel: "Delete group" })) return;
-      try {
-        await ShareSquad.api(`/groups/${id}`, { method: "DELETE" });
-        ShareSquad.showToast(`Group "${name}" deleted`, "info");
-        await loadDashboard();
-      } catch (err) {
-        ShareSquad.showToast(err.message, "error");
-      }
+      if (!await ShareSquad.confirmDialog({
+        title: `Delete “${name}”?`,
+        message: "This removes the group, its expenses, reports, and members. You can undo for a few seconds.",
+        confirmLabel: "Delete group",
+      })) return;
+      const snapshot = dashboardGroups.slice();
+      ShareSquad.runWithUndo({
+        message: `Group “${name}” deleted`,
+        onHide: () => renderGroups(dashboardGroups.filter((g) => g.id !== id)),
+        onUndo: () => renderGroups(snapshot),
+        onCommit: () => ShareSquad.api(`/groups/${id}`, { method: "DELETE" }),
+      });
     });
   });
 
@@ -200,14 +231,18 @@ function renderGroups(groups) {
     btn.addEventListener("click", async () => {
       const name = btn.dataset.name;
       const id = Number(btn.dataset.id);
-      if (!await ShareSquad.confirmDialog({ title: `Leave “${name}”?`, message: "Your active expenses in this group will be removed and you will lose access.", confirmLabel: "Leave group" })) return;
-      try {
-        await ShareSquad.api(`/groups/${id}/leave`, { method: "POST" });
-        ShareSquad.showToast(`Left group "${name}"`, "info");
-        await loadDashboard();
-      } catch (err) {
-        ShareSquad.showToast(err.message, "error");
-      }
+      if (!await ShareSquad.confirmDialog({
+        title: `Leave “${name}”?`,
+        message: "Your active expenses in this group will be removed and you will lose access. You can undo for a few seconds.",
+        confirmLabel: "Leave group",
+      })) return;
+      const snapshot = dashboardGroups.slice();
+      ShareSquad.runWithUndo({
+        message: `Left group “${name}”`,
+        onHide: () => renderGroups(dashboardGroups.filter((g) => g.id !== id)),
+        onUndo: () => renderGroups(snapshot),
+        onCommit: () => ShareSquad.api(`/groups/${id}/leave`, { method: "POST" }),
+      });
     });
   });
 }
@@ -250,7 +285,7 @@ async function loadDashboard() {
     renderQuickSplits(quickSplits, friends, settlementsByFriend, consolidatedByFriend);
     renderOnboarding(groups, friends, quickSplits);
   } catch (err) {
-    console.error("Failed to load dashboard:", err);
+    console.error("Failed to load dashboard");
     ShareSquad.showToast(err.message || "Could not load groups", "error");
   }
 }

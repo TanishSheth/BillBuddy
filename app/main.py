@@ -55,7 +55,7 @@ from .settings_service import (
     update_account_settings,
     update_group_settings,
 )
-from .split_logic import calculate_splits, compute_balances, graph_constrained_settlements
+from .split_logic import calculate_splits, compute_balances, graph_constrained_settlements, simplify_debts
 from .fx_service import get_exchange_rates, get_conversion_rate, convert_amount, SUPPORTED_CURRENCIES
 from .pdf_gen import generate_monthly_pdf, generate_personal_pdf, pdf_reports_available
 from .emailer import (
@@ -290,6 +290,7 @@ def _ensure_schema():
         ("account_vendors", "category", "VARCHAR(50) DEFAULT 'General'"),
         ("quick_splits", "split_type", "VARCHAR(20) DEFAULT 'EQUAL'"),
         ("quick_splits", "payer_share_amount", "NUMERIC(10,2) DEFAULT 0"),
+        ("quick_splits", "payer_paid_amount", "NUMERIC(10,2)"),
         ("quick_splits", "created_by_account_id", "INTEGER"),
         ("quick_split_participants", "split_value", "NUMERIC(10,2)"),
         ("quick_split_participants", "invite_token", "VARCHAR(64)"),
@@ -390,18 +391,30 @@ def _ensure_schema():
 
 _ensure_schema()
 
-app = FastAPI(title="ShareSquad — Multi-User Expense Splitter")
+app = FastAPI(
+    title="ShareSquad",
+    # Disable the auto-generated API docs in production.
+    # They expose every endpoint, schema, and parameter to anyone who visits /docs.
+    docs_url="/docs" if IS_DEVELOPMENT else None,
+    redoc_url="/redoc" if IS_DEVELOPMENT else None,
+    openapi_url="/openapi.json" if IS_DEVELOPMENT else None,
+)
 
 
 @app.middleware("http")
 async def disable_static_cache(request: Request, call_next):
-    """Avoid stale HTML/JS/CSS after deploys (browsers otherwise keep old UI)."""
+    """Avoid stale HTML/JS/CSS after deploys and strip server identification headers."""
     response = await call_next(request)
     path = request.url.path
     if path == "/" or path.endswith((".html", ".js", ".css")):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
+    # Remove headers that reveal the server tech stack.
+    if "server" in response.headers:
+        del response.headers["server"]
+    if "x-powered-by" in response.headers:
+        del response.headers["x-powered-by"]
     return response
 
 
@@ -597,9 +610,14 @@ def _expenses_as_dicts(
         for s in e.splits:
             converted_share, _ = convert_amount(s.share_amount, src, dest, custom_rate=rate_f)
             splits.append({"user_id": s.member_id, "share_amount": float(converted_share)})
+        payments = []
+        for payer in e.payers:
+            converted_paid, _ = convert_amount(payer.amount_paid, src, dest, custom_rate=rate_f)
+            payments.append({"payer_id": payer.member_id, "amount": float(converted_paid)})
         rows.append(
             {
                 "payer_id": e.payer_member_id,
+                "payments": payments,
                 "expense_id": e.id,
                 "total_amount": float(converted_total),
                 "splits": splits,
@@ -681,10 +699,13 @@ def _apply_confirmed_payments(
 
 
 def build_balances_and_settlements(
-    db: Session, group_id: int, period: models.MonthlyPeriod
+    db: Session, group_id: int, period: models.MonthlyPeriod, settlement_mode: str = "smart"
 ):
     group = db.query(models.Group).get(group_id)
     base_currency = group.currency if group and group.currency else "USD"
+    mode = (settlement_mode or "smart").strip().lower()
+    if mode not in ("smart", "simplified"):
+        mode = "smart"
 
     # Once a payment has been recorded, the original participants and their
     # expenses are the accounting record behind that payment. Reopening the
@@ -702,15 +723,22 @@ def build_balances_and_settlements(
     # Legacy soft-removed memberships can remain in an upgraded database.
     # Treat any expense involving one as removed, matching the delete action.
     if not preserve_history:
+        def _payers_are_active(expense: models.Expense) -> bool:
+            payer_ids = [payer.member_id for payer in expense.payers] or [expense.payer_member_id]
+            return all(payer_id in active_member_ids for payer_id in payer_ids)
+
         expenses = [
             expense for expense in expenses
-            if expense.payer_member_id in active_member_ids
+            if _payers_are_active(expense)
             and all(split.member_id in active_member_ids for split in expense.splits)
         ]
     expense_dicts = _expenses_as_dicts(expenses, base_currency, base_currency)
     raw_balances = compute_balances(members, expense_dicts)
     _apply_confirmed_payments(db, period, raw_balances, expense_dicts, base_currency, base_currency)
-    raw_settlements = graph_constrained_settlements(members, expense_dicts, raw_balances)
+    if mode == "simplified":
+        raw_settlements = simplify_debts(raw_balances)
+    else:
+        raw_settlements = graph_constrained_settlements(members, expense_dicts, raw_balances)
 
     target_currency = (period.target_currency or "").upper() or None
     fx_rate = float(period.settlement_fx_rate) if period.settlement_fx_rate else None
@@ -729,7 +757,11 @@ def build_balances_and_settlements(
         tgt_balances = compute_balances(members, tgt_expense_dicts)
         _apply_confirmed_payments(db, period, tgt_balances, tgt_expense_dicts, target_currency, base_currency, fx_rate)
         converted_balances = tgt_balances
-        for s in graph_constrained_settlements(members, tgt_expense_dicts, tgt_balances):
+        if mode == "simplified":
+            converted_list = simplify_debts(tgt_balances)
+        else:
+            converted_list = graph_constrained_settlements(members, tgt_expense_dicts, tgt_balances)
+        for s in converted_list:
             converted_settlements[(s["from_member_id"], s["to_member_id"])] = s["amount"]
 
     balances = []
@@ -1194,6 +1226,7 @@ def _quick_split_out(split: models.QuickSplit, account: models.Account) -> schem
         category=split.category or "General",
         split_type=split.split_type or "EQUAL",
         payer_share_amount=float(split.payer_share_amount or 0),
+        payer_paid_amount=float(split.payer_paid_amount) if split.payer_paid_amount is not None else None,
         payer_name=split.payer.display_name if split.payer else "Someone",
         payer_account_id=split.payer_account_id,
         payer_email=split.payer.email if split.payer else None,
@@ -1222,6 +1255,31 @@ def _quick_split_out(split: models.QuickSplit, account: models.Account) -> schem
     )
 
 
+def _assign_shared_payment(split: models.QuickSplit, payer_paid_amount: Optional[float]) -> None:
+    """Record cash when both people paid the same bill. Empty means the payer paid all of it."""
+    if payer_paid_amount is None:
+        split.payer_paid_amount = None
+        return
+    total = Decimal(str(split.total_amount)).quantize(Decimal("0.01"))
+    paid = Decimal(str(payer_paid_amount)).quantize(Decimal("0.01"))
+    if paid <= 0 or paid >= total:
+        raise HTTPException(400, "When both people pay, each amount must be greater than zero and less than the bill total")
+    split.payer_paid_amount = paid
+
+
+def _viewer_direct_effect(split: models.QuickSplit, participant: models.QuickSplitParticipant, account_id: int) -> Decimal:
+    """Positive means the other person owes this account for one private bill."""
+    total = Decimal(str(split.total_amount))
+    payer_paid = Decimal(str(split.payer_paid_amount)) if split.payer_paid_amount is not None else total
+    if split.payer_account_id == account_id:
+        my_paid = payer_paid
+        my_share = Decimal(str(split.payer_share_amount or 0))
+    else:
+        my_paid = total - payer_paid
+        my_share = Decimal(str(participant.share_amount))
+    return (my_paid - my_share).quantize(Decimal("0.01"))
+
+
 def _apply_quick_split_values(split: models.QuickSplit, payer_value, participant_values: dict[int, object]) -> None:
     """Apply normal-group split maths to the payer plus every invitee."""
     split_type = (split.split_type or "EQUAL").upper()
@@ -1234,7 +1292,7 @@ def _apply_quick_split_values(split: models.QuickSplit, payer_value, participant
     try:
         shares = calculate_splits(split_type, Decimal(str(split.total_amount)), inputs)
     except ValueError as err:
-        raise HTTPException(400, str(err)) from err
+        raise HTTPException(400, "Invalid split values — check the amounts entered") from err
     split.payer_share_amount = shares[0]
     for participant in split.participants:
         participant.share_amount = shares[participant.id]
@@ -1328,6 +1386,7 @@ def create_quick_split(
         payer_account_id=payer_account.id,
         split_type=(payload.split_type or "EQUAL").upper(),
     )
+    _assign_shared_payment(split, payload.payer_paid_amount)
     db.add(split)
     db.flush()
     invite_url = _quick_split_url(request, split.invite_code)
@@ -1393,6 +1452,7 @@ def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account
     split.bill_date = payload.bill_date
     split.category = payload.category or "General"
     split.split_type = (payload.split_type or "EQUAL").upper()
+    _assign_shared_payment(split, payload.payer_paid_amount)
     existing_by_email = {p.email: p for p in split.participants}
     kept = set()
     for email, value, label, token in invitees:
@@ -1461,7 +1521,7 @@ def _friend_month_balance(db: Session, account_id: int, friend_id: int, month_ke
     currency = "USD"
     for split, participant in rows:
         currency = split.currency or currency
-        balance += Decimal(str(participant.share_amount)) if split.payer_account_id == account_id else -Decimal(str(participant.share_amount))
+        balance += _viewer_direct_effect(split, participant, account_id)
     return balance.quantize(Decimal("0.01")), currency
 
 
@@ -1559,8 +1619,7 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
             continue
         if settlement and settlement.settled_at and split.created_at and split.created_at <= settlement.settled_at:
             continue
-        value = Decimal(str(participant.share_amount))
-        direct_by_month[month_key] = direct_by_month.get(month_key, Decimal("0.00")) + (value if split.payer_account_id == account_id else -value)
+        direct_by_month[month_key] = direct_by_month.get(month_key, Decimal("0.00")) + _viewer_direct_effect(split, participant, account_id)
 
     # Confirmed pair payments allocated to a direct month reduce only that
     # month's open amount. A pending claim never changes either person's debt.
@@ -1631,14 +1690,11 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
                 active_split_map.setdefault(split.expense_id, {})[split.member_id] = Decimal(str(split.share_amount))
         active_totals: dict[tuple[int, str], Decimal] = {}
         active_details: dict[tuple[int, str], tuple[models.Group, models.MonthlyPeriod]] = {}
+        active_payments = _payments_by_expense(db, [expense for expense, _period, _group in active_rows])
         for expense, period, group in active_rows:
             mine, theirs = active_mine[group.id], active_theirs[group.id]
-            shares = active_split_map.get(expense.id, {})
-            if expense.payer_member_id == mine.id and theirs.id in shares:
-                amount = shares[theirs.id]
-            elif expense.payer_member_id == theirs.id and mine.id in shares:
-                amount = -shares[mine.id]
-            else:
+            amount = _pair_expense_amount(mine.id, theirs.id, active_split_map.get(expense.id, {}), active_payments.get(expense.id, {}))
+            if amount is None:
                 continue
             key = (group.id, period.period_key)
             active_totals[key] = active_totals.get(key, Decimal("0.00")) + amount
@@ -1653,6 +1709,44 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
                 "settlement_ready": False,
             })
     return sources
+
+
+def _payments_by_expense(db: Session, expenses: list[models.Expense]) -> dict[int, dict[int, Decimal]]:
+    """Cash each member put toward a bill. Older rows credit the single payer for the full total."""
+    result: dict[int, dict[int, Decimal]] = {}
+    expense_ids = [expense.id for expense in expenses]
+    if expense_ids:
+        for row in db.query(models.ExpensePayer).filter(models.ExpensePayer.expense_id.in_(expense_ids)).all():
+            result.setdefault(row.expense_id, {})[row.member_id] = Decimal(str(row.amount_paid))
+    for expense in expenses:
+        result.setdefault(expense.id, {expense.payer_member_id: Decimal(str(expense.total_amount))})
+    return result
+
+
+def _pair_expense_amount(my_id: int, their_id: int, shares: dict[int, Decimal], payments: dict[int, Decimal]) -> Optional[Decimal]:
+    """How much the other person owes this account on one group bill.
+
+    A third person's payment is not turned into a debt between this pair.
+    One payer covering the other person's share keeps the previous result.
+    """
+    if payments.get(my_id, Decimal("0")) == 0 and payments.get(their_id, Decimal("0")) == 0:
+        return None
+    people = set(shares) | set(payments)
+    overs: dict[int, Decimal] = {}
+    unders: dict[int, Decimal] = {}
+    for member_id in people:
+        net = payments.get(member_id, Decimal("0")) - shares.get(member_id, Decimal("0"))
+        if net > 0:
+            overs[member_id] = net
+        elif net < 0:
+            unders[member_id] = -net
+    total_over = sum(overs.values(), Decimal("0"))
+    if total_over <= 0:
+        return None
+    owed_to_me = unders.get(their_id, Decimal("0")) * overs.get(my_id, Decimal("0")) / total_over
+    owed_by_me = unders.get(my_id, Decimal("0")) * overs.get(their_id, Decimal("0")) / total_over
+    amount = (owed_to_me - owed_by_me).quantize(Decimal("0.01"))
+    return amount or None
 
 
 def _consolidated_friend_balance(db: Session, account_id: int, friend_id: int, currency: str) -> tuple[Decimal, list[dict]]:
@@ -1830,9 +1924,8 @@ def get_friend_group_contributions(
 ):
     """Live, read-only pair portions from shared group expenses.
 
-    An entry exists only when one of the two people paid and the other has an
-    explicit split. Bills paid by a third group member are deliberately not
-    represented as a debt between this pair.
+    An entry exists when one of these two people covered part of the other's share.
+    Bills paid only by a third group member are not a debt between this pair.
     """
     if friend_id == account.id or not db.query(models.Account).get(friend_id):
         raise HTTPException(404, "Friend not found")
@@ -1858,16 +1951,13 @@ def get_friend_group_contributions(
         for split in db.query(models.ExpenseSplit).filter(models.ExpenseSplit.expense_id.in_(expense_ids)).all():
             split_map.setdefault(split.expense_id, {})[split.member_id] = Decimal(str(split.share_amount))
 
+    payments = _payments_by_expense(db, [expense for expense, _period, _group in rows])
     result = []
     for expense, period, group in rows:
         my_member = mine[group.id]
         friend_member = theirs[group.id]
-        shares = split_map.get(expense.id, {})
-        if expense.payer_member_id == my_member.id and friend_member.id in shares:
-            amount = shares[friend_member.id]
-        elif expense.payer_member_id == friend_member.id and my_member.id in shares:
-            amount = -shares[my_member.id]
-        else:
+        amount = _pair_expense_amount(my_member.id, friend_member.id, split_map.get(expense.id, {}), payments.get(expense.id, {}))
+        if amount is None:
             continue
         result.append(schemas.FriendGroupContributionOut(
             group_id=group.id, group_name=group.name, expense_id=expense.id,
@@ -2879,6 +2969,33 @@ def _validate_expense_members(db: Session, group_id: int, payer_id: int, partici
             raise HTTPException(400, f"Member id {mid} is not in this group")
 
 
+def _apply_expense_payers(db: Session, expense: models.Expense, total_amount: float, payer_member_id: int, payers: Optional[list]) -> int:
+    """Store extra payers only when two or more people paid. Returns the primary payer."""
+    for row in list(expense.payers):
+        db.delete(row)
+    db.flush()
+    if not payers or len(payers) < 2:
+        return payer_member_id
+    total = Decimal(str(total_amount)).quantize(Decimal("0.01"))
+    seen = set()
+    paid = Decimal("0.00")
+    normalized = []
+    for item in payers:
+        if item.member_id in seen:
+            raise HTTPException(400, "Each person can be listed once as a payer")
+        seen.add(item.member_id)
+        amount = Decimal(str(item.amount)).quantize(Decimal("0.01"))
+        if amount <= 0:
+            raise HTTPException(400, "Each payer amount must be greater than zero")
+        paid += amount
+        normalized.append((item.member_id, amount))
+    if paid != total:
+        raise HTTPException(400, "Payments by several people must add up to the bill total")
+    for member_id, amount in normalized:
+        db.add(models.ExpensePayer(expense_id=expense.id, member_id=member_id, amount_paid=amount))
+    return max(normalized, key=lambda item: item[1])[0]
+
+
 def _apply_expense_splits_custom(
     db: Session,
     expense: models.Expense,
@@ -2916,7 +3033,7 @@ def _apply_expense_splits_custom(
             remainder_offset = prior
         shares = calculate_splits(split_type, total_amount, inputs, remainder_offset=remainder_offset)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, "Invalid split values — check the amounts entered") from e
 
     for mid, amount in shares.items():
         val = None
@@ -2969,7 +3086,8 @@ def create_expense(
     else:
         raise HTTPException(400, "Must specify members to split with")
 
-    _validate_expense_members(db, group_id, payload.payer_member_id, participant_ids)
+    payer_ids = [item.member_id for item in payload.payers] if payload.payers and len(payload.payers) >= 2 else [payload.payer_member_id]
+    _validate_expense_members(db, group_id, payer_ids[0], participant_ids + payer_ids[1:])
 
     period_key = payload.period_key or _period_key_for(payload.bill_date)
     period = get_or_create_period(db, group_id, period_key)
@@ -2989,6 +3107,7 @@ def create_expense(
     )
     db.add(expense)
     db.flush()
+    expense.payer_member_id = _apply_expense_payers(db, expense, payload.total_amount, payload.payer_member_id, payload.payers)
 
     _apply_expense_splits_custom(
         db,
@@ -3036,7 +3155,8 @@ def update_expense(
     elif payload.split_with:
         participant_ids = payload.split_with
 
-    _validate_expense_members(db, group_id, payload.payer_member_id, participant_ids)
+    payer_ids = [item.member_id for item in payload.payers] if payload.payers and len(payload.payers) >= 2 else [payload.payer_member_id]
+    _validate_expense_members(db, group_id, payer_ids[0], participant_ids + payer_ids[1:])
 
     period_key = payload.period_key or _period_key_for(payload.bill_date)
     period = get_or_create_period(db, group_id, period_key)
@@ -3048,7 +3168,7 @@ def update_expense(
     expense.currency = _normalize_currency(payload.currency, expense.currency or "USD")
     expense.category = payload.category or expense.category or "General"
     expense.split_type = payload.split_type or expense.split_type or "EQUAL"
-    expense.payer_member_id = payload.payer_member_id
+    expense.payer_member_id = _apply_expense_payers(db, expense, payload.total_amount, payload.payer_member_id, payload.payers)
 
     _apply_expense_splits_custom(
         db,
@@ -3134,9 +3254,9 @@ def list_expenses(
         term = f"%{search.strip()}%"
         q = q.filter(or_(models.Expense.store_name.ilike(term), models.Expense.category.ilike(term)))
     if member_id:
-        q = q.filter(or_(models.Expense.payer_member_id == member_id, models.Expense.splits.any(models.ExpenseSplit.member_id == member_id)))
+        q = q.filter(or_(models.Expense.payer_member_id == member_id, models.Expense.payers.any(models.ExpensePayer.member_id == member_id), models.Expense.splits.any(models.ExpenseSplit.member_id == member_id)))
     if involved_me:
-        q = q.filter(or_(models.Expense.payer_member_id == current_member.id, models.Expense.splits.any(models.ExpenseSplit.member_id == current_member.id)))
+        q = q.filter(or_(models.Expense.payer_member_id == current_member.id, models.Expense.payers.any(models.ExpensePayer.member_id == current_member.id), models.Expense.splits.any(models.ExpenseSplit.member_id == current_member.id)))
     if date_from:
         q = q.filter(models.Expense.bill_date >= date_from)
     if date_to:
@@ -3366,6 +3486,7 @@ def get_balances(
 def get_settlements(
     group_id: int,
     period_key: str,
+    mode: str = Query("smart", pattern="^(smart|simplified)$"),
     account: models.Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ):
@@ -3373,7 +3494,7 @@ def get_settlements(
     period = db.query(models.MonthlyPeriod).filter_by(group_id=group_id, period_key=period_key).first()
     if not period:
         return []
-    _, settlements, _ = build_balances_and_settlements(db, group_id, period)
+    _, settlements, _ = build_balances_and_settlements(db, group_id, period, settlement_mode=mode)
     return settlements
 
 
@@ -3426,7 +3547,9 @@ def generate_report(
             "bill_date": e.bill_date.isoformat(),
             "store_name": e.store_name,
             "category": e.category or "General",
-            "payer_name": members_by_id.get(e.payer_member_id, "?"),
+            "payer_name": ", ".join(
+                f"{members_by_id.get(payer.member_id, '?')} {payer.amount_paid}" for payer in e.payers
+            ) if e.payers else members_by_id.get(e.payer_member_id, "?"),
             "participant_names": participant_names,
             "total_amount": float(e.total_amount),
             "currency": e.currency or group.currency or "USD",
@@ -3447,7 +3570,7 @@ def generate_report(
             fx_rate=float(period.settlement_fx_rate) if period.settlement_fx_rate else None,
         )
     except RuntimeError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise HTTPException(503, "Could not generate the PDF report. Try again or contact support.") from exc
 
     period.pdf_filename = filename
     period.pdf_path = pdf_path
