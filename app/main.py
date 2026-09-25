@@ -1671,8 +1671,48 @@ def _reconcile_friend_settlements(db: Session, first_id: int, second_id: int) ->
         db.commit()
 
 
+def _pair_settlement_source_for_period(
+    db: Session,
+    group: models.Group,
+    period: models.MonthlyPeriod,
+    my_member_id: int,
+    friend_member_id: int,
+    currency: str,
+    *,
+    settlement_ready: bool,
+) -> Optional[dict]:
+    """One Friend↔Friend group line, using the same smart Who-pays-whom edge as the group page."""
+    _balances, settlements, _expenses = build_balances_and_settlements(
+        db, group.id, period, settlement_mode="smart",
+    )
+    for settlement in settlements:
+        if {settlement["from_member_id"], settlement["to_member_id"]} != {my_member_id, friend_member_id}:
+            continue
+        amount = Decimal(str(settlement["amount"]))
+        # `from` pays `to` → from owes to. Positive for the viewer means the friend owes them.
+        signed = amount if settlement["from_member_id"] == friend_member_id else -amount
+        suffix = "" if settlement_ready else " (current)"
+        return {
+            "kind": "GROUP",
+            "label": f"{group.name} · {period.period_key}{suffix}",
+            "amount": float(signed),
+            "currency": currency,
+            "period_key": period.period_key,
+            "group_id": group.id,
+            "period_id": period.id,
+            "payer_member_id": settlement["from_member_id"],
+            "recipient_member_id": settlement["to_member_id"],
+            "settlement_ready": settlement_ready,
+        }
+    return None
+
+
 def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, currency: str) -> list[dict]:
-    """Return open pair debts, never mixing currencies or unpaid payment claims."""
+    """Return open pair debts, never mixing currencies or unpaid payment claims.
+
+    Group lines use the same smart settlement transfers shown on the group
+    Balances → Who pays whom card, so Friends totals stay verifiable there.
+    """
     currency = _normalize_currency(currency, "USD")
     sources: list[dict] = []
     one, two = _friend_pair(account_id, friend_id)
@@ -1715,11 +1755,13 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
 
     for month_key, value in direct_by_month.items():
         if value:
-            sources.append({"kind": "DIRECT", "label": f"Direct splits · {month_key}", "amount": float(value), "currency": currency, "period_key": month_key, "group_id": None})
+            sources.append({
+                "kind": "DIRECT", "label": f"Direct splits · {month_key}", "amount": float(value),
+                "currency": currency, "period_key": month_key, "group_id": None, "settlement_ready": True,
+            })
 
-    # Group balances become available for consolidated settlement only after
-    # that month's group period has been finalized. This preserves the audit
-    # trail and prevents a later edited bill being paid twice.
+    # Shared groups: settled periods are payment-ready; open periods are preview-only.
+    # Both use Who-pays-whom edges so a Friend total matches the group card.
     group_member_rows = db.query(models.GroupMember).filter(
         models.GroupMember.account_id.in_((account_id, friend_id)),
     ).all()
@@ -1732,59 +1774,21 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
         group = db.query(models.Group).get(group_id)
         if not group or _normalize_currency(group.currency, "USD") != currency:
             continue
-        for period in db.query(models.MonthlyPeriod).filter_by(group_id=group_id, status="SETTLED").order_by(models.MonthlyPeriod.period_key.asc()).all():
-            _balances, settlements, _expenses = build_balances_and_settlements(db, group_id, period)
-            mine, theirs = members[account_id].id, members[friend_id].id
-            for settlement in settlements:
-                if {settlement["from_member_id"], settlement["to_member_id"]} != {mine, theirs}:
+        mine_id, theirs_id = members[account_id].id, members[friend_id].id
+        periods = db.query(models.MonthlyPeriod).filter_by(group_id=group_id).order_by(models.MonthlyPeriod.period_key.asc()).all()
+        for period in periods:
+            ready = period.status == "SETTLED"
+            if not ready:
+                if not members[account_id].is_active or not members[friend_id].is_active:
                     continue
-                amount = Decimal(str(settlement["amount"]))
-                signed = amount if settlement["from_member_id"] == theirs else -amount
-                sources.append({
-                    "kind": "GROUP", "label": f"{group.name} · {period.period_key}", "amount": float(signed), "currency": currency,
-                    "period_key": period.period_key, "group_id": group_id,
-                    "period_id": period.id, "payer_member_id": settlement["from_member_id"], "recipient_member_id": settlement["to_member_id"],
-                })
-
-    # Active group periods are visible in the friend total immediately. They
-    # remain read-only here because a group expense can still change before
-    # its period is settled; only finalized group sources are payment-ready.
-    active_mine = {member.group_id: member for member in db.query(models.GroupMember).filter_by(account_id=account_id, is_active=True).all()}
-    active_theirs = {member.group_id: member for member in db.query(models.GroupMember).filter_by(account_id=friend_id, is_active=True).all()}
-    active_shared_ids = sorted(set(active_mine).intersection(active_theirs))
-    if active_shared_ids:
-        active_rows = db.query(models.Expense, models.MonthlyPeriod, models.Group).join(
-            models.MonthlyPeriod, models.Expense.period_id == models.MonthlyPeriod.id
-        ).join(models.Group, models.MonthlyPeriod.group_id == models.Group.id).filter(
-            models.MonthlyPeriod.group_id.in_(active_shared_ids),
-            models.MonthlyPeriod.status != "SETTLED",
-            models.Expense.currency == currency,
-        ).all()
-        active_expense_ids = [expense.id for expense, _period, _group in active_rows]
-        active_split_map: dict[int, dict[int, Decimal]] = {}
-        if active_expense_ids:
-            for split in db.query(models.ExpenseSplit).filter(models.ExpenseSplit.expense_id.in_(active_expense_ids)).all():
-                active_split_map.setdefault(split.expense_id, {})[split.member_id] = Decimal(str(split.share_amount))
-        active_totals: dict[tuple[int, str], Decimal] = {}
-        active_details: dict[tuple[int, str], tuple[models.Group, models.MonthlyPeriod]] = {}
-        active_payments = _payments_by_expense(db, [expense for expense, _period, _group in active_rows])
-        for expense, period, group in active_rows:
-            mine, theirs = active_mine[group.id], active_theirs[group.id]
-            amount = _pair_expense_amount(mine.id, theirs.id, active_split_map.get(expense.id, {}), active_payments.get(expense.id, {}))
-            if amount is None:
-                continue
-            key = (group.id, period.period_key)
-            active_totals[key] = active_totals.get(key, Decimal("0.00")) + amount
-            active_details[key] = (group, period)
-        for key, amount in active_totals.items():
-            if not amount:
-                continue
-            group, period = active_details[key]
-            sources.append({
-                "kind": "GROUP", "label": f"{group.name} · {period.period_key} (current)", "amount": float(amount),
-                "currency": currency, "period_key": period.period_key, "group_id": group.id,
-                "settlement_ready": False,
-            })
+                has_expense = db.query(models.Expense.id).filter_by(period_id=period.id).first()
+                if not has_expense:
+                    continue
+            source = _pair_settlement_source_for_period(
+                db, group, period, mine_id, theirs_id, currency, settlement_ready=ready,
+            )
+            if source:
+                sources.append(source)
     return sources
 
 
@@ -1990,7 +1994,7 @@ def get_consolidated_friend_balance(
     return schemas.ConsolidatedFriendBalanceOut(
         friend_id=friend_id, balance=float(balance), settleable_balance=float(settleable_balance), currency=normalized_currency,
         payer_account_id=payer_id, recipient_account_id=recipient_id,
-        sources=[schemas.ConsolidatedSourceOut(**{key: value for key, value in source.items() if key in {"kind", "label", "amount", "currency", "period_key", "group_id"}}) for source in sources],
+        sources=[schemas.ConsolidatedSourceOut(**{key: value for key, value in source.items() if key in {"kind", "label", "amount", "currency", "period_key", "group_id", "settlement_ready"}}) for source in sources],
         payments=[_pair_payment_out(payment) for payment in payments],
     )
 

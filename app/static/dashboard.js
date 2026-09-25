@@ -137,8 +137,8 @@ function renderQuickSplits(_splits, contacts = [], settlementsByFriend = new Map
     entry.count += 1;
     people.set(key, entry);
   });
-  // The dashboard and the Friends page must always use one shared source of
-  // truth: direct splits plus finalized group settlements for this person.
+  // Shared source of truth with Friends: direct splits plus the same smart
+  // Who-pays-whom edges used on the group Balances card (preview + settled).
   contacts.forEach((contact) => {
     const key = contact.id;
     const existing = people.get(key) || { id: contact.id, name: contact.display_name, balance: 0, count: 0, currency: "USD", splitId: null };
@@ -175,7 +175,7 @@ function renderQuickSplits(_splits, contacts = [], settlementsByFriend = new Map
     <h3 class="font-mono font-bold text-base leading-tight text-ink mt-2">${ShareSquad.escapeHtml(person.name)}</h3>
     <p class="text-xl font-bold font-mono mt-2 ${amtCls}">${isPositive || isNegative ? amount : "—"}</p>
     <p class="text-xs mt-1 text-ink/60">${status}</p>
-    <p class="text-[10px] font-mono mt-2 text-ink/40">${person.hasConsolidatedBalance ? "Groups + direct bills combined" : `${person.count} direct bill${person.count === 1 ? "" : "s"} in history`}</p>
+    <p class="text-[10px] font-mono mt-2 text-ink/40">${person.hasConsolidatedBalance ? "Who pays whom + direct bills" : `${person.count} direct bill${person.count === 1 ? "" : "s"} in history`}</p>
   </div>
   <a class="bb-btn-secondary w-full !py-1.5 text-[11px]" href="${href}"><i data-lucide="receipt-text" class="w-3.5 h-3.5"></i> Open details</a>
 </div>`;

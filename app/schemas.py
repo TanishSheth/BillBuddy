@@ -247,6 +247,8 @@ class ConsolidatedSourceOut(BaseModel):
     currency: str
     period_key: Optional[str] = None
     group_id: Optional[int] = None
+    # False = open group period preview (matches Who pays whom, not payment-ready).
+    settlement_ready: bool = True
 
 
 class ConsolidatedFriendBalanceOut(BaseModel):

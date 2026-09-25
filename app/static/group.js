@@ -247,7 +247,9 @@ async function loadPeriods() {
   state.periods = periods;
 
   const select = $("#periodSelect");
-  const keep = state.currentPeriod;
+  const urlPeriod = new URLSearchParams(window.location.search).get("period");
+  const keep = state.currentPeriod || (urlPeriod && !state._periodFromUrlApplied ? urlPeriod : null);
+  if (urlPeriod) state._periodFromUrlApplied = true;
   select.innerHTML = "";
 
   if (!periods.length) {
