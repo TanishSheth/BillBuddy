@@ -263,6 +263,8 @@ def _ensure_schema():
             logger.warning("Could not inspect %s.%s: %s", table, column, err)
             return False
 
+    # PostgreSQL has no DATETIME type. SQLite accepts both names.
+    timestamp_type = "DATETIME" if dialect == "sqlite" else "TIMESTAMP"
     statements = [
         ("groups", "currency", "VARCHAR(10) DEFAULT 'USD'"),
         ("expenses", "currency", "VARCHAR(10) DEFAULT 'USD'"),
@@ -275,9 +277,9 @@ def _ensure_schema():
         ("account_settings", "preferred_currency", "VARCHAR(10) DEFAULT 'USD'"),
         ("pending_uploads", "account_id", "INTEGER"),
         ("accounts", "avatar_path", "VARCHAR"),
-        ("accounts", "deletion_requested_at", "DATETIME"),
-        ("accounts", "deletion_purge_after", "DATETIME"),
-        ("accounts", "deletion_completed_at", "DATETIME"),
+        ("accounts", "deletion_requested_at", timestamp_type),
+        ("accounts", "deletion_purge_after", timestamp_type),
+        ("accounts", "deletion_completed_at", timestamp_type),
         ("groups", "cover_image_path", "VARCHAR"),
         ("group_members", "is_active", "BOOLEAN DEFAULT TRUE"),
         ("pending_uploads", "ocr_store_name", "VARCHAR(150)"),
