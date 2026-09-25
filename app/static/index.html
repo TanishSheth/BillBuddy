@@ -1,16 +1,16 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#F6F3EC">
 <script>(function(){try{var k="sharesquad_theme",p=localStorage.getItem(k)||"system",d=p==="dark"||(p!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("theme-dark",d);document.documentElement.classList.toggle("theme-light",!d);document.documentElement.dataset.theme=d?"dark":"light";var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",d?"#0B1220":"#F8FAFC");}catch(e){}})();</script>
-<title>ShareSquad — My Groups & Tracker</title>
+<title>ShareSquad — Expenses</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20260925final">
+<link rel="stylesheet" href="/styles.css?v=20260925swipePers">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -33,9 +33,6 @@
         <a href="/personal.html" class="nav-tab">
           <i data-lucide="wallet" class="w-3.5 h-3.5"></i> <span>Personal</span>
         </a>
-        <a href="/friends.html" class="nav-tab">
-          <i data-lucide="handshake" class="w-3.5 h-3.5"></i> <span>Friends</span>
-        </a>
       </nav>
 
       <div class="header-actions flex items-center gap-1.5 sm:gap-2 shrink-0">
@@ -55,29 +52,35 @@
   </header>
 
   <main class="page-main max-w-5xl mx-auto px-4 sm:px-5 py-6 sm:py-8 flex-1 w-full">
+    <div class="flex gap-1 flex-wrap mb-3" id="expenseViewSelector" role="tablist" aria-label="Expenses view">
+      <button type="button" class="split-type-pill active" data-expense-view="groups" role="tab" aria-selected="true">Groups</button>
+      <button type="button" class="split-type-pill" data-expense-view="friends" role="tab" aria-selected="false">Friends</button>
+    </div>
+
     <div class="how-it-works mb-5">
-      <p><strong>Choose how to split:</strong> <strong>Split with a friend</strong> opens your reusable Friends list for private two-person bills. <strong>Split with a group</strong> creates or opens a multi-person shared group. Your personal spending stays separate in <a href="/personal.html" class="text-brand underline">Personal</a>.</p>
+      <p id="expenseViewHelp"><strong>Groups:</strong> Shared multi-person expenses for trips, roommates, and projects.</p>
     </div>
 
     <section id="onboardingChecklist" class="hidden bb-card mb-5 onboarding-card"></section>
 
-    <div id="groupsGrid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
-    
-    <div id="emptyGroups" class="hidden bb-card max-w-md mx-auto text-center py-10">
-      <div class="stamp-mark mx-auto mb-3">$</div>
-      <h2 class="font-mono uppercase text-xs tracking-widest text-ink/50 mb-2">No groups yet</h2>
-      <p class="text-sm text-ink/60 mb-4">Create a group for trips, roommates, or projects, or open a group link someone shared with you.</p>
-      <button id="createFirstGroupBtn" class="bb-btn-primary">
-        <i data-lucide="plus" class="w-4 h-4"></i> Create First Group
-      </button>
-    </div>
+    <section id="expenseGroupsPanel" class="expense-view-panel" data-expense-panel="groups">
+      <div id="groupsGrid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+      <div id="emptyGroups" class="hidden bb-card max-w-md mx-auto text-center py-10">
+        <div class="stamp-mark mx-auto mb-3">$</div>
+        <h2 class="font-mono uppercase text-xs tracking-widest text-ink/50 mb-2">No groups yet</h2>
+        <p class="text-sm text-ink/60 mb-4">Create a group for trips, roommates, or projects, or open a group link someone shared with you.</p>
+        <button id="createFirstGroupBtn" class="bb-btn-primary">
+          <i data-lucide="plus" class="w-4 h-4"></i> Create First Group
+        </button>
+      </div>
+    </section>
 
-    <section class="mt-8 pt-6 border-t-2 border-ink/10">
+    <section id="expenseFriendsPanel" class="expense-view-panel hidden" data-expense-panel="friends">
       <div id="friendSplitsGrid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
       <div id="emptyFriendSplits" class="hidden bb-card text-center py-7">
         <p class="font-mono font-bold text-sm">No friend expenses yet</p>
-        <p class="text-xs text-ink/60 mt-1">Choose a friend first, then create a private bill.</p>
-        <a href="/friends.html" class="bb-btn-secondary inline-flex mt-3 !py-1.5 !px-3 text-[11px]">Choose a friend</a>
+        <p class="text-xs text-ink/60 mt-1">Add a friend, then create a private two-person bill.</p>
+        <a href="/friends.html" class="bb-btn-secondary inline-flex mt-3 !py-1.5 !px-3 text-[11px]">Open friends</a>
       </div>
     </section>
   </main>
@@ -127,26 +130,26 @@
 
   <!-- Bottom nav bar (mobile) -->
   <nav class="bottom-nav">
-    <a href="/index.html" class="active">
+    <a href="/index.html" class="active" data-bottom-nav="expenses">
       <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-      Groups
+      Expenses
     </a>
-    <a href="/friends.html">
+    <a href="/index.html?view=friends" data-bottom-nav="friends">
       <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       Friends
     </a>
-    <a href="/personal.html">
+    <a href="/personal.html" data-bottom-nav="personal">
       <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
       Personal
     </a>
-    <a href="/settings.html">
+    <a href="/settings.html" data-bottom-nav="account">
       <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93l-1.41 1.41M4.93 4.93l1.41 1.41M12 2v2M12 20v2M20 12h2M2 12h2M19.07 19.07l-1.41-1.41M4.93 19.07l1.41-1.41"/></svg>
       Account
     </a>
   </nav>
 
-  <script src="/api.js?v=20260925final"></script>
-  <script src="/dashboard.js?v=20260925final"></script>
+  <script src="/api.js?v=20260925markAll"></script>
+  <script src="/dashboard.js?v=20260925swipePers"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

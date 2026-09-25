@@ -1,5 +1,53 @@
 // ShareSquad Dashboard Controller ($ / $$ come from api.js)
 
+const EXPENSE_VIEW_KEY = "sharesquad_expense_view";
+const EXPENSE_VIEW_HELP = {
+  groups: "<strong>Groups:</strong> Shared multi-person expenses for trips, roommates, and projects.",
+  friends: "<strong>Friends:</strong> Private two-person bills and balances. Open a friend to add or settle.",
+};
+
+function normalizeExpenseView(value) {
+  return value === "friends" ? "friends" : "groups";
+}
+
+function resolveExpenseView() {
+  const fromQuery = new URLSearchParams(location.search).get("view");
+  if (fromQuery === "friends" || fromQuery === "groups") return fromQuery;
+  try {
+    return normalizeExpenseView(sessionStorage.getItem(EXPENSE_VIEW_KEY));
+  } catch {
+    return "groups";
+  }
+}
+
+function setExpenseView(view, { updateUrl = true } = {}) {
+  const next = normalizeExpenseView(view);
+  try { sessionStorage.setItem(EXPENSE_VIEW_KEY, next); } catch (_) {}
+
+  $$("#expenseViewSelector [data-expense-view]").forEach((btn) => {
+    const active = btn.dataset.expenseView === next;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  $("#expenseGroupsPanel")?.classList.toggle("hidden", next !== "groups");
+  $("#expenseFriendsPanel")?.classList.toggle("hidden", next !== "friends");
+
+  const help = $("#expenseViewHelp");
+  if (help) help.innerHTML = EXPENSE_VIEW_HELP[next];
+
+  // Bottom nav: highlight Friends when that sub-tab is open, else Expenses
+  $$(".bottom-nav a").forEach((link) => link.classList.remove("active"));
+  const bottomKey = next === "friends" ? "friends" : "expenses";
+  document.querySelector(`.bottom-nav a[data-bottom-nav="${bottomKey}"]`)?.classList.add("active");
+
+  if (updateUrl) {
+    const url = new URL(location.href);
+    if (next === "friends") url.searchParams.set("view", "friends");
+    else url.searchParams.delete("view");
+    history.replaceState({}, "", url.pathname + url.search + url.hash);
+  }
+}
+
 function openGroup(groupId) {
   ShareSquad.setStoredGroupId(groupId);
   window.location.href = "/group.html";
@@ -252,9 +300,9 @@ function renderOnboarding(groups, friends, quickSplits) {
   if (!card || localStorage.getItem("sharesquad_onboarding_dismissed")) return;
   const steps = [
     [groups.length > 0, "Create your first group", "#newGroupBtn"],
-    [groups.some((group) => group.member_count > 1), "Invite a member", "/friends.html"],
+    [groups.some((group) => group.member_count > 1), "Invite a member", "/index.html?view=friends"],
     [quickSplits.length > 0, "Log your first shared bill", "/quick-split.html"],
-    [groups.length > 0 || friends.length > 0, "Review balances and settlements", groups[0] ? "/group.html" : "/friends.html"],
+    [groups.length > 0 || friends.length > 0, "Review balances and settlements", groups[0] ? "/group.html" : "/index.html?view=friends"],
   ];
   const complete = steps.filter(([done]) => done).length;
   if (complete === steps.length) { card.classList.add("hidden"); return; }
@@ -361,9 +409,101 @@ async function submitCreateGroup(e) {
   });
 
   ShareSquad.fillAllCurrencySelects();
+  $$("#expenseViewSelector [data-expense-view]").forEach((btn) => {
+    btn.addEventListener("click", () => setExpenseView(btn.dataset.expenseView));
+  });
+  setExpenseView(resolveExpenseView(), { updateUrl: true });
+
+  // Swipe: Groups ↔ Friends ↔ Personal (Personal is a page navigate)
+  const EXPENSE_VIEW_ORDER = ["groups", "friends", "personal"];
+  const SWIPE_BLOCK =
+    ".page-header, .bottom-nav, .mobile-quick-action, .mobile-quick-actions, " +
+    "#expenseViewSelector, input, textarea, select, button, a, label, " +
+    "[role='dialog'], .modal, .modal-overlay, [data-no-swipe], .split-type-pill";
+  let _swipe = null;
+
+  function swipeIsBlocked(target) {
+    if (!(target instanceof Element)) return true;
+    if (target.closest(SWIPE_BLOCK)) return true;
+    let node = target;
+    while (node && node !== document.body) {
+      if (node instanceof HTMLElement) {
+        const style = window.getComputedStyle(node);
+        const ox = style.overflowX;
+        if ((ox === "auto" || ox === "scroll") && node.scrollWidth > node.clientWidth + 4) {
+          return true;
+        }
+      }
+      node = node.parentElement;
+    }
+    return false;
+  }
+
+  function currentExpenseView() {
+    const active = $("#expenseViewSelector [data-expense-view].active");
+    return normalizeExpenseView(active?.dataset.expenseView);
+  }
+
+  function goExpenseSwipeTarget(next) {
+    if (!next) return;
+    if (next === "personal") {
+      try { sessionStorage.setItem(EXPENSE_VIEW_KEY, "friends"); } catch (_) {}
+      window.location.href = "/personal.html";
+      return;
+    }
+    setExpenseView(next);
+  }
+
+  document.addEventListener("touchstart", (e) => {
+    const touch = e.touches[0];
+    if (!touch || e.touches.length !== 1) {
+      _swipe = null;
+      return;
+    }
+    if (swipeIsBlocked(e.target)) {
+      _swipe = null;
+      return;
+    }
+    const panel = e.target.closest?.(".expense-view-panel");
+    const help = e.target.closest?.(".how-it-works, #expenseViewHelp, #onboardingChecklist");
+    if (help) {
+      _swipe = { x: touch.clientX, y: touch.clientY };
+      return;
+    }
+    if (!panel || panel.classList.contains("hidden")) {
+      _swipe = null;
+      return;
+    }
+    _swipe = { x: touch.clientX, y: touch.clientY };
+  }, { passive: true });
+
+  document.addEventListener("touchmove", (e) => {
+    if (!_swipe || e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const dx = touch.clientX - _swipe.x;
+    const dy = touch.clientY - _swipe.y;
+    if (Math.abs(dy) > 24 && Math.abs(dy) > Math.abs(dx)) _swipe = null;
+  }, { passive: true });
+
+  document.addEventListener("touchend", (e) => {
+    if (!_swipe) return;
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - _swipe.x;
+    const dy = touch.clientY - _swipe.y;
+    _swipe = null;
+    if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.35) return;
+    const idx = EXPENSE_VIEW_ORDER.indexOf(currentExpenseView());
+    if (idx === -1) return;
+    const next = dx < 0 ? EXPENSE_VIEW_ORDER[idx + 1] : EXPENSE_VIEW_ORDER[idx - 1];
+    goExpenseSwipeTarget(next);
+  }, { passive: true });
+
+  document.addEventListener("touchcancel", () => { _swipe = null; }, { passive: true });
+
   await loadDashboard();
   if (new URLSearchParams(location.search).get("createGroup") === "1") {
     history.replaceState({}, "", "/");
+    setExpenseView("groups", { updateUrl: true });
     showCreateGroupModal();
   }
 })();

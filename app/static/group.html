@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20260925swipe2">
+<link rel="stylesheet" href="/styles.css?v=20260925markAll">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -41,13 +41,10 @@
 
       <nav class="hidden md:flex items-center bg-ink/5 p-1 rounded-lg">
         <a href="/index.html" class="nav-tab active">
-          <i data-lucide="users" class="w-3.5 h-3.5"></i> <span>Shared Groups</span>
+          <i data-lucide="layout-dashboard" class="w-3.5 h-3.5"></i> <span>Expenses</span>
         </a>
         <a href="/personal.html" class="nav-tab">
-          <i data-lucide="wallet" class="w-3.5 h-3.5"></i> <span>Personal Tracker</span>
-        </a>
-        <a href="/friends.html" class="nav-tab">
-          <i data-lucide="handshake" class="w-3.5 h-3.5"></i> <span>Friends</span>
+          <i data-lucide="wallet" class="w-3.5 h-3.5"></i> <span>Personal</span>
         </a>
       </nav>
 
@@ -98,8 +95,6 @@
           </button>
         </div>
       </div>
-
-      <div id="balanceStrip" class="balance-strip mb-5 hidden" aria-live="polite"></div>
 
       <div class="how-it-works mb-5">
         <p id="groupPageHelp"><strong>Add / Scan:</strong> Upload a receipt or enter a bill, choose who paid and who shares it, then save it to this month.</p>
@@ -268,6 +263,7 @@
 
       <!-- Balances & Settlement Tab -->
       <section id="tab-balances" class="tab-panel hidden">
+        <div id="balanceStrip" class="balance-strip mb-5 hidden" aria-live="polite"></div>
         <div class="bb-card mb-4">
           <div class="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
             <div class="min-w-0">
@@ -311,14 +307,7 @@
           </div>
 
           <div class="bb-card">
-            <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
-              <h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Who pays whom</h3>
-              <div class="flex gap-1 flex-wrap" id="settlementModeSelector" role="group" aria-label="Settlement style">
-                <button type="button" class="split-type-pill active" data-settlement-mode="smart">Expense-aware</button>
-                <button type="button" class="split-type-pill" data-settlement-mode="simplified">Fewest payments</button>
-              </div>
-            </div>
-            <p id="settlementModeHelp" class="text-[10px] text-ink/50 font-mono mb-3">Expense-aware keeps who shared each bill. Fewest payments nets everything into the smallest transfer list.</p>
+            <h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Who pays whom</h3>
             <div id="settlementList" class="space-y-2 font-mono text-sm"></div>
             <p id="settlementEmpty" class="hidden text-ink/40 text-sm font-mono py-4">Everyone's settled up — no transfers needed.</p>
             <div id="paymentPendingNotice" class="hidden mt-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs font-mono text-amber-900"></div>
@@ -464,7 +453,7 @@
   </div>
 
   <div id="notificationsModal" class="modal-overlay hidden">
-    <div class="bb-card modal-card"><div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3"><h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Notifications</h2><button type="button" id="closeNotificationsBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button></div><div id="notificationsList" class="space-y-2 max-h-[60vh] overflow-y-auto"></div></div>
+    <div class="bb-card modal-card"><div class="flex items-center justify-between gap-3 mb-4 border-b border-ink/10 pb-3"><h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Notifications</h2><div class="flex items-center gap-2"><button type="button" id="markAllNotificationsReadBtn" class="bb-btn-secondary !py-1 !px-2.5 text-[10px] hidden">Mark all read</button><button type="button" id="closeNotificationsBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button></div></div><div id="notificationsList" class="space-y-2 max-h-[60vh] overflow-y-auto"></div></div>
   </div>
 
   <div id="commentsModal" class="modal-overlay hidden">
@@ -488,9 +477,9 @@
   <nav class="bottom-nav">
     <a href="/index.html" class="active">
       <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-      Groups
+      Expenses
     </a>
-    <a href="/friends.html">
+    <a href="/index.html?view=friends">
       <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       Friends
     </a>
@@ -510,8 +499,8 @@
     Add expense
   </button>
 
-  <script src="/api.js?v=20260925swipe2"></script>
-  <script src="/group.js?v=20260925swipe2"></script>
+  <script src="/api.js?v=20260925markAll"></script>
+  <script src="/group.js?v=20260925markAll"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

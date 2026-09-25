@@ -11,7 +11,6 @@ const state = {
   editingExpenseId: null,
   splitType: "EQUAL", // EQUAL | PERCENTAGE | EXACT | SHARES
   payMode: "single",
-  settlementMode: localStorage.getItem("sharesquad_settlement_mode") === "simplified" ? "simplified" : "smart",
   lastBalances: [],
   selectedSplit: new Set(),
   splitValues: {}, // { member_id: number }
@@ -586,35 +585,26 @@ function renderBalanceStrip(balances) {
     strip.innerHTML = "";
     return;
   }
-  const chips = state.lastBalances.map((b) => {
+  const ordered = state.lastBalances.slice().sort((a, b) => {
+    const aMe = Number(a.member_id) === Number(state.myMemberId) ? 0 : 1;
+    const bMe = Number(b.member_id) === Number(state.myMemberId) ? 0 : 1;
+    if (aMe !== bMe) return aMe - bMe;
+    return String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" });
+  });
+  const chips = ordered.map((b) => {
     const net = b.converted_net_balance != null ? b.converted_net_balance : b.net_balance;
     const curr = b.converted_currency || b.currency || groupCurrency();
     const tone = net > 0.009 ? "owed" : net < -0.009 ? "owe" : "settled";
     const label = net > 0.009 ? "is owed" : net < -0.009 ? "owes" : "settled";
     const amount = Math.abs(net) < 0.005 ? ShareSquad.formatMoneyText(0, curr) : ShareSquad.formatMoneyText(Math.abs(net), curr);
     const mine = Number(b.member_id) === Number(state.myMemberId) ? " is-me" : "";
-    return `<button type="button" class="balance-chip ${tone}${mine}" data-tab-jump="balances" title="${ShareSquad.escapeHtml(b.name)} ${label} ${amount}">
+    return `<div class="balance-chip ${tone}${mine}" title="${ShareSquad.escapeHtml(b.name)} ${label} ${amount}">
       <span class="balance-chip-name">${ShareSquad.escapeHtml(b.name)}</span>
       <span class="balance-chip-amt">${tone === "settled" ? "✓" : (tone === "owed" ? "+" : "−")}${tone === "settled" ? "" : amount}</span>
-    </button>`;
+    </div>`;
   }).join("");
-  strip.innerHTML = `<div class="balance-strip-label">This month</div><div class="balance-strip-row">${chips}</div>`;
+  strip.innerHTML = `<div class="balance-strip-label">This month</div><div class="balance-strip-grid">${chips}</div>`;
   strip.classList.remove("hidden");
-  strip.querySelectorAll("[data-tab-jump]").forEach((btn) => {
-    btn.addEventListener("click", () => switchTab("balances"));
-  });
-}
-
-function syncSettlementModeUI() {
-  $$("#settlementModeSelector .split-type-pill").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.settlementMode === state.settlementMode);
-  });
-  const help = $("#settlementModeHelp");
-  if (help) {
-    help.textContent = state.settlementMode === "simplified"
-      ? "Fewest payments nets all balances into the smallest transfer list."
-      : "Expense-aware keeps transfers aligned with who shared each bill.";
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -648,7 +638,7 @@ async function loadExpenses() {
     const payers = payerLines(e);
     const payerHtml = payers.map((payer) => `<div class="whitespace-nowrap">${ShareSquad.escapeHtml(payer.name)}${payer.amount ? ` <span class="text-ink/55">${ShareSquad.escapeHtml(payer.amount)}</span>` : ""}</div>`).join("");
     const splitNames = e.splits.map((s) => memberMap.get(s.member_id) || "?").join(", ");
-    const catClass = ShareSquad.categoryClass(e.category);
+    const catMark = ShareSquad.categoryMark(e.category);
 
     // Desktop Row
     const tr = document.createElement("tr");
@@ -657,7 +647,7 @@ async function loadExpenses() {
     tr.innerHTML = `
       <td class="py-2.5 pr-3 text-ink/70">${e.bill_date}</td>
       <td class="py-2.5 pr-3 font-bold text-ink">${ShareSquad.escapeHtml(e.store_name)}</td>
-      <td class="py-2.5 pr-3"><span class="category-tag ${catClass}">${ShareSquad.escapeHtml(e.category)}</span></td>
+      <td class="py-2.5 pr-3"><span ${catMark}>${ShareSquad.escapeHtml(e.category)}</span></td>
       <td class="py-2.5 pr-3 text-ink/80">${payerHtml}</td>
       <td class="py-2.5 pr-3 text-ink/60 text-[11px]">${ShareSquad.escapeHtml(e.split_type || "EQUAL")} (${splitNames})</td>
       <td class="py-2.5 pr-3 text-right font-bold text-brand">${ShareSquad.formatMoney(e.total_amount, e.currency || groupCurrency())}</td>
@@ -679,7 +669,7 @@ async function loadExpenses() {
       <div class="card-top">
         <div>
           <div class="card-store">${ShareSquad.escapeHtml(e.store_name)}</div>
-          <span class="category-tag ${catClass} mt-1">${ShareSquad.escapeHtml(e.category)}</span>
+          <span ${ShareSquad.categoryMark(e.category, "category-tag mt-1")}>${ShareSquad.escapeHtml(e.category)}</span>
         </div>
         <div class="card-amount text-brand">${ShareSquad.formatMoney(e.total_amount, e.currency || groupCurrency())}</div>
       </div>
@@ -931,15 +921,12 @@ async function saveExpense() {
 // Balances & Currency Auto-Conversion
 // ---------------------------------------------------------------------------
 async function loadBalances() {
-  const mode = state.settlementMode === "simplified" ? "simplified" : "smart";
   const [balances, settlements, payments] = await Promise.all([
     ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/balances`),
-    ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/settlements?mode=${mode}`),
+    ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/settlements?mode=smart`),
     ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments`),
   ]);
   renderBalanceStrip(balances);
-  syncSettlementModeUI();
-
   const tbody = $("#balanceBody");
   tbody.innerHTML = "";
 
@@ -1147,33 +1134,71 @@ async function loadInsights() {
     const data = await ShareSquad.api(`/groups/${gid()}/dashboard?period_key=${state.currentPeriod}`);
     const categoryRows = Object.entries(data.category_totals || {}).sort((a, b) => b[1] - a[1]);
     const top = data.largest_expenses || [];
+    const chart = ShareSquad.renderCategoryPieChart(categoryRows, data.total_spent, data.currency);
     root.innerHTML = `
-      <div class="insight-kpis"><article class="bb-card"><p class="insight-label">Total spending</p><p class="insight-value">${ShareSquad.formatMoney(data.total_spent, data.currency)}</p><p class="text-xs text-ink/45">${state.currentPeriod}</p></article><article class="bb-card"><p class="insight-label">Top category</p><p class="insight-value text-lg"><span class="category-tag ${ShareSquad.categoryClass(categoryRows[0]?.[0] || "General")}">${ShareSquad.escapeHtml(categoryRows[0]?.[0] || "No expenses")}</span></p><p class="text-xs text-ink/45">${categoryRows[0] ? ShareSquad.formatMoney(categoryRows[0][1], data.currency) : ""}</p></article></div>
-      <div class="grid md:grid-cols-2 gap-4"><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">By category</h3>${categoryRows.length ? categoryRows.map(([name, amount]) => `<div class="insight-row cat-row"><span class="inline-flex items-center gap-2 min-w-0"><span class="category-dot ${ShareSquad.categoryClass(name)}"></span><span class="truncate">${ShareSquad.escapeHtml(name)}</span></span><strong>${ShareSquad.formatMoney(amount, data.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses in this period.</p>'}</article><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Largest expenses</h3>${top.length ? top.map((expense) => `<div class="insight-row cat-row"><span class="inline-flex items-center gap-2 min-w-0"><span class="category-tag ${ShareSquad.categoryClass(expense.category)}">${ShareSquad.escapeHtml(expense.category || "General")}</span><span class="truncate">${ShareSquad.escapeHtml(expense.store_name)}</span></span><strong>${ShareSquad.formatMoney(expense.total_amount, expense.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses in this period.</p>'}</article></div>`;
+      <div class="insight-kpis"><article class="bb-card"><p class="insight-label">Total spending</p><p class="insight-value">${ShareSquad.formatMoney(data.total_spent, data.currency)}</p><p class="text-xs text-ink/45">${state.currentPeriod}</p></article><article class="bb-card"><p class="insight-label">Top category</p><p class="insight-value text-lg"><span ${ShareSquad.categoryMark(categoryRows[0]?.[0] || "General")}>${ShareSquad.escapeHtml(categoryRows[0]?.[0] || "No expenses")}</span></p><p class="text-xs text-ink/45">${categoryRows[0] ? ShareSquad.formatMoney(categoryRows[0][1], data.currency) : ""}</p></article></div>
+      <div class="grid md:grid-cols-2 gap-4"><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">By category</h3>${chart}</article><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Largest expenses</h3>${top.length ? top.map((expense) => `<div class="insight-row cat-row"><span class="inline-flex items-center gap-2 min-w-0"><span ${ShareSquad.categoryMark(expense.category || "General")}>${ShareSquad.escapeHtml(expense.category || "General")}</span><span class="truncate">${ShareSquad.escapeHtml(expense.store_name)}</span></span><strong>${ShareSquad.formatMoney(expense.total_amount, expense.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses in this period.</p>'}</article></div>`;
   } catch (err) { root.innerHTML = `<div class="bb-card balance-negative">${ShareSquad.escapeHtml(err.message)}</div>`; }
 }
 
 async function openNotifications() {
   const modal = $("#notificationsModal");
   const list = $("#notificationsList");
+  const markAllBtn = $("#markAllNotificationsReadBtn");
   modal.classList.remove("hidden");
   list.innerHTML = '<div class="ui-skeleton-card"><span></span><span></span></div>';
   try {
-    const items = await ShareSquad.api("/notifications");
+    const [items, unreadCount] = await Promise.all([
+      ShareSquad.api("/notifications"),
+      loadNotificationCount(),
+    ]);
+    markAllBtn?.classList.toggle("hidden", unreadCount === 0);
     list.innerHTML = items.length ? items.map((item) => `<button class="notification-item ${item.read_at ? "" : "unread"}" data-id="${item.id}" data-link="${ShareSquad.escapeHtml(item.link || "")}" data-message="${ShareSquad.escapeHtml(item.message)}"><span>${ShareSquad.escapeHtml(item.message)}</span><small>${ShareSquad.formatDate(item.created_at)}</small>${item.link ? '<span class="notification-action">View details →</span>' : ""}</button>`).join("") : '<p class="text-sm text-ink/55 py-5 text-center">You are all caught up.</p>';
-    $$(".notification-item").forEach((button) => button.addEventListener("click", async () => {
+    list.querySelectorAll(".notification-item").forEach((button) => button.addEventListener("click", async () => {
       await ShareSquad.api(`/notifications/${button.dataset.id}/read`, { method: "POST" });
       if (button.dataset.link) ShareSquad.openNotificationLink(button.dataset.link, button.dataset.message);
-      else { button.classList.remove("unread"); loadNotificationCount(); }
+      else {
+        button.classList.remove("unread");
+        await loadNotificationCount();
+      }
     }));
-    loadNotificationCount();
-  } catch (err) { list.innerHTML = `<p class="text-xs balance-negative">${ShareSquad.escapeHtml(err.message)}</p>`; }
+  } catch (err) {
+    list.innerHTML = `<p class="text-xs balance-negative">${ShareSquad.escapeHtml(err.message)}</p>`;
+    markAllBtn?.classList.add("hidden");
+  }
+}
+
+async function markAllNotificationsRead() {
+  const markAllBtn = $("#markAllNotificationsReadBtn");
+  try {
+    if (markAllBtn) markAllBtn.disabled = true;
+    await ShareSquad.api("/notifications/read-all", { method: "POST" });
+    $$("#notificationsList .notification-item.unread").forEach((item) => item.classList.remove("unread"));
+    markAllBtn?.classList.add("hidden");
+    await loadNotificationCount();
+    ShareSquad.showToast("All notifications marked as read", "success");
+  } catch (err) {
+    ShareSquad.showToast(err.message || "Could not mark notifications as read", "error");
+  } finally {
+    if (markAllBtn) markAllBtn.disabled = false;
+  }
 }
 
 async function loadNotificationCount() {
   const badge = $("#notificationCount");
-  if (!badge) return;
-  try { const items = await ShareSquad.api("/notifications?unread_only=true"); badge.textContent = items.length > 9 ? "9+" : items.length; badge.classList.toggle("hidden", !items.length); } catch (_) { badge.classList.add("hidden"); }
+  const markAllBtn = $("#markAllNotificationsReadBtn");
+  if (!badge) return 0;
+  try {
+    const items = await ShareSquad.api("/notifications?unread_only=true");
+    badge.textContent = items.length > 9 ? "9+" : items.length;
+    badge.classList.toggle("hidden", !items.length);
+    markAllBtn?.classList.toggle("hidden", !items.length);
+    return items.length;
+  } catch (_) {
+    badge.classList.add("hidden");
+    markAllBtn?.classList.add("hidden");
+    return 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1462,15 +1487,6 @@ async function handleReceiptUpload(file) {
   $$("#payModeSelector .split-type-pill").forEach((btn) => {
     btn.addEventListener("click", () => setPayMode(btn.dataset.payMode));
   });
-  $$("#settlementModeSelector .split-type-pill").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      state.settlementMode = btn.dataset.settlementMode === "simplified" ? "simplified" : "smart";
-      localStorage.setItem("sharesquad_settlement_mode", state.settlementMode);
-      syncSettlementModeUI();
-      loadBalances().catch(() => {});
-    });
-  });
-  syncSettlementModeUI();
 
   $("#f_amount").addEventListener("input", () => {
     if (state.splitType !== "EQUAL") renderSplitOptions();
@@ -1595,6 +1611,7 @@ async function handleReceiptUpload(file) {
   });
 
   $("#notificationsBtn")?.addEventListener("click", openNotifications);
+  $("#markAllNotificationsReadBtn")?.addEventListener("click", markAllNotificationsRead);
   $("#closeNotificationsBtn")?.addEventListener("click", () => $("#notificationsModal").classList.add("hidden"));
   $("#closeCommentsBtn")?.addEventListener("click", () => $("#commentsModal").classList.add("hidden"));
   $("#commentForm")?.addEventListener("submit", submitComment);

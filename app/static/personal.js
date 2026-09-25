@@ -38,30 +38,15 @@ function renderSummary(summary) {
     $("#topCategoryAmount").innerHTML = ShareSquad.formatMoney(0, currency);
   }
 
-  // Category Breakdown Bars
+  // Category breakdown pie chart
   const barsContainer = $("#categoryBars");
   const emptyCategory = $("#emptyCategory");
-  barsContainer.innerHTML = "";
-
   if (catEntries.length === 0) {
+    barsContainer.innerHTML = "";
     emptyCategory.classList.remove("hidden");
   } else {
     emptyCategory.classList.add("hidden");
-    catEntries.forEach(([cat, amt]) => {
-      const pct = summary.total_spent > 0 ? ((amt / summary.total_spent) * 100).toFixed(1) : 0;
-      const bar = document.createElement("div");
-      bar.className = "space-y-1";
-      bar.innerHTML = `
-        <div class="flex justify-between items-center text-xs font-mono">
-          <span class="inline-flex items-center gap-2 font-semibold text-ink"><span class="category-tag ${ShareSquad.categoryClass(cat)}">${ShareSquad.escapeHtml(cat)}</span></span>
-          <span class="text-ink/60">${ShareSquad.formatMoney(amt, currency)} (${pct}%)</span>
-        </div>
-        <div class="w-full h-2 bg-ink/5 rounded-full overflow-hidden">
-          <div class="category-bar-fill ${ShareSquad.categoryClass(cat)}" style="width: ${pct}%"></div>
-        </div>
-      `;
-      barsContainer.appendChild(bar);
-    });
+    barsContainer.innerHTML = ShareSquad.renderCategoryPieChart(catEntries, summary.total_spent, currency);
   }
 
   filterAndRenderExpenses();
@@ -85,14 +70,14 @@ function filterAndRenderExpenses() {
   empty.classList.add("hidden");
 
   filtered.forEach((e) => {
-    const catClass = ShareSquad.categoryClass(e.category);
+    const catMark = ShareSquad.categoryMark(e.category);
 
     const tr = document.createElement("tr");
     tr.className = "border-b border-ink/5 hover:bg-ink/5 transition-colors";
     tr.innerHTML = `
       <td class="py-2.5 px-2 font-mono text-ink/70">${e.bill_date}</td>
       <td class="py-2.5 px-2 font-mono font-bold text-ink">${ShareSquad.escapeHtml(e.store_name)}</td>
-      <td class="py-2.5 px-2"><span class="category-tag ${catClass}">${ShareSquad.escapeHtml(e.category)}</span></td>
+      <td class="py-2.5 px-2"><span ${catMark}>${ShareSquad.escapeHtml(e.category)}</span></td>
       <td class="py-2.5 px-2 font-mono text-ink/50 text-[11px]">${ShareSquad.escapeHtml(e.notes || "—")}</td>
       <td class="py-2.5 px-2 font-mono font-bold text-right text-brand">${ShareSquad.formatMoney(e.total_amount, e.currency || "USD")}</td>
       <td class="py-2.5 px-2 text-right">
@@ -111,7 +96,7 @@ function filterAndRenderExpenses() {
         <div class="card-top">
           <div>
             <div class="card-store">${ShareSquad.escapeHtml(e.store_name)}</div>
-            <span class="category-tag ${catClass} mt-1">${ShareSquad.escapeHtml(e.category)}</span>
+            <span ${ShareSquad.categoryMark(e.category, "category-tag mt-1")}>${ShareSquad.escapeHtml(e.category)}</span>
           </div>
           <div class="card-amount text-brand">${ShareSquad.formatMoney(e.total_amount, e.currency || "USD")}</div>
         </div>
@@ -426,6 +411,64 @@ async function submitExpenseForm(e) {
     window.location.href = "/login.html";
   });
 
+  // Swipe right → Friends (Expenses); swipe left has nowhere further
+  const SWIPE_BLOCK =
+    ".page-header, .bottom-nav, .mobile-quick-action, .mobile-quick-actions, " +
+    "input, textarea, select, button, a, label, [role='dialog'], .modal, .modal-overlay, [data-no-swipe]";
+  let _swipe = null;
+
+  function swipeIsBlocked(target) {
+    if (!(target instanceof Element)) return true;
+    if (target.closest(SWIPE_BLOCK)) return true;
+    let node = target;
+    while (node && node !== document.body) {
+      if (node instanceof HTMLElement) {
+        const style = window.getComputedStyle(node);
+        const ox = style.overflowX;
+        if ((ox === "auto" || ox === "scroll") && node.scrollWidth > node.clientWidth + 4) {
+          return true;
+        }
+      }
+      node = node.parentElement;
+    }
+    return false;
+  }
+
+  document.addEventListener("touchstart", (e) => {
+    const touch = e.touches[0];
+    if (!touch || e.touches.length !== 1 || swipeIsBlocked(e.target)) {
+      _swipe = null;
+      return;
+    }
+    if (!e.target.closest?.("main.page-main")) {
+      _swipe = null;
+      return;
+    }
+    _swipe = { x: touch.clientX, y: touch.clientY };
+  }, { passive: true });
+
+  document.addEventListener("touchmove", (e) => {
+    if (!_swipe || e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const dx = touch.clientX - _swipe.x;
+    const dy = touch.clientY - _swipe.y;
+    if (Math.abs(dy) > 24 && Math.abs(dy) > Math.abs(dx)) _swipe = null;
+  }, { passive: true });
+
+  document.addEventListener("touchend", (e) => {
+    if (!_swipe) return;
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - _swipe.x;
+    const dy = touch.clientY - _swipe.y;
+    _swipe = null;
+    if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.35) return;
+    if (dx > 0) {
+      try { sessionStorage.setItem("sharesquad_expense_view", "friends"); } catch (_) {}
+      window.location.href = "/index.html?view=friends";
+    }
+  }, { passive: true });
+
+  document.addEventListener("touchcancel", () => { _swipe = null; }, { passive: true });
 
   try {
     const me = await ShareSquad.api("/auth/me");

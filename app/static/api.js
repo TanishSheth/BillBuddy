@@ -244,21 +244,59 @@ function initGlobalNotifications() {
   const modal = document.createElement("div");
   modal.id = "notificationsModal";
   modal.className = "modal-overlay hidden";
-  modal.innerHTML = `<div class="bb-card modal-card"><div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3"><h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Notifications</h2><button type="button" class="text-ink/40 hover:text-ink font-bold" aria-label="Close notifications">×</button></div><div id="notificationsList" class="space-y-2 max-h-[60vh] overflow-y-auto"></div></div>`;
+  modal.innerHTML = `<div class="bb-card modal-card"><div class="flex items-center justify-between gap-3 mb-4 border-b border-ink/10 pb-3"><h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Notifications</h2><div class="flex items-center gap-2"><button type="button" id="markAllNotificationsReadBtn" class="bb-btn-secondary !py-1 !px-2.5 text-[10px] hidden">Mark all read</button><button type="button" class="text-ink/40 hover:text-ink font-bold" aria-label="Close notifications">×</button></div></div><div id="notificationsList" class="space-y-2 max-h-[60vh] overflow-y-auto"></div></div>`;
   document.body.appendChild(modal);
+  const markAllBtn = $("#markAllNotificationsReadBtn");
+  const refreshCount = async () => {
+    try {
+      const unread = await api("/notifications?unread_only=true");
+      const badge = $("#notificationCount");
+      if (badge) {
+        badge.textContent = unread.length > 9 ? "9+" : unread.length;
+        badge.classList.toggle("hidden", !unread.length);
+      }
+      markAllBtn?.classList.toggle("hidden", !unread.length);
+      return unread.length;
+    } catch (_) {
+      return 0;
+    }
+  };
   const load = async () => {
     const list = $("#notificationsList");
     list.innerHTML = '<div class="ui-skeleton-card"><span></span><span></span></div>';
     try {
-      const items = await api("/notifications");
+      const [items, unreadCount] = await Promise.all([api("/notifications"), refreshCount()]);
+      markAllBtn?.classList.toggle("hidden", unreadCount === 0);
       list.innerHTML = items.length ? items.map((item) => `<button class="notification-item ${item.read_at ? "" : "unread"}" data-id="${item.id}" data-link="${escapeHtml(item.link || "")}" data-message="${escapeHtml(item.message)}"><span>${escapeHtml(item.message)}</span><small>${formatDate(item.created_at)}</small>${item.link ? '<span class="notification-action">View details →</span>' : ""}</button>`).join("") : '<p class="text-sm text-ink/55 py-5 text-center">You are all caught up.</p>';
-      list.querySelectorAll(".notification-item").forEach((item) => item.addEventListener("click", async () => { await api(`/notifications/${item.dataset.id}/read`, { method: "POST" }); if (item.dataset.link) openNotificationLink(item.dataset.link, item.dataset.message); else { item.classList.remove("unread"); refreshCount(); } }));
-      refreshCount();
-    } catch (error) { list.innerHTML = `<p class="text-sm balance-negative">${escapeHtml(error.message)}</p>`; }
+      list.querySelectorAll(".notification-item").forEach((item) => item.addEventListener("click", async () => {
+        await api(`/notifications/${item.dataset.id}/read`, { method: "POST" });
+        if (item.dataset.link) openNotificationLink(item.dataset.link, item.dataset.message);
+        else {
+          item.classList.remove("unread");
+          await refreshCount();
+        }
+      }));
+    } catch (error) {
+      list.innerHTML = `<p class="text-sm balance-negative">${escapeHtml(error.message)}</p>`;
+      markAllBtn?.classList.add("hidden");
+    }
   };
-  const refreshCount = async () => { try { const unread = await api("/notifications?unread_only=true"); const badge = $("#notificationCount"); badge.textContent = unread.length > 9 ? "9+" : unread.length; badge.classList.toggle("hidden", !unread.length); } catch (_) {} };
+  markAllBtn?.addEventListener("click", async () => {
+    try {
+      markAllBtn.disabled = true;
+      await api("/notifications/read-all", { method: "POST" });
+      $$("#notificationsList .notification-item.unread").forEach((item) => item.classList.remove("unread"));
+      markAllBtn.classList.add("hidden");
+      await refreshCount();
+      showToast("All notifications marked as read", "success");
+    } catch (error) {
+      showToast(error.message || "Could not mark notifications as read", "error");
+    } finally {
+      markAllBtn.disabled = false;
+    }
+  });
   button.addEventListener("click", () => { modal.classList.remove("hidden"); load(); });
-  modal.querySelector("button").addEventListener("click", () => modal.classList.add("hidden"));
+  modal.querySelector('button[aria-label="Close notifications"]').addEventListener("click", () => modal.classList.add("hidden"));
   modal.addEventListener("click", (event) => { if (event.target === modal) modal.classList.add("hidden"); });
   refreshCount();
 }
@@ -644,9 +682,102 @@ function categorySlug(name) {
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
 }
 
+const CATEGORY_ACCENTS = {
+  Food: "#D97706",
+  Groceries: "#16A34A",
+  Travel: "#4F46E5",
+  Transit: "#0284C7",
+  Housing: "#DB2777",
+  Utilities: "#9333EA",
+  Entertainment: "#E11D48",
+  Shopping: "#EA580C",
+  Healthcare: "#0D9488",
+  General: "#64748B",
+};
+
+function hashHue(value) {
+  let hash = 2166136261;
+  const text = String(value || "").toLowerCase();
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash) % 360;
+}
+
+function categoryAccentColor(name) {
+  const value = String(name || "General").trim() || "General";
+  const match = CATEGORIES.find((cat) => cat.id === value || cat.label === value);
+  if (match) return CATEGORY_ACCENTS[match.slug] || CATEGORY_ACCENTS.General;
+  // Stable distinct hue per custom label so Pets / Gifts / etc. don't all share General gray.
+  const hue = hashHue(value);
+  return `hsl(${hue} 64% 42%)`;
+}
+
+function categoryTintStyle(name) {
+  const accent = categoryAccentColor(name);
+  return `--cat-accent:${accent};--cat-bg:color-mix(in srgb, ${accent} 16%, white);--cat-fg:color-mix(in srgb, ${accent} 72%, black)`;
+}
+
 function categoryClass(name) {
-  const slug = categorySlug(name);
-  return CATEGORIES.some((cat) => cat.slug === slug) ? `cat-${slug}` : "cat-General";
+  const value = String(name || "General").trim() || "General";
+  const match = CATEGORIES.find((cat) => cat.id === value || cat.label === value);
+  if (match) return `cat-${match.slug}`;
+  return "cat-Custom";
+}
+
+function categoryMark(name, extraClass = "category-tag") {
+  const value = String(name || "General").trim() || "General";
+  const cls = `${extraClass} ${categoryClass(value)}`.trim();
+  if (isKnownCategory(value)) return `class="${escapeHtml(cls)}"`;
+  return `class="${escapeHtml(cls)}" style="${categoryTintStyle(value)}"`;
+}
+
+function renderCategoryPieChart(categoryRows, totalSpent, currency) {
+  const rows = Array.isArray(categoryRows) ? categoryRows : [];
+  if (!rows.length) return '<p class="text-sm text-ink/45">No expenses in this period.</p>';
+  const cx = 50;
+  const cy = 50;
+  const r = 42;
+  const total = rows.reduce((sum, [, amount]) => sum + Number(amount || 0), 0) || 1;
+  let angle = -Math.PI / 2;
+  const slices = rows.map(([name, amount]) => {
+    const value = Number(amount || 0);
+    const slice = (value / total) * Math.PI * 2;
+    const start = angle;
+    const end = angle + slice;
+    angle = end;
+    const x1 = cx + r * Math.cos(start);
+    const y1 = cy + r * Math.sin(start);
+    const x2 = cx + r * Math.cos(end);
+    const y2 = cy + r * Math.sin(end);
+    const large = slice > Math.PI ? 1 : 0;
+    const color = categoryAccentColor(name);
+    if (value <= 0) return "";
+    if (slice >= Math.PI * 2 - 1e-6) {
+      return `<circle class="category-pie-slice" cx="${cx}" cy="${cy}" r="${r}" fill="${color}"></circle>`;
+    }
+    return `<path class="category-pie-slice" d="M ${cx} ${cy} L ${x1.toFixed(3)} ${y1.toFixed(3)} A ${r} ${r} 0 ${large} 1 ${x2.toFixed(3)} ${y2.toFixed(3)} Z" fill="${color}"></path>`;
+  }).join("");
+
+  const legend = rows.map(([name, amount]) => {
+    const share = totalSpent > 0 ? Math.round((Number(amount || 0) / totalSpent) * 100) : 0;
+    const color = categoryAccentColor(name);
+    return `<div class="category-pie-legend-row">
+      <span class="inline-flex items-center gap-2 min-w-0">
+        <span class="category-pie-swatch ${categoryClass(name)}" style="background:${color}"></span>
+        <span class="truncate">${escapeHtml(name)}</span>
+      </span>
+      <strong>${formatMoney(amount, currency)} <span class="category-chart-share">${share}%</span></strong>
+    </div>`;
+  }).join("");
+
+  return `<div class="category-chart" role="img" aria-label="Spending by category">
+    <div class="category-pie-wrap">
+      <svg class="category-pie" viewBox="0 0 100 100" aria-hidden="true">${slices || '<circle class="category-pie-empty" cx="50" cy="50" r="42"></circle>'}</svg>
+    </div>
+    <div class="category-pie-legend">${legend}</div>
+  </div>`;
 }
 
 function fillCategorySelect(select, selected = "", { includeAll = false, allLabel = "All Categories", allowCustom = !includeAll } = {}) {
@@ -676,12 +807,31 @@ function fillCategorySelect(select, selected = "", { includeAll = false, allLabe
 
 function syncCategorySelect(select) {
   if (!select) return;
-  select.classList.remove(...CATEGORIES.map((cat) => `cat-${cat.slug}`), "cat-General");
+  select.classList.remove(...CATEGORIES.map((cat) => `cat-${cat.slug}`), "cat-General", "cat-Custom");
+  ["--cat-accent", "--cat-bg", "--cat-fg"].forEach((prop) => select.style.removeProperty(prop));
   const value = select.value;
-  if (value && value !== "All" && value !== CUSTOM_CATEGORY_VALUE) select.classList.add(categoryClass(value));
-  else if (value === CUSTOM_CATEGORY_VALUE) select.classList.add("cat-General");
   const customInput = document.getElementById(select.dataset.customInput || "") || select.parentElement?.querySelector("[data-category-custom], #f_category_custom, #expenseCategoryCustom, #qsCategoryCustom");
   const customWrap = customInput?.closest("#customCategoryWrap, .custom-category-wrap") || document.getElementById(select.dataset.customWrap || "");
+  if (value && value !== "All" && value !== CUSTOM_CATEGORY_VALUE) {
+    select.classList.add(categoryClass(value));
+    if (!isKnownCategory(value)) {
+      const accent = categoryAccentColor(value);
+      select.style.setProperty("--cat-accent", accent);
+      select.style.setProperty("--cat-bg", `color-mix(in srgb, ${accent} 16%, white)`);
+      select.style.setProperty("--cat-fg", `color-mix(in srgb, ${accent} 72%, black)`);
+    }
+  } else if (value === CUSTOM_CATEGORY_VALUE) {
+    const custom = (customInput?.value || "").trim();
+    if (custom) {
+      select.classList.add("cat-Custom");
+      const accent = categoryAccentColor(custom);
+      select.style.setProperty("--cat-accent", accent);
+      select.style.setProperty("--cat-bg", `color-mix(in srgb, ${accent} 16%, white)`);
+      select.style.setProperty("--cat-fg", `color-mix(in srgb, ${accent} 72%, black)`);
+    } else {
+      select.classList.add("cat-General");
+    }
+  }
   if (customWrap) customWrap.classList.toggle("hidden", value !== CUSTOM_CATEGORY_VALUE);
 }
 
@@ -699,6 +849,10 @@ function bindCategorySelect(select, { includeAll = false, allowCustom = !include
   select.dataset.categoryBound = "1";
   fillCategorySelect(select, select.value, { includeAll, allowCustom });
   select.addEventListener("change", () => syncCategorySelect(select));
+  const customInput = document.getElementById(select.dataset.customInput || "") || select.parentElement?.querySelector("[data-category-custom], #f_category_custom, #expenseCategoryCustom, #qsCategoryCustom");
+  customInput?.addEventListener("input", () => {
+    if (select.value === CUSTOM_CATEGORY_VALUE) syncCategorySelect(select);
+  });
 }
 
 function bindAllCategorySelects(root = document) {
@@ -877,6 +1031,10 @@ window.ShareSquad = {
   CATEGORIES,
   categorySlug,
   categoryClass,
+  categoryAccentColor,
+  categoryTintStyle,
+  categoryMark,
+  renderCategoryPieChart,
   isKnownCategory,
   fillCategorySelect,
   syncCategorySelect,

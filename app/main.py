@@ -876,14 +876,52 @@ def _purge_expired_account_deletions() -> None:
         db.close()
 
 
+READ_NOTIFICATION_RETENTION = timedelta(days=2)
+
+
+def _purge_stale_read_notifications(db: Optional[Session] = None) -> int:
+    """Delete notifications that have been read for more than 2 days."""
+    owns_session = db is None
+    session = db or SessionLocal()
+    try:
+        cutoff = datetime.now(timezone.utc) - READ_NOTIFICATION_RETENTION
+        stale_ids = [
+            row.id
+            for row in session.query(models.Notification.id, models.Notification.read_at)
+            .filter(models.Notification.read_at.isnot(None))
+            .all()
+            if (read_at := _as_utc(row.read_at)) is not None and read_at <= cutoff
+        ]
+        if not stale_ids:
+            return 0
+        deleted = (
+            session.query(models.Notification)
+            .filter(models.Notification.id.in_(stale_ids))
+            .delete(synchronize_session=False)
+        )
+        session.commit()
+        if deleted:
+            logger.info("Purged %s read notifications older than 2 days", deleted)
+        return int(deleted or 0)
+    except Exception:
+        session.rollback()
+        logger.exception("Could not purge stale read notifications")
+        return 0
+    finally:
+        if owns_session:
+            session.close()
+
+
 account_cleanup_scheduler = BackgroundScheduler()
 
 
 @app.on_event("startup")
 def start_account_deletion_cleanup() -> None:
     _purge_expired_account_deletions()
+    _purge_stale_read_notifications()
     if not DISABLE_SCHEDULER and not account_cleanup_scheduler.running:
         account_cleanup_scheduler.add_job(_purge_expired_account_deletions, "interval", hours=24, id="account-deletion-cleanup", replace_existing=True)
+        account_cleanup_scheduler.add_job(_purge_stale_read_notifications, "interval", hours=6, id="read-notification-cleanup", replace_existing=True)
         account_cleanup_scheduler.start()
 
 
@@ -1214,9 +1252,21 @@ def set_period_currency_conversion(
 # ---------------------------------------------------------------------------
 # Quick Split Endpoints
 # ---------------------------------------------------------------------------
+def _can_manage_quick_split(split: models.QuickSplit, account: models.Account) -> bool:
+    """Either party on a one-to-one bill can edit or delete it."""
+    if (split.created_by_account_id or split.payer_account_id) == account.id:
+        return True
+    if split.payer_account_id == account.id:
+        return True
+    return any(
+        (p.account_id == account.id) or (p.email and p.email.lower() == account.email.lower())
+        for p in split.participants
+    )
+
+
 def _quick_split_out(split: models.QuickSplit, account: models.Account) -> schemas.QuickSplitOut:
     is_payer = split.payer_account_id == account.id
-    is_owner = (split.created_by_account_id or split.payer_account_id) == account.id
+    is_owner = _can_manage_quick_split(split, account)
     return schemas.QuickSplitOut(
         id=split.id,
         title=split.title,
@@ -1427,15 +1477,27 @@ def create_quick_split(
 @app.put("/api/quick-splits/{split_id}", response_model=schemas.QuickSplitOut)
 def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
     split = _require_quick_split_access(split_id, account, db)
-    if (split.created_by_account_id or split.payer_account_id) != account.id:
-        raise HTTPException(403, "Only the person who paid can edit this split")
+    if not _can_manage_quick_split(split, account):
+        raise HTTPException(403, "You cannot edit this split")
     if any(p.payment_status != "PENDING" for p in split.participants):
         raise HTTPException(400, "This split cannot be edited after someone has marked payment")
     if len(payload.participants) != 1:
         raise HTTPException(400, "A one-to-one split needs exactly one other person. Create a group for 3 or more people.")
     if payload.bill_date > date.today():
         raise HTTPException(400, "A bill date cannot be in the future")
+
+    payer_account = account
+    if payload.payer_account_id and payload.payer_account_id != account.id:
+        payer_account = db.query(models.Account).get(payload.payer_account_id)
+        if not payer_account:
+            raise HTTPException(404, "Person who paid was not found")
+        if not any(raw.account_id == account.id or (raw.email and str(raw.email).lower() == account.email.lower()) for raw in payload.participants):
+            raise HTTPException(400, "When your friend paid, your own account must be the other person in the split")
+    elif payload.payer_account_id:
+        payer_account = db.query(models.Account).get(payload.payer_account_id) or account
+
     invitees = []
+    selected_accounts = {}
     for index, raw in enumerate(payload.participants, start=1):
         token = secrets.token_urlsafe(16)
         selected_account = db.query(models.Account).get(raw.account_id) if raw.account_id else None
@@ -1444,23 +1506,37 @@ def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account
         email = selected_account.email if selected_account else (str(raw.email).strip().lower() if raw.email else f"slot-{token}@invite.local")
         if email and email not in [item[0] for item in invitees]:
             invitees.append((email, raw.value, raw.label or f"Person {index}", token))
-    if not invitees or (account.email.lower() in [item[0] for item in invitees] and split.payer_account_id == account.id):
+            selected_accounts[email] = selected_account
+    if not invitees:
+        raise HTTPException(400, "Add at least one other person")
+    if account.email.lower() in [item[0] for item in invitees] and payer_account.id == account.id:
         raise HTTPException(400, "Add at least one other person's email")
+
+    for raw in payload.participants:
+        if raw.account_id and raw.account_id != account.id:
+            _activate_friendship(db, account.id, raw.account_id)
+
     split.title = payload.title.strip()
     split.total_amount = Decimal(str(payload.total_amount)).quantize(Decimal("0.01"))
     split.currency = _normalize_currency(payload.currency, "USD")
     split.bill_date = payload.bill_date
     split.category = payload.category or "General"
     split.split_type = (payload.split_type or "EQUAL").upper()
+    split.payer_account_id = payer_account.id
     _assign_shared_payment(split, payload.payer_paid_amount)
     existing_by_email = {p.email: p for p in split.participants}
     kept = set()
     for email, value, label, token in invitees:
         participant = existing_by_email.get(email)
         if participant is None:
-            existing_account = selected_account or db.query(models.Account).filter_by(email=email).first()
+            existing_account = selected_accounts.get(email) or db.query(models.Account).filter_by(email=email).first()
             participant = models.QuickSplitParticipant(quick_split_id=split.id, email=email, account_id=existing_account.id if existing_account else None, display_name=existing_account.display_name if existing_account else label, share_amount=0, invite_token=token)
             db.add(participant)
+        else:
+            existing_account = selected_accounts.get(email) or db.query(models.Account).filter_by(email=email).first()
+            if existing_account:
+                participant.account_id = existing_account.id
+                participant.display_name = existing_account.display_name
         participant.split_value = value
         kept.add(email)
     for participant in list(split.participants):
@@ -1473,18 +1549,19 @@ def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account
     db.expire(split, ["participants"])
     participant_values = {p.id: p.split_value for p in split.participants if p.email in kept}
     _apply_quick_split_values(split, payload.payer_value, participant_values)
+    for participant in split.participants:
+        if participant.account_id and participant.account_id != split.payer_account_id:
+            _reopen_friend_settlement(db, split.payer_account_id, participant.account_id, split.bill_date)
     db.commit(); db.refresh(split)
     return _quick_split_out(split, account)
 
 
 @app.delete("/api/quick-splits/{split_id}")
 def delete_quick_split(split_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
-    """Permanently remove a one-to-one split. Only its payer may do this."""
-    split = db.query(models.QuickSplit).get(split_id)
-    if not split:
-        raise HTTPException(404, "One-to-one split not found")
-    if (split.created_by_account_id or split.payer_account_id) != account.id:
-        raise HTTPException(403, "Only the person who created this split can delete it")
+    """Permanently remove a one-to-one split. Either party may do this."""
+    split = _require_quick_split_access(split_id, account, db)
+    if not _can_manage_quick_split(split, account):
+        raise HTTPException(403, "You cannot delete this split")
     db.delete(split)
     db.commit()
     return {"ok": True, "message": "Split deleted"}
@@ -3310,10 +3387,51 @@ def list_group_activity(group_id: int, limit: int = Query(30, ge=1, le=100), acc
 
 @app.get("/api/notifications", response_model=list[schemas.NotificationOut])
 def list_notifications(unread_only: bool = False, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
-    query = db.query(models.Notification).filter_by(account_id=account.id)
+    _purge_stale_read_notifications(db)
+    base = db.query(models.Notification).filter_by(account_id=account.id)
     if unread_only:
-        query = query.filter(models.Notification.read_at.is_(None))
-    return query.order_by(models.Notification.created_at.desc(), models.Notification.id.desc()).limit(50).all()
+        return (
+            base.filter(models.Notification.read_at.is_(None))
+            .order_by(models.Notification.created_at.desc(), models.Notification.id.desc())
+            .limit(50)
+            .all()
+        )
+    # Surface unread first so older unread are never buried under newer read items
+    # (which would hide the Mark all read action while the badge still shows unread).
+    unread = (
+        base.filter(models.Notification.read_at.is_(None))
+        .order_by(models.Notification.created_at.desc(), models.Notification.id.desc())
+        .limit(50)
+        .all()
+    )
+    if len(unread) >= 50:
+        return unread
+    read = (
+        db.query(models.Notification)
+        .filter(
+            models.Notification.account_id == account.id,
+            models.Notification.read_at.isnot(None),
+        )
+        .order_by(models.Notification.created_at.desc(), models.Notification.id.desc())
+        .limit(50 - len(unread))
+        .all()
+    )
+    return unread + read
+
+
+@app.post("/api/notifications/read-all")
+def mark_all_notifications_read(account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    now = datetime.now(timezone.utc)
+    updated = (
+        db.query(models.Notification)
+        .filter(
+            models.Notification.account_id == account.id,
+            models.Notification.read_at.is_(None),
+        )
+        .update({models.Notification.read_at: now}, synchronize_session=False)
+    )
+    db.commit()
+    return {"updated": int(updated or 0)}
 
 
 @app.post("/api/notifications/{notification_id}/read", response_model=schemas.NotificationOut)
