@@ -2368,10 +2368,8 @@ def record_consolidated_friend_payment(
         allocations_json=json.dumps(allocations),
     )
     db.add(payment)
-    # A lender recording money received does not need to request their own
-    # confirmation. A borrower's "I paid" entry remains pending for lender approval.
-    if account.id == recipient_id:
-        _apply_confirmed_pair_payment(db, payment)
+    # Either person recording payment applies it immediately — no second confirmation.
+    _apply_confirmed_pair_payment(db, payment)
     db.commit(); db.refresh(payment)
     return _pair_payment_out(payment)
 
@@ -2380,16 +2378,17 @@ def record_consolidated_friend_payment(
 def confirm_consolidated_friend_payment(
     friend_id: int, payment_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
 ):
+    """Legacy endpoint for older pending rows; new payments apply on record."""
     one, two = _friend_pair(account.id, friend_id)
     payment = db.query(models.PairPayment).filter_by(id=payment_id, account_one_id=one, account_two_id=two).first()
     if not payment:
         raise HTTPException(404, "Payment not found")
+    if payment.status == "CONFIRMED":
+        return _pair_payment_out(payment)
     if payment.status != "PENDING":
         raise HTTPException(400, "This payment has already been handled")
-    if account.id == payment.reported_by_account_id:
-        raise HTTPException(403, "The other person must confirm this payment")
     if account.id not in (payment.payer_account_id, payment.recipient_account_id):
-        raise HTTPException(403, "Only the other person in this payment can confirm it")
+        raise HTTPException(403, "Only someone in this payment can confirm it")
     _apply_confirmed_pair_payment(db, payment)
     db.commit(); db.refresh(payment)
     return _pair_payment_out(payment)
@@ -2431,17 +2430,17 @@ def confirm_friend_settlement(friend_id: int, payload: schemas.FriendSettlementC
         db.add(settlement)
     if payload.action == "paid":
         if account.id != settlement.payer_account_id:
-            raise HTTPException(403, "Only the person who owes can confirm payment")
+            raise HTTPException(403, "Only the person who owes can record payment")
         settlement.payer_confirmed = True
     else:
         if account.id != settlement.recipient_account_id:
-            raise HTTPException(403, "Only the person receiving payment can confirm receipt")
+            raise HTTPException(403, "Only the person receiving payment can record receipt")
         settlement.recipient_confirmed = True
-    # Receipt is the final authority: the recipient may settle immediately,
-    # while a payer's confirmation alone remains pending for their approval.
-    if settlement.recipient_confirmed:
-        settlement.status = "SETTLED"
-        settlement.settled_at = datetime.now(timezone.utc)
+    # Either person recording settles the month immediately — no second confirmation.
+    settlement.payer_confirmed = True
+    settlement.recipient_confirmed = True
+    settlement.status = "SETTLED"
+    settlement.settled_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(settlement)
     return _friend_settlement_out(settlement)
@@ -2481,32 +2480,15 @@ def join_quick_split(payload: schemas.QuickSplitJoinRequest, account: models.Acc
     return _quick_split_out(split, account)
 
 
-@app.post("/api/quick-splits/{split_id}/participants/{participant_id}/mark-paid", response_model=schemas.QuickSplitOut)
-def mark_quick_split_paid(split_id: int, participant_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
-    split = _require_quick_split_access(split_id, account, db)
-    participant = db.query(models.QuickSplitParticipant).filter_by(id=participant_id, quick_split_id=split.id).first()
-    if not participant:
-        raise HTTPException(404, "Participant not found")
-    if participant.account_id != account.id and participant.email.lower() != account.email.lower():
-        raise HTTPException(403, "Only this person can mark their share paid")
-    participant.account_id = account.id
-    participant.display_name = account.display_name
-    participant.payment_status = "PAID"
-    participant.payment_marked_at = datetime.utcnow()
-    db.commit()
-    db.refresh(split)
-    return _quick_split_out(split, account)
-
-
-@app.post("/api/quick-splits/{split_id}/participants/{participant_id}/confirm", response_model=schemas.QuickSplitOut)
-def confirm_quick_split_payment(split_id: int, participant_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
-    split = _require_quick_split_access(split_id, account, db)
-    if split.payer_account_id != account.id:
-        raise HTTPException(403, "Only the person who paid can confirm payment")
-    participant = db.query(models.QuickSplitParticipant).filter_by(id=participant_id, quick_split_id=split.id).first()
-    if not participant or participant.payment_status != "PAID":
-        raise HTTPException(400, "This payment has not been marked paid yet")
+def _finalize_quick_split_participant_payment(
+    db: Session, split: models.QuickSplit, participant: models.QuickSplitParticipant,
+) -> None:
+    """Apply a private-bill payment immediately (no second-person confirmation)."""
+    if participant.payment_status == "CONFIRMED":
+        return
     participant.payment_status = "CONFIRMED"
+    if not participant.payment_marked_at:
+        participant.payment_marked_at = datetime.utcnow()
     if participant.account_id and split.payer_account_id:
         _record_direct_pair_payment(
             db,
@@ -2520,6 +2502,47 @@ def confirm_quick_split_payment(split_id: int, participant_id: int, account: mod
         )
     if all(p.payment_status == "CONFIRMED" for p in split.participants):
         split.status = "SETTLED"
+
+
+@app.post("/api/quick-splits/{split_id}/participants/{participant_id}/mark-paid", response_model=schemas.QuickSplitOut)
+def mark_quick_split_paid(split_id: int, participant_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    split = _require_quick_split_access(split_id, account, db)
+    participant = db.query(models.QuickSplitParticipant).filter_by(id=participant_id, quick_split_id=split.id).first()
+    if not participant:
+        raise HTTPException(404, "Participant not found")
+    is_debtor = (
+        (participant.account_id and participant.account_id == account.id)
+        or (participant.email and participant.email.lower() == account.email.lower())
+    )
+    is_payer = split.payer_account_id == account.id
+    if not is_debtor and not is_payer:
+        raise HTTPException(403, "Only the people on this bill can record payment")
+    if is_debtor:
+        participant.account_id = account.id
+        participant.display_name = account.display_name
+    _finalize_quick_split_participant_payment(db, split, participant)
+    db.commit()
+    db.refresh(split)
+    return _quick_split_out(split, account)
+
+
+@app.post("/api/quick-splits/{split_id}/participants/{participant_id}/confirm", response_model=schemas.QuickSplitOut)
+def confirm_quick_split_payment(split_id: int, participant_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    """Legacy alias — mark-paid now applies immediately."""
+    split = _require_quick_split_access(split_id, account, db)
+    participant = db.query(models.QuickSplitParticipant).filter_by(id=participant_id, quick_split_id=split.id).first()
+    if not participant:
+        raise HTTPException(404, "Participant not found")
+    if participant.payment_status == "CONFIRMED":
+        return _quick_split_out(split, account)
+    is_debtor = (
+        (participant.account_id and participant.account_id == account.id)
+        or (participant.email and participant.email.lower() == account.email.lower())
+    )
+    is_payer = split.payer_account_id == account.id
+    if not is_debtor and not is_payer:
+        raise HTTPException(403, "Only the people on this bill can record payment")
+    _finalize_quick_split_participant_payment(db, split, participant)
     db.commit()
     db.refresh(split)
     return _quick_split_out(split, account)
@@ -3749,6 +3772,7 @@ def list_group_payments(group_id: int, period_key: str, account: models.Account 
 
 @app.post("/api/groups/{group_id}/periods/{period_key}/payments", response_model=schemas.GroupPaymentOut)
 def mark_group_payment_paid(group_id: int, period_key: str, payload: schemas.GroupPaymentCreate, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    """Record a transfer from the payer; balances update immediately (no second confirmation)."""
     payer = require_group_member(group_id, account, db)
     period = db.query(models.MonthlyPeriod).filter_by(group_id=group_id, period_key=period_key).first()
     if not period:
@@ -3761,17 +3785,20 @@ def mark_group_payment_paid(group_id: int, period_key: str, payload: schemas.Gro
     if payload.payer_member_id == payload.recipient_member_id:
         raise HTTPException(400, "A member cannot pay themselves")
     currency = _normalize_currency(payload.currency, "USD")
+    now = datetime.now(timezone.utc)
     expense_cutoff_id = db.query(func.max(models.Expense.id)).filter_by(period_id=period.id).scalar()
     payment = models.GroupPayment(
         period_id=period.id, payer_member_id=payload.payer_member_id,
         recipient_member_id=payload.recipient_member_id,
         amount=Decimal(str(payload.amount)), currency=currency,
-        status="PAID", expense_cutoff_id=expense_cutoff_id, marked_paid_at=datetime.now(timezone.utc),
+        status="CONFIRMED", expense_cutoff_id=expense_cutoff_id, marked_paid_at=now, confirmed_at=now,
     )
     db.add(payment)
+    db.flush()
+    payment.cleared_amount = _cleared_amount_for_group_payment(db, period, payment)
     recipient = db.query(models.GroupMember).get(payload.recipient_member_id)
-    _record_activity(db, group_id, account, "payment_marked_paid", f"{payer.display_name} marked a payment of {currency} {payload.amount:.2f} as paid to {recipient.display_name}", "payment", None)
-    _notify_group_members(db, group_id, f"{payer.display_name} marked a {currency} {payload.amount:.2f} payment as paid to {recipient.display_name}.", _group_focus_link(group_id, "balances", "paymentHistory"), exclude_account_id=account.id)
+    _record_activity(db, group_id, account, "payment_marked_paid", f"{payer.display_name} recorded a payment of {currency} {payload.amount:.2f} to {recipient.display_name}", "payment", payment.id)
+    _notify_group_members(db, group_id, f"{payer.display_name} recorded a {currency} {payload.amount:.2f} payment to {recipient.display_name}. Balances were recalculated.", _group_focus_link(group_id, "balances", "paymentHistory"), exclude_account_id=account.id)
     db.commit()
     db.refresh(payment)
     notify_group_change(group_id, "payment-paid")
@@ -3815,12 +3842,15 @@ def mark_group_payment_received(group_id: int, period_key: str, payload: schemas
 
 @app.post("/api/groups/{group_id}/payments/{payment_id}/confirm", response_model=schemas.GroupPaymentOut)
 def confirm_group_payment(group_id: int, payment_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    """Legacy endpoint: new payments apply on record. Still finalizes old PAID rows."""
     recipient = require_group_member(group_id, account, db)
     payment = db.query(models.GroupPayment).join(models.MonthlyPeriod).filter(
         models.GroupPayment.id == payment_id, models.MonthlyPeriod.group_id == group_id,
     ).first()
     if not payment:
         raise HTTPException(404, "Payment not found")
+    if payment.status == "CONFIRMED":
+        return payment
     if payment.period.status != "SETTLED":
         raise HTTPException(400, "Settle this period before confirming payments")
     if payment.recipient_member_id != recipient.id:
@@ -3829,7 +3859,8 @@ def confirm_group_payment(group_id: int, payment_id: int, account: models.Accoun
         raise HTTPException(400, "This payment cannot be confirmed")
     payment.status = "CONFIRMED"
     payment.confirmed_at = datetime.now(timezone.utc)
-    payment.cleared_amount = _cleared_amount_for_group_payment(db, payment.period, payment)
+    if payment.cleared_amount is None:
+        payment.cleared_amount = _cleared_amount_for_group_payment(db, payment.period, payment)
     payer = db.query(models.GroupMember).get(payment.payer_member_id)
     _record_activity(db, group_id, account, "payment_confirmed", f"{recipient.display_name} confirmed payment from {payer.display_name}", "payment", payment.id)
     _notify_group_members(db, group_id, f"{recipient.display_name} confirmed a {payment.currency} {float(payment.amount):.2f} payment from {payer.display_name}. Balances were recalculated.", _group_focus_link(group_id, "balances", "paymentHistory"), exclude_account_id=account.id)

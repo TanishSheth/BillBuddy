@@ -282,18 +282,18 @@ function renderConsolidated(friend) {
   const waitMsg = balance && !settleableBalance
     ? '<p class="text-xs text-ink/55">Part of this total is from an open group period. It becomes payable from Friends after that period is settled.</p>'
     : (!balance ? '<p class="text-xs text-ink/55">No balance to settle with this person.</p>' : "");
-  payments.innerHTML = `${settleableBalance ? `<div class="flex flex-wrap gap-2"><button type="button" id="markFullConsolidatedPayment" class="bb-btn-primary !py-1.5 !px-3 text-[10px]">${fullLabel}</button><button type="button" id="showPartialConsolidatedPayment" class="bb-btn-secondary !py-1.5 !px-3 text-[10px]">${partialLabel}</button></div><div id="partialConsolidatedPaymentForm" class="hidden mt-3 flex flex-wrap items-end gap-2"><label class="text-[10px] font-mono text-ink/55">Payment amount<input id="consolidatedPaymentAmount" class="bb-input block !w-32 !py-1.5 mt-1 text-xs" type="number" min="0.01" max="${Math.abs(settleableBalance)}" step="0.01" placeholder="0.00"></label><button type="button" id="recordConsolidatedPayment" class="bb-btn-primary !py-1.5 !px-3 text-[10px]">Save partial payment</button></div>` : waitMsg}${pending.map((payment) => `<div class="mt-3 p-2 rounded bg-amber-500/10 text-xs flex items-center justify-between gap-2"><span>${ShareSquad.formatMoney(payment.amount, payment.currency)} awaiting lender confirmation</span>${Number(payment.reported_by_account_id) !== Number(me.account.id) ? `<button class="confirm-consolidated-payment bb-btn-secondary !py-1 !px-2 text-[10px]" data-id="${payment.id}">Confirm received</button>` : '<span class="text-[10px] font-mono text-amber-700">Reported by you</span>'}</div>`).join("")}`;
+  payments.innerHTML = `${settleableBalance ? `<div class="flex flex-wrap gap-2"><button type="button" id="markFullConsolidatedPayment" class="bb-btn-primary !py-1.5 !px-3 text-[10px]">${fullLabel}</button><button type="button" id="showPartialConsolidatedPayment" class="bb-btn-secondary !py-1.5 !px-3 text-[10px]">${partialLabel}</button></div><div id="partialConsolidatedPaymentForm" class="hidden mt-3 flex flex-wrap items-end gap-2"><label class="text-[10px] font-mono text-ink/55">Payment amount<input id="consolidatedPaymentAmount" class="bb-input block !w-32 !py-1.5 mt-1 text-xs" type="number" min="0.01" max="${Math.abs(settleableBalance)}" step="0.01" placeholder="0.00"></label><button type="button" id="recordConsolidatedPayment" class="bb-btn-primary !py-1.5 !px-3 text-[10px]">Save partial payment</button></div>` : waitMsg}${pending.map((payment) => `<div class="mt-3 p-2 rounded bg-amber-500/10 text-xs flex items-center justify-between gap-2"><span>${ShareSquad.formatMoney(payment.amount, payment.currency)} older pending payment</span><button class="confirm-consolidated-payment bb-btn-secondary !py-1 !px-2 text-[10px]" data-id="${payment.id}">Apply now</button></div>`).join("")}`;
   const savePayment = async (amount) => {
     if (!Number.isFinite(amount) || amount <= 0 || amount > Math.abs(settleableBalance)) return ShareSquad.showToast("Enter an amount up to the payment-ready balance.", "error");
-    try { await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-payments`, { method: "POST", body: JSON.stringify({ amount, currency: total.currency }) }); ShareSquad.showToast(iOwe ? "Payment request sent to the lender for confirmation." : "Payment received and applied to the balance.", "success"); await refresh(); openFriend(friend.key); }
+    try { await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-payments`, { method: "POST", body: JSON.stringify({ amount, currency: total.currency }) }); ShareSquad.showToast("Payment recorded and applied to the balance.", "success"); await refresh(); openFriend(friend.key); }
     catch (err) { ShareSquad.showToast(err.message || "Could not record payment", "error"); }
   };
   $("#markFullConsolidatedPayment")?.addEventListener("click", () => savePayment(Math.abs(settleableBalance)));
   $("#showPartialConsolidatedPayment")?.addEventListener("click", () => { $("#partialConsolidatedPaymentForm")?.classList.remove("hidden"); $("#consolidatedPaymentAmount")?.focus(); });
   $("#recordConsolidatedPayment")?.addEventListener("click", () => savePayment(Number($("#consolidatedPaymentAmount")?.value)));
   payments.querySelectorAll(".confirm-consolidated-payment").forEach((button) => button.addEventListener("click", async () => {
-    try { await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-payments/${button.dataset.id}/confirm`, { method: "POST" }); ShareSquad.showToast("Payment confirmed and applied to the open balances.", "success"); await refresh(); openFriend(friend.key); }
-    catch (err) { ShareSquad.showToast(err.message || "Could not confirm payment", "error"); }
+    try { await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-payments/${button.dataset.id}/confirm`, { method: "POST" }); ShareSquad.showToast("Payment applied to the open balances.", "success"); await refresh(); openFriend(friend.key); }
+    catch (err) { ShareSquad.showToast(err.message || "Could not apply payment", "error"); }
   }));
 }
 
@@ -393,7 +393,7 @@ async function createFriendInvite(email = "") {
 async function confirmMonthSettlement(friend, month, action) {
   try {
     await ShareSquad.api(`/friends/${friend.friend.id}/settlements/confirm`, { method: "POST", body: JSON.stringify({ month_key: month, action }) });
-    ShareSquad.showToast(action === "paid" ? "Your payment confirmation is saved" : "Your receipt confirmation is saved", "success");
+    ShareSquad.showToast(action === "paid" ? "Payment recorded — month settled." : "Receipt recorded — month settled.", "success");
     await refresh();
     openFriend(friend.key);
   } catch (err) {

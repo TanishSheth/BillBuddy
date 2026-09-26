@@ -1024,27 +1024,13 @@ async function loadPaymentHistory(existingPayments = null) {
       ? '<p class="text-[11px] font-mono text-ink/55 mb-3">This period is settled. The owner can still correct expenses; recorded payments stay applied and any overpay becomes balance credit.</p>'
       : "";
     const pendingNotice = $("#paymentPendingNotice");
-    const waitingForConfirmation = payments.filter((payment) => payment.status === "PAID");
     if (pendingNotice) {
-      if (waitingForConfirmation.length) {
-        const waitingOnMe = waitingForConfirmation.some((payment) => Number(payment.recipient_member_id) === Number(state.myMemberId));
-        pendingNotice.classList.remove("hidden");
-        pendingNotice.textContent = waitingOnMe
-          ? "Payment confirmation needed: confirm received payments below. Balances update immediately after confirmation."
-          : "Payment awaiting recipient confirmation. Balances update after the recipient confirms receipt.";
-      } else {
-        pendingNotice.classList.add("hidden");
-        pendingNotice.textContent = "";
-      }
+      pendingNotice.classList.add("hidden");
+      pendingNotice.textContent = "";
     }
     if (!payments.length) { list.innerHTML = ""; return; }
     const members = new Map(state.members.map((member) => [Number(member.id), member.display_name]));
-    list.innerHTML = paymentOnlyNotice + `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/45">Payment history</p>` + payments.map((payment) => `<div class="p-2 rounded bg-ink/5 text-xs font-mono flex flex-wrap items-center justify-between gap-2"><span>${ShareSquad.escapeHtml(members.get(payment.payer_member_id) || "Member")} paid ${ShareSquad.escapeHtml(members.get(payment.recipient_member_id) || "Member")} ${ShareSquad.formatMoney(payment.amount, payment.currency)}</span><span class="font-bold ${payment.status === "CONFIRMED" ? "text-emerald-700" : "text-amber-700"}">${payment.status}</span>${Number(payment.recipient_member_id) === Number(state.myMemberId) && payment.status === "PAID" ? `<button class="confirm-payment bb-btn-secondary !py-1 !px-2 text-[10px]" data-id="${payment.id}">Confirm</button>` : ""}</div>`).join("");
-    $$(".confirm-payment").forEach((button) => button.addEventListener("click", async () => {
-      button.disabled = true;
-      try { await ShareSquad.api(`/groups/${gid()}/payments/${button.dataset.id}/confirm`, { method: "POST" }); ShareSquad.showToast("Payment confirmed and balances recalculated.", "success"); await loadBalances(); }
-      catch (err) { ShareSquad.showToast(err.message, "error"); button.disabled = false; }
-    }));
+    list.innerHTML = paymentOnlyNotice + `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/45">Payment history</p>` + payments.map((payment) => `<div class="p-2 rounded bg-ink/5 text-xs font-mono flex flex-wrap items-center justify-between gap-2"><span>${ShareSquad.escapeHtml(members.get(payment.payer_member_id) || "Member")} paid ${ShareSquad.escapeHtml(members.get(payment.recipient_member_id) || "Member")} ${ShareSquad.formatMoney(payment.amount, payment.currency)}</span><span class="font-bold ${payment.status === "CONFIRMED" || payment.status === "PAID" ? "text-emerald-700" : "text-amber-700"}">${payment.status === "PAID" ? "RECORDED" : payment.status}</span></div>`).join("");
   } catch (_) { list.innerHTML = ""; }
 }
 
