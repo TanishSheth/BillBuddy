@@ -1021,7 +1021,7 @@ async function loadPaymentHistory(existingPayments = null) {
   try {
     const payments = existingPayments || await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments`);
     const paymentOnlyNotice = isCurrentPeriodSettled()
-      ? '<p class="text-[11px] font-mono text-ink/55 mb-3">Expenses are locked for this settled period. You can still record or confirm its outstanding payments.</p>'
+      ? '<p class="text-[11px] font-mono text-ink/55 mb-3">This period is settled. The owner can still correct expenses; recorded payments stay applied and any overpay becomes balance credit.</p>'
       : "";
     const pendingNotice = $("#paymentPendingNotice");
     const waitingForConfirmation = payments.filter((payment) => payment.status === "PAID");

@@ -143,16 +143,25 @@ def _require_expense_editable(
     db: Session, period: models.MonthlyPeriod, account: models.Account, group_id: int,
     owner_override: bool = False,
 ) -> bool:
-    if period.status == "SETTLED":
-        raise HTTPException(400, "Cannot edit an expense from a settled period")
-    if not _period_has_paid_transfer(db, period.id):
-        return False
+    """Owners may correct expenses after payment/settlement; overpay becomes credit."""
     member = require_group_member(group_id, account, db)
+    settled = period.status == "SETTLED"
+    paid = _period_has_paid_transfer(db, period.id)
+    if not settled and not paid:
+        return False
     if member.role != "owner" or not owner_override:
+        if settled:
+            raise HTTPException(
+                400,
+                "This period is settled. Only the owner can correct expenses; recorded payments stay applied and any overpay becomes credit.",
+            )
         raise HTTPException(
             409,
             "A payment has been recorded for this period. Only the owner can correct expenses; balances will be recalculated and members notified.",
         )
+    if settled:
+        # Keep confirmed payments; reopen so the corrected ledger can show residual credit/debt.
+        period.status = "ACTIVE"
     return True
 
 
@@ -295,6 +304,7 @@ def _ensure_schema():
         ("quick_split_participants", "split_value", "NUMERIC(10,2)"),
         ("quick_split_participants", "invite_token", "VARCHAR(64)"),
         ("group_payments", "expense_cutoff_id", "INTEGER"),
+        ("group_payments", "cleared_amount", "NUMERIC(10,2)"),
     ]
 
     for table, column, spec in statements:
@@ -636,7 +646,14 @@ def _apply_confirmed_payments(
     base_currency: str,
     custom_base_to_destination: Optional[float] = None,
 ) -> None:
-    """Apply confirmed transfers without allowing them to create a reverse debt."""
+    """Apply confirmed transfers; cleared cash after a bill shrinks/deletes becomes credit.
+
+    Each payment stores how much debt it cleared when confirmed. That snapshot is
+    always replayed in full, so a later edit/delete that reduces historical debt
+    turns the unused cash into credit. Payments recorded above the debt at
+    confirm time stay capped at that snapshot, so a later bill in a reopened
+    period remains outstanding.
+    """
     for balance in balances.values():
         balance.setdefault("settlement_paid", 0.0)
         balance.setdefault("settlement_received", 0.0)
@@ -648,6 +665,35 @@ def _apply_confirmed_payments(
         if value is None:
             return datetime.min.replace(tzinfo=timezone.utc)
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    def apply_transfer(payer_id: int, recipient_id: int, amount_f: float) -> None:
+        if amount_f <= 0:
+            return
+        balances[payer_id]["net_balance"] = round(balances[payer_id]["net_balance"] + amount_f, 2)
+        balances[recipient_id]["net_balance"] = round(balances[recipient_id]["net_balance"] - amount_f, 2)
+        balances[payer_id]["settlement_paid"] = round(balances[payer_id]["settlement_paid"] + amount_f, 2)
+        balances[recipient_id]["settlement_received"] = round(balances[recipient_id]["settlement_received"] + amount_f, 2)
+
+    def historical_owe(payment: models.GroupPayment) -> tuple[float, float]:
+        cutoff = event_time(payment.marked_paid_at or payment.created_at)
+        historical_expenses = [
+            expense for expense in expense_dicts
+            if (payment.expense_cutoff_id is not None and expense.get("expense_id", 0) <= payment.expense_cutoff_id)
+            or (payment.expense_cutoff_id is None and event_time(expense.get("created_at")) <= cutoff)
+        ]
+        historical_balances = compute_balances(members, historical_expenses)
+        for payer_id, recipient_id, applied_amount in applied_history:
+            historical_balances[payer_id]["net_balance"] = round(
+                historical_balances[payer_id]["net_balance"] + applied_amount, 2
+            )
+            historical_balances[recipient_id]["net_balance"] = round(
+                historical_balances[recipient_id]["net_balance"] - applied_amount, 2
+            )
+        payer_id = payment.payer_member_id
+        recipient_id = payment.recipient_member_id
+        payer_owed = max(-float(historical_balances[payer_id]["net_balance"]), 0.0)
+        recipient_due = max(float(historical_balances[recipient_id]["net_balance"]), 0.0)
+        return payer_owed, recipient_due
 
     payments.sort(key=lambda payment: event_time(payment.marked_paid_at or payment.created_at))
     for payment in payments:
@@ -661,42 +707,84 @@ def _apply_confirmed_payments(
                 amount, source_currency, target_currency,
                 custom_rate=_rate_to_dest(source_currency, target_currency, base_currency, custom_base_to_destination),
             )
-        amount_f = float(amount)
-        # A payment only belongs to expenses that already existed when it was
-        # made. Later bills in a reopened period are new debt, not something an
-        # earlier settlement can silently clear.
-        cutoff = event_time(payment.marked_paid_at or payment.created_at)
-        historical_expenses = [
-            expense for expense in expense_dicts
-            if (payment.expense_cutoff_id is not None and expense.get("expense_id", 0) <= payment.expense_cutoff_id)
-            or (payment.expense_cutoff_id is None and event_time(expense.get("created_at")) <= cutoff)
-        ]
-        historical_balances = compute_balances(members, historical_expenses)
-        for payer_id, recipient_id, applied_amount in applied_history:
-            historical_balances[payer_id]["net_balance"] = round(historical_balances[payer_id]["net_balance"] + applied_amount, 2)
-            historical_balances[recipient_id]["net_balance"] = round(historical_balances[recipient_id]["net_balance"] - applied_amount, 2)
-
-        # A transfer can only settle the payer's historical debt to this
-        # recipient. This also protects legacy records with no retained bill.
-        payer_owed = max(-float(historical_balances[payment.payer_member_id]["net_balance"]), 0.0)
-        recipient_due = max(float(historical_balances[payment.recipient_member_id]["net_balance"]), 0.0)
-        amount_f = round(min(amount_f, payer_owed, recipient_due), 2)
-        if amount_f <= 0:
+        payment_amount = round(float(amount), 2)
+        if payment_amount <= 0:
             continue
-        applied_history.append((payment.payer_member_id, payment.recipient_member_id, amount_f))
-        balances[payment.payer_member_id]["net_balance"] = round(
-            balances[payment.payer_member_id]["net_balance"] + amount_f, 2
-        )
-        balances[payment.recipient_member_id]["net_balance"] = round(
-            balances[payment.recipient_member_id]["net_balance"] - amount_f, 2
-        )
-        balances[payment.payer_member_id]["settlement_paid"] = round(
-            balances[payment.payer_member_id]["settlement_paid"] + amount_f, 2
-        )
-        balances[payment.recipient_member_id]["settlement_received"] = round(
-            balances[payment.recipient_member_id]["settlement_received"] + amount_f, 2
-        )
+        payer_id = payment.payer_member_id
+        recipient_id = payment.recipient_member_id
+        if payment.cleared_amount is not None:
+            # Snapshot from confirm time — apply in full so bill shrink/delete becomes credit.
+            cleared = round(float(payment.cleared_amount), 2)
+            if source_currency != target_currency:
+                cleared_dec, _ = convert_amount(
+                    Decimal(str(payment.cleared_amount)), source_currency, target_currency,
+                    custom_rate=_rate_to_dest(source_currency, target_currency, base_currency, custom_base_to_destination),
+                )
+                cleared = round(float(cleared_dec), 2)
+            apply_transfer(payer_id, recipient_id, cleared)
+            applied_history.append((payer_id, recipient_id, cleared))
+            continue
+        # Legacy rows without a snapshot: cap at current historical debt (no invented credit).
+        payer_owed, recipient_due = historical_owe(payment)
+        settle_amount = round(min(payment_amount, payer_owed, recipient_due), 2)
+        apply_transfer(payer_id, recipient_id, settle_amount)
+        applied_history.append((payer_id, recipient_id, settle_amount))
 
+
+def _cleared_amount_for_group_payment(
+    db: Session, period: models.MonthlyPeriod, payment: models.GroupPayment,
+) -> Decimal:
+    """Debt this payment can clear right now (capped at the recorded cash)."""
+    expense_rows = (
+        db.query(models.Expense)
+        .filter_by(period_id=period.id)
+        .order_by(models.Expense.id.asc())
+        .all()
+    )
+    members = _members_as_dicts(db, period.group_id, include_inactive=True)
+    member_ids = {m["id"] for m in members}
+    pay_map = _payments_by_expense(db, expense_rows)
+    expense_dicts = []
+    for expense in expense_rows:
+        if payment.expense_cutoff_id is not None and expense.id > payment.expense_cutoff_id:
+            continue
+        splits = [
+            {"user_id": s.member_id, "share_amount": float(s.share_amount)}
+            for s in expense.splits if s.member_id in member_ids
+        ]
+        payments_map = pay_map.get(expense.id, {})
+        expense_dicts.append({
+            "expense_id": expense.id,
+            "payer_id": expense.payer_member_id,
+            "total_amount": float(expense.total_amount),
+            "splits": splits,
+            "payments": [{"payer_id": mid, "amount": float(amt)} for mid, amt in payments_map.items()],
+            "created_at": expense.created_at,
+        })
+    hist = compute_balances(members, expense_dicts)
+    prior_q = (
+        db.query(models.GroupPayment)
+        .filter_by(period_id=period.id, status="CONFIRMED")
+        .filter(models.GroupPayment.id != payment.id)
+    )
+    prior = prior_q.order_by(models.GroupPayment.id.asc()).all()
+    prior.sort(key=lambda row: (row.marked_paid_at or row.created_at or datetime.min.replace(tzinfo=timezone.utc), row.id))
+    for prior_payment in prior:
+        cleared = prior_payment.cleared_amount if prior_payment.cleared_amount is not None else prior_payment.amount
+        amt = float(cleared)
+        if prior_payment.payer_member_id not in hist or prior_payment.recipient_member_id not in hist:
+            continue
+        hist[prior_payment.payer_member_id]["net_balance"] = round(
+            hist[prior_payment.payer_member_id]["net_balance"] + amt, 2
+        )
+        hist[prior_payment.recipient_member_id]["net_balance"] = round(
+            hist[prior_payment.recipient_member_id]["net_balance"] - amt, 2
+        )
+    if payment.payer_member_id not in hist or payment.recipient_member_id not in hist:
+        return Decimal("0.00")
+    payer_owed = max(-float(hist[payment.payer_member_id]["net_balance"]), 0.0)
+    recipient_due = max(float(hist[payment.recipient_member_id]["net_balance"]), 0.0)
+    return Decimal(str(round(min(float(payment.amount), payer_owed, recipient_due), 2)))
 
 def build_balances_and_settlements(
     db: Session, group_id: int, period: models.MonthlyPeriod, settlement_mode: str = "smart"
@@ -1479,8 +1567,8 @@ def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account
     split = _require_quick_split_access(split_id, account, db)
     if not _can_manage_quick_split(split, account):
         raise HTTPException(403, "You cannot edit this split")
-    if any(p.payment_status != "PENDING" for p in split.participants):
-        raise HTTPException(400, "This split cannot be edited after someone has marked payment")
+    # Paid/confirmed shares may still be corrected; confirmed cash stays as PairPayment
+    # credit so shrinking or removing the bill reverses into an open balance.
     if len(payload.participants) != 1:
         raise HTTPException(400, "A one-to-one split needs exactly one other person. Create a group for 3 or more people.")
     if payload.bill_date > date.today():
@@ -1552,8 +1640,158 @@ def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account
     for participant in split.participants:
         if participant.account_id and participant.account_id != split.payer_account_id:
             _reopen_friend_settlement(db, split.payer_account_id, participant.account_id, split.bill_date)
+            _reopen_friend_settlement_for_bill_change(
+                db, split.payer_account_id, participant.account_id, split.bill_date, split.created_at,
+            )
     db.commit(); db.refresh(split)
     return _quick_split_out(split, account)
+
+
+def _pair_direct_month_paid_total(
+    db: Session, one: int, two: int, month_key: str, payer_id: int, currency: str,
+) -> Decimal:
+    currency = _normalize_currency(currency, "USD")
+    total = Decimal("0.00")
+    for payment in db.query(models.PairPayment).filter_by(
+        account_one_id=one, account_two_id=two, status="CONFIRMED",
+        payer_account_id=payer_id, currency=currency,
+    ).all():
+        for allocation in json.loads(payment.allocations_json or "[]"):
+            if allocation.get("kind") == "DIRECT" and allocation.get("month_key") == month_key:
+                total += Decimal(str(allocation.get("amount", 0)))
+    return total.quantize(Decimal("0.01"))
+
+
+def _pair_has_direct_split_payment(
+    db: Session, one: int, two: int, month_key: str, payer_id: int, currency: str, quick_split_id: int,
+) -> bool:
+    currency = _normalize_currency(currency, "USD")
+    for payment in db.query(models.PairPayment).filter_by(
+        account_one_id=one, account_two_id=two, status="CONFIRMED",
+        payer_account_id=payer_id, currency=currency,
+    ).all():
+        for allocation in json.loads(payment.allocations_json or "[]"):
+            if (
+                allocation.get("kind") == "DIRECT"
+                and allocation.get("month_key") == month_key
+                and allocation.get("quick_split_id") == quick_split_id
+            ):
+                return True
+    return False
+
+
+def _record_direct_pair_payment(
+    db: Session,
+    payer_id: int,
+    recipient_id: int,
+    amount: Decimal,
+    currency: str,
+    month_key: str,
+    reported_by_account_id: int,
+    quick_split_id: Optional[int] = None,
+) -> Optional[models.PairPayment]:
+    """Persist confirmed private-bill cash so later edit/delete can reverse into credit."""
+    amount = Decimal(str(amount)).quantize(Decimal("0.01"))
+    if amount <= 0 or payer_id == recipient_id:
+        return None
+    currency = _normalize_currency(currency, "USD")
+    one, two = _friend_pair(payer_id, recipient_id)
+    if quick_split_id is not None and _pair_has_direct_split_payment(
+        db, one, two, month_key, payer_id, currency, quick_split_id,
+    ):
+        return None
+    allocation = {
+        "kind": "DIRECT",
+        "month_key": month_key,
+        "amount": float(amount),
+    }
+    if quick_split_id is not None:
+        allocation["quick_split_id"] = quick_split_id
+    payment = models.PairPayment(
+        account_one_id=one,
+        account_two_id=two,
+        payer_account_id=payer_id,
+        recipient_account_id=recipient_id,
+        amount=amount,
+        currency=currency,
+        status="CONFIRMED",
+        reported_by_account_id=reported_by_account_id,
+        allocations_json=json.dumps([allocation]),
+        confirmed_at=datetime.now(timezone.utc),
+    )
+    db.add(payment)
+    return payment
+
+
+def _reopen_friend_settlement_for_bill_change(
+    db: Session, first_id: int, second_id: int, bill_date: date, bill_created_at: Optional[datetime] = None,
+) -> None:
+    """If a settled month's bill is edited/deleted, reopen that month so balances can move."""
+    one, two = _friend_pair(first_id, second_id)
+    month_key = bill_date.strftime("%Y-%m")
+    settlement = db.query(models.FriendMonthlySettlement).filter_by(
+        account_one_id=one, account_two_id=two, month_key=month_key,
+    ).first()
+    if not settlement or not settlement.settled_at:
+        return
+    created = bill_created_at
+    if created and created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    settled_at = settlement.settled_at if settlement.settled_at.tzinfo else settlement.settled_at.replace(tzinfo=timezone.utc)
+    if created and created > settled_at:
+        return
+    # Cash that closed the month must remain as credit/debt after the bill change.
+    if settlement.payer_account_id and settlement.recipient_account_id and settlement.amount:
+        already_paid = _pair_direct_month_paid_total(
+            db, one, two, month_key, settlement.payer_account_id, settlement.currency or "USD",
+        )
+        gap = (Decimal(str(settlement.amount)) - already_paid).quantize(Decimal("0.01"))
+        if gap > 0:
+            _record_direct_pair_payment(
+                db,
+                settlement.payer_account_id,
+                settlement.recipient_account_id,
+                gap,
+                settlement.currency or "USD",
+                month_key,
+                settlement.recipient_account_id,
+            )
+    settlement.status = "PENDING"
+    settlement.payer_confirmed = False
+    settlement.recipient_confirmed = False
+    settlement.settled_at = None
+    balance, currency = _friend_month_balance(db, first_id, second_id, month_key)
+    settlement.amount = abs(balance)
+    settlement.currency = currency
+    settlement.payer_account_id = first_id if balance < 0 else second_id
+    settlement.recipient_account_id = second_id if balance < 0 else first_id
+
+
+def _preserve_friend_payment_credit_before_delete(db: Session, split: models.QuickSplit) -> None:
+    """When a paid private bill is deleted, keep confirmed cash as an open Friend credit."""
+    confirmed = [p for p in split.participants if p.payment_status == "CONFIRMED" and p.account_id]
+    if not confirmed or not split.payer_account_id:
+        return
+    month_key = split.bill_date.strftime("%Y-%m")
+    currency = _normalize_currency(split.currency, "USD")
+    for participant in confirmed:
+        if participant.account_id == split.payer_account_id:
+            continue
+        amount = Decimal(str(participant.share_amount or 0)).quantize(Decimal("0.01"))
+        if amount <= 0:
+            continue
+        # Debtor already paid the lender; deleting the bill means the lender owes that cash back.
+        # Skip when confirm already wrote a PairPayment for this month.
+        _record_direct_pair_payment(
+            db,
+            participant.account_id,
+            split.payer_account_id,
+            amount,
+            currency,
+            month_key,
+            split.payer_account_id,
+            quick_split_id=split.id,
+        )
 
 
 @app.delete("/api/quick-splits/{split_id}")
@@ -1562,7 +1800,19 @@ def delete_quick_split(split_id: int, account: models.Account = Depends(get_curr
     split = _require_quick_split_access(split_id, account, db)
     if not _can_manage_quick_split(split, account):
         raise HTTPException(403, "You cannot delete this split")
+    partners = [
+        participant.account_id for participant in split.participants
+        if participant.account_id and participant.account_id != split.payer_account_id
+    ]
+    bill_date = split.bill_date
+    created_at = split.created_at
+    payer_id = split.payer_account_id
+    _preserve_friend_payment_credit_before_delete(db, split)
     db.delete(split)
+    db.flush()
+    for partner_id in partners:
+        if payer_id:
+            _reopen_friend_settlement_for_bill_change(db, payer_id, partner_id, bill_date, created_at)
     db.commit()
     return {"ok": True, "message": "Split deleted"}
 
@@ -1599,6 +1849,16 @@ def _friend_month_balance(db: Session, account_id: int, friend_id: int, month_ke
     for split, participant in rows:
         currency = split.currency or currency
         balance += _viewer_direct_effect(split, participant, account_id)
+    # Confirmed private payments (including residuals after a paid bill was edited/deleted).
+    for payment in db.query(models.PairPayment).filter_by(
+        account_one_id=one, account_two_id=two, status="CONFIRMED",
+    ).all():
+        currency = payment.currency or currency
+        for allocation in json.loads(payment.allocations_json or "[]"):
+            if allocation.get("kind") != "DIRECT" or allocation.get("month_key") != month_key:
+                continue
+            amount = Decimal(str(allocation.get("amount", 0)))
+            balance += amount if payment.payer_account_id == account_id else -amount
     return balance.quantize(Decimal("0.01")), currency
 
 
@@ -1741,20 +2001,33 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
     payments = db.query(models.PairPayment).filter_by(
         account_one_id=one, account_two_id=two, status="CONFIRMED", currency=currency,
     ).all()
+    residual_by_month: dict[str, Decimal] = {}
     for payment in payments:
         for allocation in json.loads(payment.allocations_json or "[]"):
             if allocation.get("kind") != "DIRECT":
                 continue
             month_key = allocation.get("month_key")
-            if month_key not in direct_by_month:
+            if not month_key:
                 continue
             amount = Decimal(str(allocation.get("amount", 0)))
-            direct_by_month[month_key] += amount if payment.payer_account_id == account_id else -amount
+            signed = amount if payment.payer_account_id == account_id else -amount
+            if month_key in direct_by_month:
+                direct_by_month[month_key] += signed
+            else:
+                # Bills for this month were deleted or closed out after payment —
+                # keep the cash as an open credit/debit so overpay is visible.
+                residual_by_month[month_key] = residual_by_month.get(month_key, Decimal("0.00")) + signed
 
     for month_key, value in direct_by_month.items():
         if value:
             sources.append({
                 "kind": "DIRECT", "label": f"Direct splits · {month_key}", "amount": float(value),
+                "currency": currency, "period_key": month_key, "group_id": None, "settlement_ready": True,
+            })
+    for month_key, value in residual_by_month.items():
+        if value:
+            sources.append({
+                "kind": "DIRECT", "label": f"Payment credit · {month_key}", "amount": float(value),
                 "currency": currency, "period_key": month_key, "group_id": None, "settlement_ready": True,
             })
 
@@ -1946,11 +2219,14 @@ def _apply_confirmed_pair_payment(db: Session, payment: models.PairPayment) -> N
         if not period or period.status != "SETTLED":
             raise HTTPException(409, "A group source is no longer ready for this payment. Refresh and record it again.")
         cutoff_id = db.query(func.max(models.Expense.id)).filter_by(period_id=period.id).scalar()
-        db.add(models.GroupPayment(
+        group_payment = models.GroupPayment(
             period_id=period.id, payer_member_id=allocation["payer_member_id"], recipient_member_id=allocation["recipient_member_id"],
             amount=Decimal(str(allocation["amount"])), currency=payment.currency, status="CONFIRMED",
             expense_cutoff_id=cutoff_id, marked_paid_at=datetime.now(timezone.utc), confirmed_at=datetime.now(timezone.utc),
-        ))
+        )
+        db.add(group_payment)
+        db.flush()
+        group_payment.cleared_amount = _cleared_amount_for_group_payment(db, period, group_payment)
     payment.status = "CONFIRMED"
     payment.confirmed_at = datetime.now(timezone.utc)
 
@@ -2231,6 +2507,17 @@ def confirm_quick_split_payment(split_id: int, participant_id: int, account: mod
     if not participant or participant.payment_status != "PAID":
         raise HTTPException(400, "This payment has not been marked paid yet")
     participant.payment_status = "CONFIRMED"
+    if participant.account_id and split.payer_account_id:
+        _record_direct_pair_payment(
+            db,
+            participant.account_id,
+            split.payer_account_id,
+            Decimal(str(participant.share_amount or 0)),
+            split.currency or "USD",
+            split.bill_date.strftime("%Y-%m"),
+            split.payer_account_id,
+            quick_split_id=split.id,
+        )
     if all(p.payment_status == "CONFIRMED" for p in split.participants):
         split.status = "SETTLED"
     db.commit()
@@ -3265,7 +3552,7 @@ def update_expense(
     db.refresh(expense)
     _record_activity(db, group_id, account, "expense_updated", f"{account.display_name} updated {expense.store_name}", "expense", expense.id)
     if was_locked:
-        _notify_group_members(db, group_id, f"{account.display_name} corrected {expense.store_name}. Recorded payments remain applied; check your recalculated balance.", _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
+        _notify_group_members(db, group_id, f"{account.display_name} corrected {expense.store_name}. Recorded payments stay applied; any overpay is now credit on the balance.", _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
     else:
         _notify_group_members(db, group_id, f"{account.display_name} updated {expense.store_name}.", _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
     db.commit()
@@ -3298,7 +3585,7 @@ def delete_expense(
     _record_activity(db, group_id, account, "expense_deleted", f"{account.display_name} deleted {store_name}", "expense", expense_id)
     text = f"{account.display_name} {'corrected the period by deleting' if was_locked else 'deleted'} {store_name}."
     if was_locked:
-        text += " Recorded payments remain applied; check your recalculated balance."
+        text += " Recorded payments stay applied; any overpay is now credit on the balance."
     _notify_group_members(db, group_id, text, _group_focus_link(group_id, "expenses", "expensesBody"), exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "expense-deleted")
@@ -3515,6 +3802,8 @@ def mark_group_payment_received(group_id: int, period_key: str, payload: schemas
         status="CONFIRMED", expense_cutoff_id=expense_cutoff_id, marked_paid_at=now, confirmed_at=now,
     )
     db.add(payment)
+    db.flush()
+    payment.cleared_amount = _cleared_amount_for_group_payment(db, period, payment)
     payer = db.query(models.GroupMember).get(payload.payer_member_id)
     _record_activity(db, group_id, account, "payment_received", f"{recipient.display_name} recorded {currency} {payload.amount:.2f} received from {payer.display_name}", "payment", None)
     _notify_group_members(db, group_id, f"{recipient.display_name} recorded a {currency} {payload.amount:.2f} payment received from {payer.display_name}. Balances were recalculated.", _group_focus_link(group_id, "balances", "paymentHistory"), exclude_account_id=account.id)
@@ -3540,6 +3829,7 @@ def confirm_group_payment(group_id: int, payment_id: int, account: models.Accoun
         raise HTTPException(400, "This payment cannot be confirmed")
     payment.status = "CONFIRMED"
     payment.confirmed_at = datetime.now(timezone.utc)
+    payment.cleared_amount = _cleared_amount_for_group_payment(db, payment.period, payment)
     payer = db.query(models.GroupMember).get(payment.payer_member_id)
     _record_activity(db, group_id, account, "payment_confirmed", f"{recipient.display_name} confirmed payment from {payer.display_name}", "payment", payment.id)
     _notify_group_members(db, group_id, f"{recipient.display_name} confirmed a {payment.currency} {float(payment.amount):.2f} payment from {payer.display_name}. Balances were recalculated.", _group_focus_link(group_id, "balances", "paymentHistory"), exclude_account_id=account.id)

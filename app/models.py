@@ -237,6 +237,10 @@ class GroupPayment(Base):
     # Last expense in the ledger when this transfer was recorded. This keeps
     # later expenses from being included in an earlier settlement.
     expense_cutoff_id = Column(Integer, nullable=True)
+    # How much of this payment cleared debt when it was confirmed. Replayed in
+    # full later so shrinking/deleting a paid bill becomes credit, while a
+    # payment that exceeded debt at confirm time stays capped.
+    cleared_amount = Column(Numeric(10, 2), nullable=True)
     marked_paid_at = Column(DateTime, nullable=True)
     confirmed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())

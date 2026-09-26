@@ -112,7 +112,7 @@ function monthName(month) {
 }
 
 function canEditBill(split) {
-  return !!split?.is_owner && !(split.participants || []).some((person) => person.payment_status && person.payment_status !== "PENDING");
+  return !!split?.is_owner;
 }
 
 function setExpenseFormMode(editing) {
