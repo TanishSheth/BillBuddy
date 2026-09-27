@@ -1941,22 +1941,50 @@ def _pair_settlement_source_for_period(
     *,
     settlement_ready: bool,
 ) -> Optional[dict]:
-    """Friend↔Friend amount from group Who pays whom (expense-aware). Counts in Friend total."""
+    """Friend↔Friend amount from group Who pays whom (expense-aware). Counts in Friend total.
+
+    Uses group base currency when it matches the Friends currency. When the period
+    was settled (or previewed) into a different target currency, uses the converted
+    Who-pays-whom amount so AUD groups settled into USD still appear on USD Friends.
+    """
+    currency = _normalize_currency(currency, "USD")
+    base_currency = _normalize_currency(group.currency, "USD")
+    target_raw = (period.target_currency or "").strip().upper()
+    target_currency = _normalize_currency(target_raw) if target_raw else ""
     _balances, settlements, _expenses = build_balances_and_settlements(
         db, group.id, period, settlement_mode="smart",
     )
     for settlement in settlements:
         if {settlement["from_member_id"], settlement["to_member_id"]} != {my_member_id, friend_member_id}:
             continue
-        amount = Decimal(str(settlement["amount"]))
+
+        converted_raw = (
+            str(settlement.get("converted_currency") or target_currency or "").strip().upper()
+        )
+        converted_currency = _normalize_currency(converted_raw) if converted_raw else ""
+        converted_amount = settlement.get("converted_amount")
+        if currency == base_currency:
+            amount = Decimal(str(settlement["amount"]))
+            amount_currency = base_currency
+        elif converted_currency and currency == converted_currency and converted_amount is not None:
+            amount = Decimal(str(converted_amount))
+            amount_currency = converted_currency
+        else:
+            return None
+
         # `from` pays `to` → from owes to. Positive for the viewer means the friend owes them.
         signed = amount if settlement["from_member_id"] == friend_member_id else -amount
+        if abs(signed) < Decimal("0.005"):
+            return None
         suffix = "" if settlement_ready else " (current)"
+        settle_note = ""
+        if amount_currency != base_currency:
+            settle_note = f" · {amount_currency}"
         return {
             "kind": "GROUP",
-            "label": f"{group.name} · Who pays whom · {period.period_key}{suffix}",
+            "label": f"{group.name} · Who pays whom · {period.period_key}{settle_note}{suffix}",
             "amount": float(signed),
-            "currency": currency,
+            "currency": amount_currency,
             "period_key": period.period_key,
             "group_id": group.id,
             "period_id": period.id,
@@ -2032,6 +2060,7 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
             })
 
     # One Who-pays-whom edge per shared group period (same plan as the group Balances card).
+    # Include groups whose base currency matches, OR periods settled/previewed into this currency.
     group_member_rows = db.query(models.GroupMember).filter(
         models.GroupMember.account_id.in_((account_id, friend_id)),
     ).all()
@@ -2042,11 +2071,16 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
         if account_id not in members or friend_id not in members:
             continue
         group = db.query(models.Group).get(group_id)
-        if not group or _normalize_currency(group.currency, "USD") != currency:
+        if not group:
             continue
+        base_currency = _normalize_currency(group.currency, "USD")
         mine_id, theirs_id = members[account_id].id, members[friend_id].id
         periods = db.query(models.MonthlyPeriod).filter_by(group_id=group_id).order_by(models.MonthlyPeriod.period_key.asc()).all()
         for period in periods:
+            target_raw = (period.target_currency or "").strip().upper()
+            target_currency = _normalize_currency(target_raw) if target_raw else ""
+            if base_currency != currency and target_currency != currency:
+                continue
             ready = period.status == "SETTLED"
             if not ready:
                 if not members[account_id].is_active or not members[friend_id].is_active:
@@ -2311,9 +2345,15 @@ def get_friend_group_contributions(
         my_member = mine[group.id]
         friend_member = theirs[group.id]
         shares = split_map.get(expense.id, {})
-        if my_member.id not in shares or friend_member.id not in shares:
+        expense_payments = payments.get(expense.id, {})
+        # A payer is involved even when their own share is zero.  For example,
+        # KP can pay a bill that is split only to Tanish; that bill belongs in
+        # their shared Friends history just as much as a two-way split does.
+        my_involved = my_member.id in shares or expense_payments.get(my_member.id, Decimal("0")) > 0
+        friend_involved = friend_member.id in shares or expense_payments.get(friend_member.id, Decimal("0")) > 0
+        if not my_involved or not friend_involved:
             continue
-        amount = _pair_expense_amount(my_member.id, friend_member.id, shares, payments.get(expense.id, {}))
+        amount = _pair_expense_amount(my_member.id, friend_member.id, shares, expense_payments)
         result.append(schemas.FriendGroupContributionOut(
             group_id=group.id, group_name=group.name, expense_id=expense.id,
             title=expense.store_name, bill_date=expense.bill_date, period_key=period.period_key,

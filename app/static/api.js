@@ -802,6 +802,8 @@ function fillCategorySelect(select, selected = "", { includeAll = false, allLabe
     if (useCustom) customInput.value = current;
     if (customWrap) customWrap.classList.toggle("hidden", select.value !== CUSTOM_CATEGORY_VALUE);
   }
+  // A programmatic reset or edit may load a different custom label.
+  delete select.dataset.customAccent;
   syncCategorySelect(select);
 }
 
@@ -813,6 +815,7 @@ function syncCategorySelect(select) {
   const customInput = document.getElementById(select.dataset.customInput || "") || select.parentElement?.querySelector("[data-category-custom], #f_category_custom, #expenseCategoryCustom, #qsCategoryCustom");
   const customWrap = customInput?.closest("#customCategoryWrap, .custom-category-wrap") || document.getElementById(select.dataset.customWrap || "");
   if (value && value !== "All" && value !== CUSTOM_CATEGORY_VALUE) {
+    delete select.dataset.customAccent;
     select.classList.add(categoryClass(value));
     if (!isKnownCategory(value)) {
       const accent = categoryAccentColor(value);
@@ -824,11 +827,16 @@ function syncCategorySelect(select) {
     const custom = (customInput?.value || "").trim();
     if (custom) {
       select.classList.add("cat-Custom");
-      const accent = categoryAccentColor(custom);
+      // Pick an accent when the custom label starts, then preserve it while
+      // the person finishes typing. Rehashing every partial word causes a
+      // distracting color flicker ("P" → "Pe" → "Pet" → "Pets").
+      const accent = select.dataset.customAccent || categoryAccentColor(custom);
+      select.dataset.customAccent = accent;
       select.style.setProperty("--cat-accent", accent);
       select.style.setProperty("--cat-bg", `color-mix(in srgb, ${accent} 16%, white)`);
       select.style.setProperty("--cat-fg", `color-mix(in srgb, ${accent} 72%, black)`);
     } else {
+      delete select.dataset.customAccent;
       select.classList.add("cat-General");
     }
   }
