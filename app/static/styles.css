@@ -1524,6 +1524,12 @@ html.theme-dark .bg-slate-200 { background-color: #334155 !important; }
 html.theme-dark .text-slate-600 { color: #CBD5E1 !important; }
 html.theme-dark .border-l-slate-300 { border-left-color: #64748B !important; }
 html.theme-dark .border-l-emerald-500 { border-left-color: #34D399 !important; }
+/* Status badges use the deeper 700 shades in dark mode. The previous pastel
+   palette left white badge text too low-contrast against the background. */
+html.theme-dark .friend-split-card .bg-emerald-500 { background-color: #15803D !important; }
+html.theme-dark .friend-split-card .bg-red-500 { background-color: #B91C1C !important; }
+html.theme-dark .friend-split-card .border-l-emerald-500 { border-left-color: #15803D !important; }
+html.theme-dark .friend-split-card .border-l-red-500 { border-left-color: #B91C1C !important; }
 html.theme-dark .border-l-red-500 { border-left-color: #F87171 !important; }
 html.theme-dark .text-emerald-700 { color: #6EE7B7 !important; }
 html.theme-dark .text-amber-700 { color: #FCD34D !important; }
