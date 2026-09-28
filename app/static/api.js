@@ -17,6 +17,35 @@ function setToken(token) {
 function removeToken() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(LEGACY_TOKEN_KEY);
+  localStorage.removeItem("sharesquad_demo_sandbox");
+}
+
+function renderDemoBanner() {
+  if (localStorage.getItem("sharesquad_demo_sandbox") !== "1" || document.getElementById("demoModeBanner")) return;
+  const header = document.querySelector(".page-header");
+  if (!header) return;
+  const banner = document.createElement("aside");
+  banner.id = "demoModeBanner";
+  banner.className = "border-b border-brand/25 bg-brand/10 text-ink";
+  banner.setAttribute("role", "status");
+  banner.innerHTML = '<div class="max-w-5xl mx-auto px-4 sm:px-5 py-2 text-center text-xs sm:text-sm"><strong class="font-mono text-brand">Demo mode</strong> · Try most features in this sample workspace; some details may differ from the full app. <a class="font-semibold underline underline-offset-2 hover:text-brand" href="/login.html?mode=signup">Sign up free</a> to use every feature with your own data. <button type="button" id="resetDemoSandbox" class="ml-1 font-semibold underline underline-offset-2 hover:text-brand">Reset demo</button></div>';
+  header.insertAdjacentElement("afterend", banner);
+  banner.querySelector("#resetDemoSandbox")?.addEventListener("click", async () => {
+    if (!await confirmDialog({
+      title: "Reset this demo?",
+      message: "Your demo changes will be removed and a fresh sample workspace will open.",
+      confirmLabel: "Reset demo",
+    })) return;
+    try {
+      const result = await api("/demo/sandbox/reset", { method: "POST" });
+      setToken(result.access_token);
+      localStorage.setItem("sharesquad_demo_sandbox", "1");
+      setStoredGroupId(result.group_id);
+      window.location.href = `/group.html?group=${encodeURIComponent(result.group_id)}&tab=balances&demo=1`;
+    } catch (error) {
+      showToast(error.message || "Could not reset the demo", "error");
+    }
+  });
 }
 
 function getStoredGroupId() {
@@ -997,6 +1026,8 @@ function setThemePreference(preference) {
 }
 
 applyTheme();
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", renderDemoBanner, { once: true });
+else renderDemoBanner();
 try {
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
     if (getThemePreference() === "system") applyTheme("system");
@@ -1010,6 +1041,7 @@ window.ShareSquad = {
   getToken,
   setToken,
   removeToken,
+  renderDemoBanner,
   getStoredGroupId,
   setStoredGroupId,
   removeStoredGroupId,

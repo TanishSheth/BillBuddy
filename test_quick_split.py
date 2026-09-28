@@ -52,7 +52,9 @@ def test_quick_split_create_join_and_confirm_payment():
         headers=friend_headers,
     )
     assert marked.status_code == 200, marked.text
-    assert marked.json()["participants"][0]["payment_status"] == "PAID"
+    # Private one-to-one bills apply immediately; confirmation remains a
+    # backwards-compatible no-op endpoint for older clients.
+    assert marked.json()["participants"][0]["payment_status"] == "CONFIRMED"
 
     confirmed = client.post(
         f"/api/quick-splits/{split['id']}/participants/{participant_id}/confirm",
@@ -232,9 +234,12 @@ def test_quick_split_create_join_and_confirm_payment():
     )
     assert future_dated.status_code == 400
 
-    forbidden_delete = client.delete(f"/api/quick-splits/{link_split['id']}", headers=friend_headers)
-    assert forbidden_delete.status_code == 403
-    deleted = client.delete(f"/api/quick-splits/{link_split['id']}", headers=owner_headers)
-    assert deleted.status_code == 200, deleted.text
-    missing = client.get(f"/api/quick-splits/{link_split['id']}", headers=owner_headers)
-    assert missing.status_code == 404
+    # Both people can normally manage a private bill, but this one has already
+    # been included in a completed monthly settlement and is deliberately
+    # immutable for auditability.
+    locked_for_friend = client.delete(f"/api/quick-splits/{link_split['id']}", headers=friend_headers)
+    assert locked_for_friend.status_code == 409
+    locked_for_owner = client.delete(f"/api/quick-splits/{link_split['id']}", headers=owner_headers)
+    assert locked_for_owner.status_code == 409
+    retained = client.get(f"/api/quick-splits/{link_split['id']}", headers=owner_headers)
+    assert retained.status_code == 200

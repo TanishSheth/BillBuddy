@@ -61,6 +61,38 @@ class AccountSettings(Base):
     account = relationship("Account", back_populates="settings")
 
 
+class DemoTemplate(Base):
+    """Private, versioned source data used only to create demo sandboxes."""
+    __tablename__ = "demo_templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    version = Column(String(40), unique=True, nullable=False, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class DemoSandbox(Base):
+    """An expiring, isolated public-demo workspace."""
+    __tablename__ = "demo_sandboxes"
+
+    id = Column(String(64), primary_key=True)
+    template_id = Column(Integer, ForeignKey("demo_templates.id", ondelete="RESTRICT"), nullable=False)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class DemoSandboxAccount(Base):
+    """All synthetic accounts belonging to one sandbox, for safe cleanup."""
+    __tablename__ = "demo_sandbox_accounts"
+    __table_args__ = (UniqueConstraint("sandbox_id", "account_id", name="uq_demo_sandbox_account"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    sandbox_id = Column(String(64), ForeignKey("demo_sandboxes.id", ondelete="CASCADE"), nullable=False, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+
+
 class Group(Base):
     __tablename__ = "groups"
 

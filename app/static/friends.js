@@ -47,6 +47,11 @@ function mergeFriends(splits, contacts) {
   return [...map.values()].sort((a, b) => a.friend.name.localeCompare(b.friend.name));
 }
 
+function consolidatedTotals(friend) {
+  const totals = friend.consolidatedBalances?.balances || (friend.consolidated ? [friend.consolidated] : []);
+  return totals.filter((total) => Math.abs(Number(total.balance || 0)) >= 0.005);
+}
+
 function statusFor(friend) {
   const balance = cents(friend.balance);
   if (balance > 0) return { tone: "text-green-800 bg-green-600/10 border-green-700/20", text: `${ShareSquad.escapeHtml(friend.friend.name)} owes you ${money(balance, friend.currency)}`, hint: "They owe you" };
@@ -62,7 +67,84 @@ function statusForBill(row, settled = false) {
   return { tone: "text-ink/60", text: "Settled", hint: "Settled up" };
 }
 
+function indexPaidDirectBills(friend) {
+  // A confirmed Friend payment can carry exact bill IDs (newer payments), or
+  // only a direct-balance allocation (older payments). Build one shared index
+  // for the whole friend ledger so every card and every month uses the same
+  // payment state instead of relying on a row-specific UI shortcut.
+  const paidIds = new Set();
+  const coveredBySplit = new Map();
+  const rows = friend.rows || [];
+  const rowById = new Map(rows.map((row) => [Number(row.split.id), row]));
+  const amountFor = (row) => Math.abs(Number(row.balance || 0));
+  const addCoverage = (splitId, amount) => {
+    const row = rowById.get(Number(splitId));
+    if (!row) return;
+    const total = (coveredBySplit.get(Number(splitId)) || 0) + Math.abs(Number(amount || 0));
+    coveredBySplit.set(Number(splitId), total);
+    if (total + 0.005 >= amountFor(row)) paidIds.add(Number(splitId));
+  };
+  const paymentsById = new Map();
+  (friend.consolidatedBalances?.balances || []).forEach((total) => {
+    (total.payments || []).forEach((payment) => paymentsById.set(Number(payment.id), payment));
+  });
+
+  [...paymentsById.values()]
+    .filter((payment) => payment.status === "CONFIRMED")
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")) || Number(a.id) - Number(b.id))
+    .forEach((payment) => {
+      const allocations = (payment.allocations || []).filter((allocation) => allocation.kind === "DIRECT");
+      // First honor exact references. These are authoritative and are written
+      // by newer payment flows when a bill can be identified directly.
+      allocations.filter((allocation) => allocation.quick_split_id).forEach((allocation) => {
+        addCoverage(allocation.quick_split_id, allocation.amount);
+      });
+      // Older payments predate bill IDs in allocations. Reconcile them using
+      // the same auditable rules everywhere: same currency, month, debtor,
+      // and bill existence at payment time. An exact outstanding amount wins;
+      // any remaining amount pays the newest eligible bills first.
+      allocations.filter((allocation) => !allocation.quick_split_id).forEach((allocation) => {
+        let remaining = Math.abs(Number(allocation.amount || 0));
+        if (remaining < 0.005) return;
+        const monthKey = String(allocation.month_key || allocation.period_key || "");
+        const candidates = rows.filter((row) => {
+          const split = row.split;
+          const expectedPayerId = split.is_payer ? friend.friend.id : me?.account?.id;
+          const intrinsicStatus = String(row.person?.payment_status || "").toUpperCase();
+          if (["PAID", "CONFIRMED"].includes(intrinsicStatus)) return false;
+          if (String(split.bill_date || "").slice(0, 7) !== monthKey) return false;
+          if (String(split.currency || "USD") !== String(payment.currency || "USD")) return false;
+          if (Number(payment.payer_account_id) !== Number(expectedPayerId)) return false;
+          if (payment.created_at && split.created_at && new Date(split.created_at) > new Date(payment.created_at)) return false;
+          return amountFor(row) - (coveredBySplit.get(Number(split.id)) || 0) >= 0.005;
+        }).sort((a, b) => (
+          String(b.split.bill_date || "").localeCompare(String(a.split.bill_date || "")) ||
+          String(b.split.created_at || "").localeCompare(String(a.split.created_at || "")) ||
+          Number(b.split.id) - Number(a.split.id)
+        ));
+        const exact = candidates.find((row) => Math.abs(amountFor(row) - (coveredBySplit.get(Number(row.split.id)) || 0) - remaining) < 0.005);
+        if (exact) {
+          addCoverage(exact.split.id, remaining);
+          return;
+        }
+        candidates.forEach((row) => {
+          if (remaining < 0.005) return;
+          const due = amountFor(row) - (coveredBySplit.get(Number(row.split.id)) || 0);
+          const applied = Math.min(remaining, due);
+          addCoverage(row.split.id, applied);
+          remaining -= applied;
+        });
+      });
+    });
+  friend.paidDirectSplitIds = paidIds;
+}
+
 function isDirectBillSettled(row, friend) {
+  // A private bill can be closed by its own confirmed payment before (or
+  // independently of) the monthly Friend settlement. Keep it visibly paid in
+  // either case so the ledger never loses its strike-through state.
+  if (["PAID", "CONFIRMED"].includes(String(row.person?.payment_status || "").toUpperCase())) return true;
+  if (friend.paidDirectSplitIds?.has(Number(row.split.id))) return true;
   const settlement = friend.settlements?.get(String(row.split.bill_date).slice(0, 7));
   if (!settlement) return false;
   if (settlement.status === "SETTLED") return true;
@@ -307,11 +389,14 @@ function renderLedger(friend) {
   const rows = friend.rows.filter((row) => String(row.split.bill_date).slice(0, 7) === selectedMonth);
   const groupRows = (friend.groupContributions || []).filter((row) => String(row.bill_date).slice(0, 7) === selectedMonth);
   const groupBlocks = groupLedgerBlocks(friend, groupRows, selectedMonth);
-  const sourceRows = friend.consolidated?.sources || [];
-  const directNet = sourceRows
-    .filter((source) => source.kind === "DIRECT" && source.period_key === selectedMonth)
-    .reduce((sum, source) => sum + Number(source.amount || 0), 0);
-  const currency = friend.consolidated?.currency || friend.currency || "USD";
+  const directNetByCurrency = new Map();
+  (friend.consolidatedBalances?.balances || (friend.consolidated ? [friend.consolidated] : [])).forEach((total) => {
+    (total.sources || []).filter((source) => source.kind === "DIRECT" && source.period_key === selectedMonth).forEach((source) => {
+      const currency = source.currency || total.currency || "USD";
+      directNetByCurrency.set(currency, (directNetByCurrency.get(currency) || 0) + Number(source.amount || 0));
+    });
+  });
+  const directSummary = [...directNetByCurrency.entries()].filter(([, amount]) => Math.abs(amount) >= 0.005).map(([currency, amount]) => ({ currency, amount }));
   const openRows = rows.filter((row) => !isDirectBillSettled(row, friend)).sort((a, b) => String(b.split.bill_date).localeCompare(String(a.split.bill_date)));
   const paidRows = rows.filter((row) => isDirectBillSettled(row, friend)).sort((a, b) => String(b.split.bill_date).localeCompare(String(a.split.bill_date)));
   $("#ledgerTitle").textContent = activeLedger === "current" ? `This month · ${monthName(currentMonth)}` : `History · ${monthName(selectedMonth)}`;
@@ -329,7 +414,7 @@ function renderLedger(friend) {
     const amountTone = amount > 0 ? "text-green-700" : amount < 0 ? "text-red-700" : "text-ink/60";
     return `<button type="button" class="member-row group-ledger-row w-full text-left" data-group-id="${group.groupId}"><div><p class="font-semibold text-sm">Group settlement · ${ShareSquad.escapeHtml(group.name)}</p><p class="text-xs text-ink/55">${group.count} shared expense${group.count === 1 ? "" : "s"} · View group expenses</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${amountTone}">${amountText}</p><p class="text-[10px] text-ink/50">${status}</p></div></button>`;
   }).join("")}</section>` : "";
-  const directHeader = rows.length ? `<div class="flex items-center justify-between gap-3"><p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Private bills</p><span class="text-[10px] font-mono ${directNet > 0 ? "text-green-700" : directNet < 0 ? "text-red-700" : "text-ink/50"}">${directNet ? signedMoney(directNet, currency) : `Settled · ${ShareSquad.formatMoney(0, currency)} remaining`}</span></div>` : "";
+  const directHeader = rows.length ? `<div class="flex items-center justify-between gap-3"><p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Private bills</p><span class="text-[10px] font-mono ${directSummary.length && directSummary.every((item) => item.amount > 0) ? "text-green-700" : directSummary.length && directSummary.every((item) => item.amount < 0) ? "text-red-700" : "text-ink/50"}">${directSummary.length ? directSummary.map((item) => signedMoney(item.amount, item.currency)).join(" · ") : "Settled"}</span></div>` : "";
   const privateHtml = rows.length ? `<section class="space-y-2 ${groupHtml ? "pt-4 mt-4 border-t border-ink/10" : ""}">${directHeader}${openRows.map((row) => directLedgerRow(row, friend)).join("")}${paidRows.length ? `<details class="pt-2"><summary class="cursor-pointer text-xs font-semibold text-ink/60">Paid private bills · ${paidRows.length}</summary><div class="space-y-2 mt-2">${paidRows.map((row) => directLedgerRow(row, friend)).join("")}</div></details>` : ""}</section>` : "";
   $("#friendLedger").innerHTML = groupHtml || privateHtml ? `${groupHtml}${privateHtml}` : '<p class="text-sm text-ink/55 py-3">No group settlements or private bills in this month.</p>';
   $("#friendLedger").querySelectorAll(".group-ledger-row").forEach((button) => button.addEventListener("click", () => {
@@ -350,40 +435,45 @@ function renderLedger(friend) {
 }
 
 function renderConsolidated(friend) {
-  const total = friend.consolidated;
   const breakdown = $("#consolidatedBreakdown"); const payments = $("#consolidatedPayments");
-  if (!total) { breakdown.innerHTML = ""; payments.innerHTML = ""; return; }
-  const sources = total.sources || [];
-  breakdown.innerHTML = `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/50 mb-2">Balance breakdown</p><p class="text-[10px] text-ink/55 mb-3">Total = group Who pays whom (for this pair) + private direct bills. Individual shared group expenses in the ledger are view-only and are not added again.</p><div id="consolidatedBreakdownRows" class="space-y-2">${sources.length ? sources.map((source) => {
-    const label = source.kind === "GROUP" ? String(source.label || "").split(" · ")[0] : source.label;
-    return `<div class="flex justify-between gap-3 text-xs"><span>${ShareSquad.escapeHtml(label)}</span><span class="font-mono ${source.amount > 0 ? "text-green-700" : "text-red-700"}">${source.amount > 0 ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(source.amount), source.currency)}</span></div>`;
-  }).join("") : '<p class="text-xs text-ink/55">No open Who-pays-whom or direct balances in this currency.</p>'}</div>`;
-  const pending = (total.payments || []).filter((payment) => payment.status === "PENDING");
-  const paymentHistory = total.payments || [];
-  const balance = Number(total.balance || 0);
-  const settleableBalance = Number(total.settleable_balance || 0);
-  const iOwe = settleableBalance < 0;
-  const fullLabel = iOwe ? "Mark full payment" : "Mark full payment received";
-  const partialLabel = iOwe ? "Mark partial payment" : "Record partial payment received";
-  const waitMsg = balance && !settleableBalance
-    ? '<p class="text-xs text-ink/55">Part of this total is from an open group period. It becomes payable from Friends after that period is settled.</p>'
-    : (!balance ? '<p class="text-xs text-ink/55">No balance to settle with this person.</p>' : "");
-  const historyHtml = paymentHistory.length ? `<details class="mt-4 pt-3 border-t border-ink/10"><summary class="cursor-pointer text-[10px] font-mono uppercase tracking-widest text-ink/50 flex items-center justify-between gap-3"><span>Payment history</span><span>${paymentHistory.length} payment${paymentHistory.length === 1 ? "" : "s"}</span></summary><div class="space-y-2 mt-3">${paymentHistory.map((payment) => {
-    const youPaid = Number(payment.payer_account_id) === Number(me?.account?.id);
-    const kind = payment.payment_kind === "FULL" ? "Full payment" : payment.payment_kind === "PARTIAL" ? "Partial payment" : "Recorded payment";
-    const state = payment.status === "CONFIRMED" ? "Applied" : "Pending";
-    const date = payment.confirmed_at || payment.created_at;
-    return `<div class="flex items-center justify-between gap-3 rounded bg-ink/5 px-2.5 py-2 text-xs"><div><p class="font-semibold">${kind} · ${youPaid ? "You paid" : `${ShareSquad.escapeHtml(friend.friend.name)} paid`}</p><p class="text-[10px] text-ink/50">${ShareSquad.formatDate(date)} · ${state}</p></div><span class="font-mono font-bold ${youPaid ? "text-red-700" : "text-green-700"}">${youPaid ? "−" : "+"}${ShareSquad.formatMoney(payment.amount, payment.currency)}</span></div>`;
-  }).join("")}</div></details>` : "";
-  payments.innerHTML = `${settleableBalance ? `<div class="flex flex-wrap gap-2"><button type="button" id="markFullConsolidatedPayment" class="bb-btn-primary !py-1.5 !px-3 text-[10px]">${fullLabel}</button><button type="button" id="showPartialConsolidatedPayment" class="bb-btn-secondary !py-1.5 !px-3 text-[10px]">${partialLabel}</button></div><div id="partialConsolidatedPaymentForm" class="hidden mt-3 flex flex-wrap items-end gap-2"><label class="text-[10px] font-mono text-ink/55">Payment amount<input id="consolidatedPaymentAmount" class="bb-input block !w-32 !py-1.5 mt-1 text-xs" type="number" min="0.01" max="${Math.abs(settleableBalance)}" step="0.01" placeholder="0.00"></label><button type="button" id="recordConsolidatedPayment" class="bb-btn-primary !py-1.5 !px-3 text-[10px]">Save partial payment</button></div>` : waitMsg}${pending.map((payment) => `<div class="mt-3 p-2 rounded bg-amber-500/10 text-xs flex items-center justify-between gap-2"><span>${ShareSquad.formatMoney(payment.amount, payment.currency)} older pending payment</span><button class="confirm-consolidated-payment bb-btn-secondary !py-1 !px-2 text-[10px]" data-id="${payment.id}">Apply now</button></div>`).join("")}${historyHtml}`;
-  const savePayment = async (amount) => {
-    if (!Number.isFinite(amount) || amount <= 0 || amount > Math.abs(settleableBalance)) return ShareSquad.showToast("Enter an amount up to the payment-ready balance.", "error");
-    try { await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-payments`, { method: "POST", body: JSON.stringify({ amount, currency: total.currency }) }); ShareSquad.showToast("Payment recorded and applied to the balance.", "success"); await refresh(); openFriend(friend.key); }
+  const totals = consolidatedTotals(friend);
+  if (!totals.length) { breakdown.innerHTML = ""; payments.innerHTML = '<p class="text-xs text-ink/55">No balance to settle with this person.</p>'; return; }
+  const multiple = totals.length > 1;
+  breakdown.innerHTML = `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/50 mb-2">Balance breakdown</p><p class="text-[10px] text-ink/55 mb-3">Balances are separated by currency. Total = group Who pays whom (for this pair) + private direct bills; shared group expenses in the ledger are view-only.</p>${totals.map((total) => {
+    const sources = total.sources || [];
+    return `<section class="${multiple ? "pt-3 mt-3 border-t border-ink/10" : ""}">${multiple ? `<p class="text-xs font-mono font-bold text-brand mb-2">${ShareSquad.escapeHtml(total.currency)} balance</p>` : ""}<div class="space-y-2">${sources.length ? sources.map((source) => {
+      const label = source.kind === "GROUP" ? String(source.label || "").split(" · ")[0] : source.label;
+      return `<div class="flex justify-between gap-3 text-xs"><span>${ShareSquad.escapeHtml(label)}</span><span class="font-mono ${source.amount > 0 ? "text-green-700" : "text-red-700"}">${source.amount > 0 ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(source.amount), source.currency)}</span></div>`;
+    }).join("") : '<p class="text-xs text-ink/55">No open balance in this currency.</p>'}</div></section>`;
+  }).join("")}`;
+  payments.innerHTML = totals.map((total) => {
+    const balance = Number(total.balance || 0); const settleable = Number(total.settleable_balance || 0);
+    const iOwe = settleable < 0; const currency = ShareSquad.escapeHtml(total.currency);
+    const deferredAmount = balance - settleable;
+    const openGroups = [...new Map((total.sources || []).filter((source) => source.kind === "GROUP" && source.settlement_ready === false && source.group_id).map((source) => [source.group_id, String(source.label || "Group").split(" · ")[0]])).entries()];
+    const groupAction = openGroups.length ? `<div class="mt-3 flex flex-wrap items-center gap-2"><span class="text-xs text-ink/55">${Math.abs(deferredAmount) >= 0.005 ? `${ShareSquad.formatMoney(Math.abs(deferredAmount), total.currency)} remains in an open group period.` : "Recording this payment also updates the current group balance."}</span>${openGroups.map(([groupId, groupName]) => `<button type="button" class="open-group-settlement bb-btn-secondary !py-1 !px-2 text-[10px]" data-group-id="${groupId}">Open ${ShareSquad.escapeHtml(groupName)} balances</button>`).join("")}</div>` : "";
+    const waitMsg = !balance ? '<p class="text-xs text-ink/55">No balance to settle in this currency.</p>' : "";
+    const pending = (total.payments || []).filter((payment) => payment.status === "PENDING");
+    const history = (total.payments || []).length ? `<details class="mt-3 pt-3 border-t border-ink/10"><summary class="cursor-pointer text-[10px] font-mono uppercase tracking-widest text-ink/50">${currency} payment history · ${(total.payments || []).length}</summary><div class="space-y-2 mt-3">${total.payments.map((payment) => {
+      const youPaid = Number(payment.payer_account_id) === Number(me?.account?.id); const date = payment.confirmed_at || payment.created_at;
+      return `<div class="flex items-center justify-between gap-3 rounded bg-ink/5 px-2.5 py-2 text-xs"><span>${youPaid ? "You paid" : `${ShareSquad.escapeHtml(friend.friend.name)} paid`} · ${ShareSquad.formatDate(date)}</span><span class="font-mono font-bold ${youPaid ? "text-red-700" : "text-green-700"}">${youPaid ? "−" : "+"}${ShareSquad.formatMoney(payment.amount, payment.currency)}</span></div>`;
+    }).join("")}</div></details>` : "";
+    return `<section class="${multiple ? "pt-4 mt-4 border-t border-ink/10" : ""}">${multiple ? `<p class="text-xs font-mono font-bold text-brand mb-2">Settle in ${currency}</p>` : ""}${settleable ? `<div class="flex flex-wrap gap-2"><button type="button" class="bb-btn-primary !py-1.5 !px-3 text-[10px] mark-full-consolidated-payment" data-currency="${currency}" data-amount="${Math.abs(settleable)}">${iOwe ? "Mark" : "Record"} ${ShareSquad.formatMoney(Math.abs(settleable), total.currency)} ${iOwe ? "payment" : "received"}</button><button type="button" class="bb-btn-secondary !py-1.5 !px-3 text-[10px] show-partial-consolidated-payment" data-currency="${currency}">${iOwe ? "Mark partial payment" : "Record partial payment received"}</button></div><div class="partial-consolidated-payment-form hidden mt-3 flex flex-wrap items-end gap-2" data-currency="${currency}"><label class="text-[10px] font-mono text-ink/55">${currency} amount<input class="consolidated-payment-amount bb-input block !w-32 !py-1.5 mt-1 text-xs" type="number" min="0.01" max="${Math.abs(settleable)}" step="0.01" placeholder="0.00"></label><button type="button" class="record-consolidated-payment bb-btn-primary !py-1.5 !px-3 text-[10px]" data-currency="${currency}" data-max="${Math.abs(settleable)}">Save partial payment</button></div>${groupAction}` : waitMsg}${pending.map((payment) => `<div class="mt-3 p-2 rounded bg-amber-500/10 text-xs flex items-center justify-between gap-2"><span>${ShareSquad.formatMoney(payment.amount, payment.currency)} pending payment</span><button class="confirm-consolidated-payment bb-btn-secondary !py-1 !px-2 text-[10px]" data-id="${payment.id}">Apply now</button></div>`).join("")}${history}</section>`;
+  }).join("");
+  const savePayment = async (amount, currency, max) => {
+    if (!Number.isFinite(amount) || amount <= 0 || amount > max) return ShareSquad.showToast("Enter an amount up to the payment-ready balance.", "error");
+    try { await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-payments`, { method: "POST", body: JSON.stringify({ amount, currency }) }); ShareSquad.showToast("Payment recorded and applied to the balance.", "success"); await refresh(); openFriend(friend.key); }
     catch (err) { ShareSquad.showToast(err.message || "Could not record payment", "error"); }
   };
-  $("#markFullConsolidatedPayment")?.addEventListener("click", () => savePayment(Math.abs(settleableBalance)));
-  $("#showPartialConsolidatedPayment")?.addEventListener("click", () => { $("#partialConsolidatedPaymentForm")?.classList.remove("hidden"); $("#consolidatedPaymentAmount")?.focus(); });
-  $("#recordConsolidatedPayment")?.addEventListener("click", () => savePayment(Number($("#consolidatedPaymentAmount")?.value)));
+  payments.querySelectorAll(".mark-full-consolidated-payment").forEach((button) => button.addEventListener("click", () => savePayment(Number(button.dataset.amount), button.dataset.currency, Number(button.dataset.amount))));
+  payments.querySelectorAll(".show-partial-consolidated-payment").forEach((button) => button.addEventListener("click", () => payments.querySelector(`.partial-consolidated-payment-form[data-currency=\"${button.dataset.currency}\"]`)?.classList.remove("hidden")));
+  payments.querySelectorAll(".record-consolidated-payment").forEach((button) => button.addEventListener("click", () => {
+    const form = button.closest(".partial-consolidated-payment-form"); savePayment(Number(form?.querySelector(".consolidated-payment-amount")?.value), button.dataset.currency, Number(button.dataset.max));
+  }));
+  payments.querySelectorAll(".open-group-settlement").forEach((button) => button.addEventListener("click", () => {
+    ShareSquad.setStoredGroupId(button.dataset.groupId);
+    window.location.href = `/group.html?group=${encodeURIComponent(button.dataset.groupId)}&tab=balances`;
+  }));
   payments.querySelectorAll(".confirm-consolidated-payment").forEach((button) => button.addEventListener("click", async () => {
     try { await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-payments/${button.dataset.id}/confirm`, { method: "POST" }); ShareSquad.showToast("Payment applied to the open balances.", "success"); await refresh(); openFriend(friend.key); }
     catch (err) { ShareSquad.showToast(err.message || "Could not apply payment", "error"); }
@@ -411,20 +501,20 @@ function openFriend(key) {
   pane.classList.remove("hidden");
   pane.classList.add("sliding-in");
   pane.addEventListener("animationend", () => pane.classList.remove("sliding-in"), { once: true });
-  const state = statusFor(friend);
-  const balance = cents(friend.balance);
-  const currency = friend.consolidated?.currency || friend.currency || "USD";
-  const sources = friend.consolidated?.sources || [];
-  const groupBalance = sources.filter((source) => source.kind === "GROUP").reduce((total, source) => total + Number(source.amount || 0), 0);
-  const privateBalance = sources.filter((source) => source.kind === "DIRECT").reduce((total, source) => total + Number(source.amount || 0), 0);
-  const balanceNote = balance > 0 ? "Green: they owe you." : balance < 0 ? "Red: you owe them." : "You are settled.";
-  const formatSourceBalance = (amount) => amount
-    ? `${amount > 0 ? "+" : "−"}${ShareSquad.formatMoneyText(Math.abs(amount), currency)}`
-    : `settled (${ShareSquad.formatMoneyText(0, currency)})`;
+  const totals = consolidatedTotals(friend);
+  const positive = totals.length && totals.every((total) => Number(total.balance) > 0);
+  const negative = totals.length && totals.every((total) => Number(total.balance) < 0);
+  const balanceMarkup = totals.length
+    ? (totals.length === 1
+      ? (positive ? `${ShareSquad.escapeHtml(friend.friend.name)} owes you ${money(totals[0].balance, totals[0].currency)}` : `You owe ${ShareSquad.escapeHtml(friend.friend.name)} ${money(totals[0].balance, totals[0].currency)}`)
+      : `<span class="text-sm text-ink/60">Balances by currency</span><span class="block mt-1">${totals.map((total) => `${Number(total.balance) > 0 ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(total.balance), total.currency)}`).join("<br>")}</span>`)
+    : "No one owes anything";
+  const balanceTone = positive ? "text-green-700" : negative ? "text-red-700" : totals.length ? "text-ink/70" : "text-ink/60";
+  const balanceNote = !totals.length ? "You are settled." : totals.length > 1 ? "Each amount is separate; select its payment controls below." : positive ? "Green: they owe you." : "Red: you owe them.";
   $("#friendName").textContent = friend.friend.name;
-  $("#friendBalance").innerHTML = state.text;
-  $("#friendBalance").className = `font-mono font-bold text-xl mt-3 ${balance > 0 ? "text-green-700" : balance < 0 ? "text-red-700" : "text-ink/60"}`;
-  $("#friendBalanceHelp").textContent = `${balanceNote} Groups: ${formatSourceBalance(groupBalance)} · Private bills: ${formatSourceBalance(privateBalance)}.`;
+  $("#friendBalance").innerHTML = balanceMarkup;
+  $("#friendBalance").className = `font-mono font-bold text-xl mt-3 ${balanceTone}`;
+  $("#friendBalanceHelp").textContent = balanceNote;
   renderConsolidated(friend);
   setupHistory(friend);
   $("#friendExpensePanel").classList.toggle("hidden", !friend.friend.id); $("#friendExpenseForm").dataset.friendId = friend.friend.id || ""; $("#friendPaidBy").options[1].textContent = `${friend.friend.name} paid`; ShareSquad.fillCurrencySelect($("#friendExpenseCurrency"), friend.currency); resetExpenseForm();
@@ -439,7 +529,8 @@ async function refresh() {
   renderList();
   await Promise.all(friends.filter((friend) => friend.friend.id).map(async (friend) => {
     const settlements = await ShareSquad.api(`/friends/${friend.friend.id}/settlements`).catch(() => []);
-    friend.consolidated = await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-balance?currency=USD`).catch(() => null);
+    friend.consolidatedBalances = await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-balances`).catch(() => null);
+    friend.consolidated = consolidatedTotals(friend)[0] || friend.consolidatedBalances?.balances?.[0] || null;
     friend.groupContributions = await ShareSquad.api(`/friends/${friend.friend.id}/group-contributions`).catch(() => []);
     friend.settlements = new Map(settlements.map((settlement) => [settlement.month_key, settlement]));
     friend.balance = friend.consolidated ? Number(friend.consolidated.balance) : friend.rows.reduce((sum, row) => {
@@ -448,6 +539,7 @@ async function refresh() {
       if (settlement?.settled_at && new Date(row.split.created_at) <= new Date(settlement.settled_at)) return sum;
       return sum + row.balance;
     }, 0);
+    indexPaidDirectBills(friend);
   }));
   renderList();
 }

@@ -25,6 +25,17 @@ How to run it, deploy it, and update it without losing data: **[OPERATIONS.md](O
 | Personal tracker | Your own monthly expenses, same receipt scan, category totals, PDF export |
 | Settings | Preferred currency, compact list, your own vision API key, optional per-group override |
 
+## Demo sandbox
+
+The landing-page **Try the full demo** button creates a private, writable sandbox from an internal template. The template itself is never exposed through a public account or URL.
+
+- Every visitor receives their own accounts, group, receipts, expenses, friend balances, and API-key settings area.
+- Visitors can add, edit, and delete bills; create groups; test receipt scanning; try settlement; and configure their own AI provider key.
+- **Reset demo** discards only that visitor’s sandbox and opens a clean replacement. Sandboxes expire automatically after two hours and are removed by a scheduled cleanup job.
+- Demo balances remain separated by currency throughout Groups and Friends. The app never silently adds INR, USD, or other currencies together.
+
+The demo banner explains that it covers most product workflows while some production details may differ. A direct sign-up link is always available for a persistent account.
+
 ## Group history and corrections
 
 - Removing a member removes their involvement from active periods, while completed settled reports and history remain preserved.

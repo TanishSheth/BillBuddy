@@ -65,6 +65,7 @@ from .emailer import (
     send_monthly_report_email,
     send_password_reset_email,
 )
+from .demo_service import create_sandbox, purge_expired_sandboxes, reset_sandbox, sandbox_for_account
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -786,6 +787,73 @@ def _cleared_amount_for_group_payment(
     recipient_due = max(float(hist[payment.recipient_member_id]["net_balance"]), 0.0)
     return Decimal(str(round(min(float(payment.amount), payer_owed, recipient_due), 2)))
 
+
+def _repair_group_payment_snapshots(db: Session, period: models.MonthlyPeriod) -> None:
+    """Backfill zero/legacy payment snapshots using the debt at each payment time.
+
+    A snapshot is the amount a transfer actually cleared, not merely the cash
+    recorded.  Older rows without one must never be replayed at face value:
+    doing so can make a later valid payment appear to clear nothing.
+    """
+    payments = db.query(models.GroupPayment).filter_by(period_id=period.id, status="CONFIRMED").all()
+    if not payments:
+        return
+    expenses = db.query(models.Expense).filter_by(period_id=period.id).order_by(models.Expense.id.asc()).all()
+    members = _members_as_dicts(db, period.group_id, include_inactive=True)
+    member_ids = {member["id"] for member in members}
+    pay_map = _payments_by_expense(db, expenses)
+    expense_dicts = [{
+        "expense_id": expense.id,
+        "payer_id": expense.payer_member_id,
+        "total_amount": float(expense.total_amount),
+        "splits": [{"user_id": split.member_id, "share_amount": float(split.share_amount)} for split in expense.splits if split.member_id in member_ids],
+        "payments": [{"payer_id": member_id, "amount": float(amount)} for member_id, amount in pay_map.get(expense.id, {}).items()],
+        "created_at": expense.created_at,
+    } for expense in expenses]
+
+    def event_time(value):
+        if value is None:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    payments.sort(key=lambda row: (event_time(row.marked_paid_at or row.created_at), row.id))
+    applied: list[tuple[int, int, float]] = []
+    for payment in payments:
+        if payment.payer_member_id not in member_ids or payment.recipient_member_id not in member_ids:
+            continue
+        cutoff = event_time(payment.marked_paid_at or payment.created_at)
+        historical = [
+            expense for expense in expense_dicts
+            if (payment.expense_cutoff_id is not None and expense.get("expense_id", 0) <= payment.expense_cutoff_id)
+            or (payment.expense_cutoff_id is None and event_time(expense.get("created_at")) <= cutoff)
+        ]
+        balances = compute_balances(members, historical)
+        for payer_id, recipient_id, amount in applied:
+            balances[payer_id]["net_balance"] = round(balances[payer_id]["net_balance"] + amount, 2)
+            balances[recipient_id]["net_balance"] = round(balances[recipient_id]["net_balance"] - amount, 2)
+        payer_owed = max(-float(balances[payment.payer_member_id]["net_balance"]), 0.0)
+        recipient_due = max(float(balances[payment.recipient_member_id]["net_balance"]), 0.0)
+        existing = Decimal(str(payment.cleared_amount or "0"))
+        cleared = existing if existing > 0 else Decimal(str(round(min(float(payment.amount), payer_owed, recipient_due), 2)))
+        if existing <= 0:
+            payment.cleared_amount = cleared
+        applied.append((payment.payer_member_id, payment.recipient_member_id, float(cleared)))
+
+
+def _repair_all_group_payment_snapshots(db: Session) -> None:
+    """One safe startup repair for historical payments created before snapshots."""
+    period_ids = [row[0] for row in db.query(models.GroupPayment.period_id).filter(
+        models.GroupPayment.status == "CONFIRMED",
+        or_(models.GroupPayment.cleared_amount.is_(None), models.GroupPayment.cleared_amount == 0),
+    ).distinct().all()]
+    for period_id in period_ids:
+        period = db.query(models.MonthlyPeriod).get(period_id)
+        if period:
+            _repair_group_payment_snapshots(db, period)
+    if period_ids:
+        db.commit()
+
+
 def build_balances_and_settlements(
     db: Session, group_id: int, period: models.MonthlyPeriod, settlement_mode: str = "smart"
 ):
@@ -1007,9 +1075,19 @@ account_cleanup_scheduler = BackgroundScheduler()
 def start_account_deletion_cleanup() -> None:
     _purge_expired_account_deletions()
     _purge_stale_read_notifications()
+    db = SessionLocal()
+    try:
+        purge_expired_sandboxes(db)
+        _repair_all_group_payment_snapshots(db)
+    finally:
+        db.close()
     if not DISABLE_SCHEDULER and not account_cleanup_scheduler.running:
         account_cleanup_scheduler.add_job(_purge_expired_account_deletions, "interval", hours=24, id="account-deletion-cleanup", replace_existing=True)
         account_cleanup_scheduler.add_job(_purge_stale_read_notifications, "interval", hours=6, id="read-notification-cleanup", replace_existing=True)
+        account_cleanup_scheduler.add_job(
+            lambda: _purge_demo_sandboxes_job(), "interval", minutes=30,
+            id="demo-sandbox-cleanup", replace_existing=True,
+        )
         account_cleanup_scheduler.start()
 
 
@@ -1017,6 +1095,61 @@ def start_account_deletion_cleanup() -> None:
 def stop_account_deletion_cleanup() -> None:
     if account_cleanup_scheduler.running:
         account_cleanup_scheduler.shutdown(wait=False)
+
+
+def _purge_demo_sandboxes_job() -> None:
+    db = SessionLocal()
+    try:
+        purge_expired_sandboxes(db)
+    except Exception:
+        db.rollback()
+        logger.exception("Could not purge expired demo sandboxes")
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Public demo sandbox
+# ---------------------------------------------------------------------------
+@app.post("/api/demo/sandbox", response_model=schemas.DemoSandboxOut)
+def start_demo_sandbox(request: Request, db: Session = Depends(get_db)):
+    """Create an isolated, expiring copy of the private demo template."""
+    check_rate_limit(request, limit=5, window_seconds=60)
+    try:
+        return create_sandbox(db)
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Could not create demo sandbox")
+        raise HTTPException(503, "Could not start a demo sandbox. Please try again.") from exc
+
+
+@app.get("/api/demo/sandbox", response_model=schemas.DemoSandboxOut)
+def demo_sandbox_status(
+    account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
+):
+    sandbox = sandbox_for_account(db, account.id)
+    if not sandbox:
+        raise HTTPException(404, "This account is not a demo sandbox")
+    return schemas.DemoSandboxOut(
+        sandbox_id=sandbox.id,
+        group_id=sandbox.group_id,
+        expires_at=sandbox.expires_at,
+        access_token=create_access_token(account.id),
+    )
+
+
+@app.post("/api/demo/sandbox/reset", response_model=schemas.DemoSandboxOut)
+def reset_demo_sandbox(
+    account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
+):
+    try:
+        return reset_sandbox(db, account.id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Could not reset demo sandbox")
+        raise HTTPException(503, "Could not reset this demo sandbox. Please try again.") from exc
 
 
 @app.post("/api/auth/register", response_model=schemas.TokenResponse)
@@ -2159,6 +2292,71 @@ def _consolidated_friend_balance(db: Session, account_id: int, friend_id: int, c
     return balance.quantize(Decimal("0.01")), sources
 
 
+def _friend_balance_currencies(db: Session, account_id: int, friend_id: int) -> list[str]:
+    """Return currencies that can appear on a friend's dashboard card.
+
+    A period settled into a target currency is shown only in that target currency;
+    showing its base currency too would display the same group debt twice.
+    """
+    one, two = _friend_pair(account_id, friend_id)
+    currencies: set[str] = set()
+    direct_rows = db.query(models.QuickSplit.currency).join(models.QuickSplitParticipant).filter(
+        or_(
+            (models.QuickSplit.payer_account_id == account_id) & (models.QuickSplitParticipant.account_id == friend_id),
+            (models.QuickSplit.payer_account_id == friend_id) & (models.QuickSplitParticipant.account_id == account_id),
+        ),
+    ).distinct().all()
+    currencies.update(_normalize_currency(row[0], "USD") for row in direct_rows)
+    payment_rows = db.query(models.PairPayment.currency).filter_by(
+        account_one_id=one, account_two_id=two,
+    ).distinct().all()
+    currencies.update(_normalize_currency(row[0], "USD") for row in payment_rows)
+
+    memberships = db.query(models.GroupMember).filter(
+        models.GroupMember.account_id.in_((account_id, friend_id)),
+    ).all()
+    members_by_group: dict[int, set[int]] = {}
+    for membership in memberships:
+        members_by_group.setdefault(membership.group_id, set()).add(membership.account_id)
+    for group_id, member_account_ids in members_by_group.items():
+        if account_id not in member_account_ids or friend_id not in member_account_ids:
+            continue
+        group = db.query(models.Group).get(group_id)
+        if not group:
+            continue
+        base_currency = _normalize_currency(group.currency, "USD")
+        periods = db.query(models.MonthlyPeriod).filter_by(group_id=group_id).all()
+        for period in periods:
+            target_currency = (period.target_currency or "").strip().upper()
+            currencies.add(_normalize_currency(target_currency) if target_currency else base_currency)
+    return sorted(currencies)
+
+
+def _consolidated_balance_out(
+    db: Session, account: models.Account, friend_id: int, currency: str,
+) -> schemas.ConsolidatedFriendBalanceOut:
+    """Build one currency-specific Friend balance response."""
+    one, two = _friend_pair(account.id, friend_id)
+    normalized_currency = _normalize_currency(currency, "USD")
+    _reconcile_recipient_reported_pair_payments(db, one, two, normalized_currency)
+    balance, sources = _consolidated_friend_balance(db, account.id, friend_id, normalized_currency)
+    # Friend payments are allowed for the live Who-pays-whom result even while
+    # its group period is open.  Recording one also creates the matching group
+    # payment, so the group and Friend views stay in sync.
+    settleable_balance = balance
+    payments = db.query(models.PairPayment).filter_by(
+        account_one_id=one, account_two_id=two, currency=normalized_currency,
+    ).order_by(models.PairPayment.created_at.desc()).all()
+    payer_id = account.id if balance < 0 else friend_id if balance > 0 else None
+    recipient_id = friend_id if balance < 0 else account.id if balance > 0 else None
+    return schemas.ConsolidatedFriendBalanceOut(
+        friend_id=friend_id, balance=float(balance), settleable_balance=float(settleable_balance), currency=normalized_currency,
+        payer_account_id=payer_id, recipient_account_id=recipient_id,
+        sources=[schemas.ConsolidatedSourceOut(**{key: value for key, value in source.items() if key in {"kind", "label", "amount", "currency", "period_key", "group_id", "settlement_ready"}}) for source in sources],
+        payments=[_pair_payment_out(payment) for payment in payments],
+    )
+
+
 def _sync_group_friends(db: Session, account_id: int) -> None:
     """Members become durable friends unless either side explicitly removed them."""
     group_ids = [row[0] for row in db.query(models.GroupMember.group_id).filter_by(account_id=account_id, is_active=True).all()]
@@ -2260,6 +2458,7 @@ def _pair_payment_out(payment: models.PairPayment) -> schemas.PairPaymentOut:
         id=payment.id, payer_account_id=payment.payer_account_id, recipient_account_id=payment.recipient_account_id,
         amount=float(payment.amount), currency=payment.currency, status=payment.status,
         payment_kind=payment_kind,
+        allocations=allocations,
         reported_by_account_id=payment.reported_by_account_id, created_at=payment.created_at, confirmed_at=payment.confirmed_at,
     )
 
@@ -2272,8 +2471,8 @@ def _apply_confirmed_pair_payment(db: Session, payment: models.PairPayment) -> N
         if allocation.get("kind") != "GROUP":
             continue
         period = db.query(models.MonthlyPeriod).get(allocation.get("period_id"))
-        if not period or period.status != "SETTLED":
-            raise HTTPException(409, "A group source is no longer ready for this payment. Refresh and record it again.")
+        if not period:
+            raise HTTPException(409, "A group source is no longer available. Refresh and record the payment again.")
         cutoff_id = db.query(func.max(models.Expense.id)).filter_by(period_id=period.id).scalar()
         group_payment = models.GroupPayment(
             period_id=period.id, payer_member_id=allocation["payer_member_id"], recipient_member_id=allocation["recipient_member_id"],
@@ -2282,7 +2481,7 @@ def _apply_confirmed_pair_payment(db: Session, payment: models.PairPayment) -> N
         )
         db.add(group_payment)
         db.flush()
-        group_payment.cleared_amount = _cleared_amount_for_group_payment(db, period, group_payment)
+        _repair_group_payment_snapshots(db, period)
     payment.status = "CONFIRMED"
     payment.confirmed_at = datetime.now(timezone.utc)
 
@@ -2311,21 +2510,25 @@ def get_consolidated_friend_balance(
     connection = db.query(models.FriendConnection).filter_by(account_one_id=one, account_two_id=two, status="ACTIVE").first()
     if not connection:
         raise HTTPException(403, "Add this person as a friend before viewing a consolidated balance")
-    normalized_currency = _normalize_currency(currency, "USD")
-    _reconcile_recipient_reported_pair_payments(db, one, two, normalized_currency)
-    balance, sources = _consolidated_friend_balance(db, account.id, friend_id, normalized_currency)
-    settleable_balance = sum((
-        Decimal(str(source["amount"])) for source in sources if source.get("settlement_ready") is not False
-    ), Decimal("0.00")).quantize(Decimal("0.01"))
-    payments = db.query(models.PairPayment).filter_by(account_one_id=one, account_two_id=two, currency=normalized_currency).order_by(models.PairPayment.created_at.desc()).all()
-    payer_id = account.id if balance < 0 else friend_id if balance > 0 else None
-    recipient_id = friend_id if balance < 0 else account.id if balance > 0 else None
-    return schemas.ConsolidatedFriendBalanceOut(
-        friend_id=friend_id, balance=float(balance), settleable_balance=float(settleable_balance), currency=normalized_currency,
-        payer_account_id=payer_id, recipient_account_id=recipient_id,
-        sources=[schemas.ConsolidatedSourceOut(**{key: value for key, value in source.items() if key in {"kind", "label", "amount", "currency", "period_key", "group_id", "settlement_ready"}}) for source in sources],
-        payments=[_pair_payment_out(payment) for payment in payments],
-    )
+    return _consolidated_balance_out(db, account, friend_id, currency)
+
+
+@app.get("/api/friends/{friend_id}/consolidated-balances", response_model=schemas.ConsolidatedFriendBalancesOut)
+def get_consolidated_friend_balances(
+    friend_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
+):
+    """All visible Friend balances, separated by currency for the dashboard."""
+    if friend_id == account.id or not db.query(models.Account).get(friend_id):
+        raise HTTPException(404, "Friend not found")
+    one, two = _friend_pair(account.id, friend_id)
+    connection = db.query(models.FriendConnection).filter_by(account_one_id=one, account_two_id=two, status="ACTIVE").first()
+    if not connection:
+        raise HTTPException(403, "Add this person as a friend before viewing consolidated balances")
+    balances = [
+        _consolidated_balance_out(db, account, friend_id, currency)
+        for currency in _friend_balance_currencies(db, account.id, friend_id)
+    ]
+    return schemas.ConsolidatedFriendBalancesOut(friend_id=friend_id, balances=balances)
 
 
 @app.get("/api/friends/{friend_id}/group-contributions", response_model=list[schemas.FriendGroupContributionOut])
@@ -2391,11 +2594,12 @@ def record_consolidated_friend_payment(
 ):
     normalized_currency = _normalize_currency(payload.currency, "USD")
     _live_balance, sources = _consolidated_friend_balance(db, account.id, friend_id, normalized_currency)
-    settleable_balance = sum((
-        Decimal(str(source["amount"])) for source in sources if source.get("settlement_ready") is not False
-    ), Decimal("0.00")).quantize(Decimal("0.01"))
+    # A Friend payment applies to the current pair balance, including an open
+    # group period.  The paired GroupPayment created below keeps both views
+    # consistent and retains the audit record.
+    settleable_balance = _live_balance
     if not settleable_balance:
-        raise HTTPException(400, "There is no payment-ready balance. Open group Who-pays-whom amounts become payable after that group period is settled.")
+        raise HTTPException(400, "There is no balance to settle in this currency.")
     payer_id = account.id if settleable_balance < 0 else friend_id
     recipient_id = friend_id if settleable_balance < 0 else account.id
     amount = Decimal(str(payload.amount)).quantize(Decimal("0.01"))
@@ -2411,7 +2615,7 @@ def record_consolidated_friend_payment(
     # Oldest first makes partial payments predictable and gives every source
     # a permanent, inspectable allocation.
     for source in sorted(sources, key=lambda item: (item["period_key"] or "", item["kind"])):
-        if source.get("settlement_ready") is False or remaining <= 0 or Decimal(str(source["amount"])) * settleable_balance <= 0:
+        if remaining <= 0 or Decimal(str(source["amount"])) * settleable_balance <= 0:
             continue
         applied = min(remaining, abs(Decimal(str(source["amount"]))))
         allocation = {"kind": source["kind"], "amount": float(applied), "month_key": source.get("period_key"), "payment_kind": payment_kind}
@@ -3859,7 +4063,7 @@ def mark_group_payment_paid(group_id: int, period_key: str, payload: schemas.Gro
     )
     db.add(payment)
     db.flush()
-    payment.cleared_amount = _cleared_amount_for_group_payment(db, period, payment)
+    _repair_group_payment_snapshots(db, period)
     recipient = db.query(models.GroupMember).get(payload.recipient_member_id)
     _record_activity(db, group_id, account, "payment_marked_paid", f"{payer.display_name} recorded a payment of {currency} {payload.amount:.2f} to {recipient.display_name}", "payment", payment.id)
     _notify_group_members(db, group_id, f"{payer.display_name} recorded a {currency} {payload.amount:.2f} payment to {recipient.display_name}. Balances were recalculated.", _group_focus_link(group_id, "balances", "paymentHistory"), exclude_account_id=account.id)
@@ -3894,7 +4098,7 @@ def mark_group_payment_received(group_id: int, period_key: str, payload: schemas
     )
     db.add(payment)
     db.flush()
-    payment.cleared_amount = _cleared_amount_for_group_payment(db, period, payment)
+    _repair_group_payment_snapshots(db, period)
     payer = db.query(models.GroupMember).get(payload.payer_member_id)
     _record_activity(db, group_id, account, "payment_received", f"{recipient.display_name} recorded {currency} {payload.amount:.2f} received from {payer.display_name}", "payment", None)
     _notify_group_members(db, group_id, f"{recipient.display_name} recorded a {currency} {payload.amount:.2f} payment received from {payer.display_name}. Balances were recalculated.", _group_focus_link(group_id, "balances", "paymentHistory"), exclude_account_id=account.id)
@@ -3923,8 +4127,7 @@ def confirm_group_payment(group_id: int, payment_id: int, account: models.Accoun
         raise HTTPException(400, "This payment cannot be confirmed")
     payment.status = "CONFIRMED"
     payment.confirmed_at = datetime.now(timezone.utc)
-    if payment.cleared_amount is None:
-        payment.cleared_amount = _cleared_amount_for_group_payment(db, payment.period, payment)
+    _repair_group_payment_snapshots(db, payment.period)
     payer = db.query(models.GroupMember).get(payment.payer_member_id)
     _record_activity(db, group_id, account, "payment_confirmed", f"{recipient.display_name} confirmed payment from {payer.display_name}", "payment", payment.id)
     _notify_group_members(db, group_id, f"{recipient.display_name} confirmed a {payment.currency} {float(payment.amount):.2f} payment from {payer.display_name}. Balances were recalculated.", _group_focus_link(group_id, "balances", "paymentHistory"), exclude_account_id=account.id)

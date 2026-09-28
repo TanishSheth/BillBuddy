@@ -40,6 +40,12 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class DemoSandboxOut(TokenResponse):
+    sandbox_id: str
+    group_id: int
+    expires_at: datetime
+
+
 class AccountOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -236,6 +242,8 @@ class PairPaymentOut(BaseModel):
     currency: str
     status: str
     payment_kind: str = "RECORDED"  # FULL, PARTIAL, or legacy recorded payment
+    # Lets the Friend ledger identify which private bill a recorded payment cleared.
+    allocations: List[dict] = []
     reported_by_account_id: int
     created_at: datetime
     confirmed_at: Optional[datetime] = None
@@ -263,6 +271,17 @@ class ConsolidatedFriendBalanceOut(BaseModel):
     recipient_account_id: Optional[int] = None
     sources: List[ConsolidatedSourceOut]
     payments: List[PairPaymentOut]
+
+
+class ConsolidatedFriendBalancesOut(BaseModel):
+    """A friend's open balances, kept separate by currency.
+
+    Balances must never be added across currencies without an explicit conversion
+    rate.  The Friends dashboard uses this shape to make every shared group
+    visible, including groups created in a non-USD currency.
+    """
+    friend_id: int
+    balances: List[ConsolidatedFriendBalanceOut]
 
 
 class FriendGroupContributionOut(BaseModel):

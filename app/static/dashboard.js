@@ -13,6 +13,10 @@ function normalizeExpenseView(value) {
 function resolveExpenseView() {
   const fromQuery = new URLSearchParams(location.search).get("view");
   if (fromQuery === "groups") return "groups";
+  if (fromQuery === "friends") return "friends";
+  // A sandbox visitor should immediately see the groups they can create and
+  // edit. Normal signed-in users keep Friends as their dashboard default.
+  if (localStorage.getItem("sharesquad_demo_sandbox") === "1") return "groups";
   // Friends is the dashboard landing view. Groups remain one tap away.
   return "friends";
 }
@@ -57,7 +61,18 @@ function setExpenseView(view, { updateUrl = true } = {}) {
 
 function openGroup(groupId) {
   ShareSquad.setStoredGroupId(groupId);
-  window.location.href = "/group.html";
+  window.location.href = `/group.html?group=${encodeURIComponent(groupId)}`;
+}
+
+async function detectDemoSandbox() {
+  if (localStorage.getItem("sharesquad_demo_sandbox") === "1") return true;
+  try {
+    await ShareSquad.api("/demo/sandbox");
+    localStorage.setItem("sharesquad_demo_sandbox", "1");
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 function navigateMainScreen(screen, direction = 1) {
@@ -166,8 +181,13 @@ function renderQuickSplits(_splits, contacts = [], settlementsByFriend = new Map
     const existing = people.get(key) || { id: contact.id, name: contact.display_name, balance: 0, count: 0, currency: "USD", splitId: null };
     const consolidated = consolidatedByFriend.get(contact.id);
     if (consolidated) {
-      existing.balance = Number(consolidated.balance || 0);
-      existing.currency = consolidated.currency || existing.currency;
+      const balances = Array.isArray(consolidated.balances) ? consolidated.balances : [consolidated];
+      existing.balances = balances
+        .map((item) => ({ balance: Number(item.balance || 0), currency: item.currency || existing.currency }))
+        .filter((item) => Math.abs(item.balance) >= 0.005);
+      const primary = existing.balances[0];
+      existing.balance = primary?.balance || 0;
+      existing.currency = primary?.currency || existing.currency;
       existing.hasConsolidatedBalance = true;
     }
     people.set(key, existing);
@@ -175,19 +195,30 @@ function renderQuickSplits(_splits, contacts = [], settlementsByFriend = new Map
   if (!people.size) { grid.innerHTML = ""; empty.classList.remove("hidden"); return; }
   empty.classList.add("hidden");
   grid.innerHTML = [...people.values()].map((person) => {
+    const balanceLines = person.balances || [{ balance: person.balance, currency: person.currency }];
+    const nonZeroBalances = balanceLines.filter((item) => Math.abs(item.balance) >= 0.005);
+    const hasMultipleBalances = nonZeroBalances.length > 1;
     const amount = ShareSquad.formatMoney(Math.abs(person.balance), person.currency);
-    const isPositive = person.balance > 0;
-    const isNegative = person.balance < 0;
-    const status = isPositive
-      ? `${ShareSquad.escapeHtml(person.name)} owes you ${amount}`
-      : isNegative
-        ? `You owe ${ShareSquad.escapeHtml(person.name)} ${amount}`
-        : "Settled up";
+    const isPositive = nonZeroBalances.length && nonZeroBalances.every((item) => item.balance > 0);
+    const isNegative = nonZeroBalances.length && nonZeroBalances.every((item) => item.balance < 0);
+    const status = hasMultipleBalances
+      ? "Balances by currency"
+      : isPositive
+        ? `${ShareSquad.escapeHtml(person.name)} owes you ${amount}`
+        : isNegative
+          ? `You owe ${ShareSquad.escapeHtml(person.name)} ${amount}`
+          : "Settled up";
     const leftBorder = isPositive ? "border-l-emerald-500" : isNegative ? "border-l-red-500" : "border-l-slate-300";
     const amtCls     = isPositive ? "text-emerald-700"    : isNegative ? "text-red-700"      : "text-slate-500";
     const badgeCls   = isPositive ? "bg-emerald-500 text-white" : isNegative ? "bg-red-500 text-white" : "bg-slate-200 text-slate-600";
-    const icon       = isPositive ? "↓ they owe"          : isNegative ? "↑ you owe"         : "✓ settled";
+    const icon       = isPositive ? "↓ they owe"          : isNegative ? "↑ you owe"         : hasMultipleBalances ? "↕ multi-currency" : "✓ settled";
     const href = person.id ? `/friends.html?friend=${encodeURIComponent(person.id)}` : `/quick-split.html?id=${encodeURIComponent(person.splitId)}`;
+    const amountMarkup = hasMultipleBalances
+      ? nonZeroBalances.map((item) => {
+          const itemPositive = item.balance > 0;
+          return `<p class="text-lg font-bold font-mono ${itemPositive ? "text-emerald-700" : "text-red-700"}">${itemPositive ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(item.balance), item.currency)}</p>`;
+        }).join("")
+      : `<p class="text-xl font-bold font-mono mt-2 ${amtCls}">${isPositive || isNegative ? amount : "—"}</p>`;
     return `<div class="bb-card friend-split-card flex flex-col justify-between gap-3 border-l-4 cursor-pointer ${leftBorder}" style="border-top-color:var(--line);border-right-color:var(--line);border-bottom-color:var(--line);" data-href="${href}" role="link" tabindex="0">
   <div>
     <div class="flex items-center justify-between gap-2">
@@ -195,7 +226,7 @@ function renderQuickSplits(_splits, contacts = [], settlementsByFriend = new Map
       <span class="text-[10px] font-bold px-2 py-0.5 rounded-full ${badgeCls}">${icon}</span>
     </div>
     <h3 class="font-mono font-bold text-base leading-tight text-ink mt-2">${ShareSquad.escapeHtml(person.name)}</h3>
-    <p class="text-xl font-bold font-mono mt-2 ${amtCls}">${isPositive || isNegative ? amount : "—"}</p>
+    <div class="mt-2">${amountMarkup}</div>
     <p class="text-xs mt-1 text-ink/60">${status}</p>
     <p class="text-[10px] font-mono mt-2 text-ink/40">${person.hasConsolidatedBalance ? "Total to pay" : `${person.count} direct bill${person.count === 1 ? "" : "s"} in history`}</p>
   </div>
@@ -348,7 +379,7 @@ async function loadDashboard() {
     if ($("#headerInitials")) $("#headerInitials").textContent = ShareSquad.initials(me.account.display_name);
     const [groups, quickSplits, friends] = await Promise.all([ShareSquad.api("/groups"), ShareSquad.api("/quick-splits"), ShareSquad.api("/friends")]);
     const settlementResults = await Promise.all(friends.map(async (friend) => [friend.id, await ShareSquad.api(`/friends/${friend.id}/settlements`).catch(() => [])]));
-    const consolidatedResults = await Promise.all(friends.map(async (friend) => [friend.id, await ShareSquad.api(`/friends/${friend.id}/consolidated-balance?currency=USD`).catch(() => null)]));
+    const consolidatedResults = await Promise.all(friends.map(async (friend) => [friend.id, await ShareSquad.api(`/friends/${friend.id}/consolidated-balances`).catch(() => null)]));
     const settlementsByFriend = new Map(settlementResults.map(([friendId, settlements]) => [friendId, new Map(settlements.map((settlement) => [settlement.month_key, settlement]))]));
     const consolidatedByFriend = new Map(consolidatedResults.filter(([, total]) => total).map(([friendId, total]) => [friendId, total]));
     renderGroups(groups);
@@ -437,6 +468,8 @@ async function submitCreateGroup(e) {
   $$('[data-main-screen="personal"]').forEach((btn) => {
     btn.addEventListener("click", () => navigateMainScreen("personal", 1));
   });
+  await detectDemoSandbox();
+  ShareSquad.renderDemoBanner();
   setExpenseView(resolveExpenseView(), { updateUrl: true });
 
   // Right swipe advances Friends → Groups → Personal; left swipe reverses it.

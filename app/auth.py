@@ -74,6 +74,9 @@ def get_current_account(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account not found")
     if account.deletion_requested_at or account.deletion_completed_at:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This account is not active")
+    sandbox = db.query(models.DemoSandbox).filter_by(account_id=account.id).first()
+    if sandbox and sandbox.expires_at <= datetime.utcnow():
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This demo sandbox has expired. Start a new demo to continue.")
     return account
 
 
