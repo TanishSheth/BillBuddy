@@ -235,6 +235,7 @@ class PairPaymentOut(BaseModel):
     amount: float
     currency: str
     status: str
+    payment_kind: str = "RECORDED"  # FULL, PARTIAL, or legacy recorded payment
     reported_by_account_id: int
     created_at: datetime
     confirmed_at: Optional[datetime] = None

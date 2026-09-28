@@ -10,7 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20260925markAll">
+<link rel="stylesheet" href="/styles.css?v=20260928contrast">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -36,6 +36,7 @@
       </nav>
 
       <div class="header-actions flex items-center gap-1.5 sm:gap-2 shrink-0">
+        <span id="userGreeting" class="inline font-mono text-xs text-ink/60 font-semibold max-w-[120px] truncate"></span>
         <button id="addExpenseBtn" type="button" class="bb-btn-primary !py-1.5 !px-3 text-[11px]">
           <i data-lucide="plus" class="w-3.5 h-3.5"></i> <span class="btn-label">Add Expense</span>
         </button>
@@ -50,7 +51,7 @@
     </div>
   </header>
 
-  <main class="page-main max-w-5xl mx-auto px-4 sm:px-5 py-6 sm:py-8 flex-1 w-full space-y-6">
+  <main class="page-main main-screen-swipe-surface max-w-5xl mx-auto px-4 sm:px-5 py-6 sm:py-8 flex-1 w-full space-y-6">
     
     <!-- Controls bar -->
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -265,8 +266,8 @@
 
 
 
-<script src="/api.js?v=20260925markAll"></script>
-  <script src="/personal.js?v=20260925markAll"></script>
+<script src="/api.js?v=20260928compactHeaders"></script>
+  <script src="/personal.js?v=20260928cleanPersonalHeader"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

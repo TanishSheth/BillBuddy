@@ -10,7 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20260925markAll">
+<link rel="stylesheet" href="/styles.css?v=20260928contrast">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -63,9 +63,8 @@
 
     <nav id="mainNav" class="max-w-5xl mx-auto px-4 sm:px-5 pb-2">
       <div class="tab-nav flex gap-1 overflow-x-auto pb-1">
-        <button data-tab="upload" class="tab-btn active"><i data-lucide="camera" class="w-3.5 h-3.5 inline mr-1"></i> Add / Scan</button>
+        <button data-tab="balances" class="tab-btn active"><i data-lucide="scale" class="w-3.5 h-3.5 inline mr-1"></i> Balances & Settlement</button>
         <button data-tab="expenses" class="tab-btn"><i data-lucide="list" class="w-3.5 h-3.5 inline mr-1"></i> Expenses</button>
-        <button data-tab="balances" class="tab-btn"><i data-lucide="scale" class="w-3.5 h-3.5 inline mr-1"></i> Balances & Settlement</button>
         <button data-tab="insights" class="tab-btn"><i data-lucide="chart-no-axes-combined" class="w-3.5 h-3.5 inline mr-1"></i> Insights</button>
         <button data-tab="activity" class="tab-btn"><i data-lucide="history" class="w-3.5 h-3.5 inline mr-1"></i> Activity</button>
         <button data-tab="reports" class="tab-btn"><i data-lucide="file-text" class="w-3.5 h-3.5 inline mr-1"></i> PDF Reports</button>
@@ -90,6 +89,9 @@
         </div>
 
         <div class="flex items-center gap-2">
+          <button id="openAddExpenseBtn" type="button" class="bb-btn-primary !py-1 !px-2.5 text-[11px] flex items-center gap-1.5">
+            <i data-lucide="plus" class="w-3.5 h-3.5"></i> <span>Add expense</span>
+          </button>
           <button id="convertCurrencyBtn" type="button" class="bb-btn-secondary !py-1 !px-2.5 text-[11px] flex items-center gap-1.5 text-brand border-brand/30 hover:bg-brand/5">
             <i data-lucide="banknote" class="w-3.5 h-3.5"></i> <span>Settle in…</span>
           </button>
@@ -97,11 +99,11 @@
       </div>
 
       <div class="how-it-works mb-5">
-        <p id="groupPageHelp"><strong>Add / Scan:</strong> Upload a receipt or enter a bill, choose who paid and who shares it, then save it to this month.</p>
+        <p id="groupPageHelp"><strong>Balances & settlement:</strong> See who pays whom for this month and settle any open balances.</p>
       </div>
 
       <!-- Add / Scan Expense Tab -->
-      <section id="tab-upload" class="tab-panel">
+      <section id="tab-upload" class="tab-panel hidden">
         <div id="draftGroupNotice" class="how-it-works mb-5 hidden">
           <p><strong>This group is being set up.</strong> Add at least one member from <strong>Members</strong>—directly, by email, or with a group link—before adding shared expenses. You can still change the group name or photo.</p>
         </div>
@@ -235,8 +237,8 @@
                 <option value="Healthcare">Healthcare</option>
                 <option value="General">General / Other</option>
               </select>
-              <select id="expenseMemberFilter" class="text-xs font-mono border border-line rounded px-2 py-1 bg-transparent"><option value="">All members</option></select>
-              <label class="text-[10px] font-mono text-muted whitespace-nowrap"><input id="onlyMyExpenses" type="checkbox"> Involving me</label>
+              <select id="expenseMemberFilter" class="text-xs font-mono border border-line rounded px-2 py-1 bg-transparent"><option value="" class="member-filter-option">All members</option></select>
+              <label class="text-[10px] font-mono text-muted whitespace-nowrap"><input id="onlyMyExpenses" type="checkbox" checked> Involving me</label>
             </div>
           </div>
 
@@ -262,7 +264,7 @@
       </section>
 
       <!-- Balances & Settlement Tab -->
-      <section id="tab-balances" class="tab-panel hidden">
+      <section id="tab-balances" class="tab-panel">
         <div id="balanceStrip" class="balance-strip mb-5 hidden" aria-live="polite"></div>
         <div class="bb-card mb-4">
           <div class="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
@@ -500,8 +502,8 @@
     Add expense
   </button>
 
-  <script src="/api.js?v=20260925markAll"></script>
-  <script src="/group.js?v=20260925markAll"></script>
+  <script src="/api.js?v=20260928compactHeaders"></script>
+  <script src="/group.js?v=20260928rememberFilters"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

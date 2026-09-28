@@ -1460,6 +1460,23 @@ def _require_quick_split_access(split_id: int, account: models.Account, db: Sess
     return split
 
 
+def _quick_split_is_payment_locked(db: Session, split: models.QuickSplit) -> bool:
+    """Whether a split was included in a completed monthly payment snapshot."""
+    if not split.created_at:
+        return False
+    for participant in split.participants:
+        partner_id = participant.account_id
+        if not partner_id or partner_id == split.payer_account_id:
+            continue
+        one, two = _friend_pair(split.payer_account_id, partner_id)
+        settlement = db.query(models.FriendMonthlySettlement).filter_by(
+            account_one_id=one, account_two_id=two, month_key=split.bill_date.strftime("%Y-%m"),
+        ).first()
+        if settlement and (settlement.status == "SETTLED" or (settlement.settled_at and split.created_at <= settlement.settled_at)):
+            return True
+    return False
+
+
 @app.get("/api/quick-splits", response_model=list[schemas.QuickSplitOut])
 def list_quick_splits(account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
     rows = (
@@ -1567,8 +1584,8 @@ def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account
     split = _require_quick_split_access(split_id, account, db)
     if not _can_manage_quick_split(split, account):
         raise HTTPException(403, "You cannot edit this split")
-    # Paid/confirmed shares may still be corrected; confirmed cash stays as PairPayment
-    # credit so shrinking or removing the bill reverses into an open balance.
+    if _quick_split_is_payment_locked(db, split):
+        raise HTTPException(409, "This bill was included in a completed payment and can no longer be edited")
     if len(payload.participants) != 1:
         raise HTTPException(400, "A one-to-one split needs exactly one other person. Create a group for 3 or more people.")
     if payload.bill_date > date.today():
@@ -1800,6 +1817,8 @@ def delete_quick_split(split_id: int, account: models.Account = Depends(get_curr
     split = _require_quick_split_access(split_id, account, db)
     if not _can_manage_quick_split(split, account):
         raise HTTPException(403, "You cannot delete this split")
+    if _quick_split_is_payment_locked(db, split):
+        raise HTTPException(409, "This bill was included in a completed payment and can no longer be deleted")
     partners = [
         participant.account_id for participant in split.participants
         if participant.account_id and participant.account_id != split.payer_account_id
@@ -2235,9 +2254,12 @@ def list_friend_settlements(friend_id: int, account: models.Account = Depends(ge
 
 
 def _pair_payment_out(payment: models.PairPayment) -> schemas.PairPaymentOut:
+    allocations = json.loads(payment.allocations_json or "[]")
+    payment_kind = str(allocations[0].get("payment_kind") or "RECORDED") if allocations else "RECORDED"
     return schemas.PairPaymentOut(
         id=payment.id, payer_account_id=payment.payer_account_id, recipient_account_id=payment.recipient_account_id,
         amount=float(payment.amount), currency=payment.currency, status=payment.status,
+        payment_kind=payment_kind,
         reported_by_account_id=payment.reported_by_account_id, created_at=payment.created_at, confirmed_at=payment.confirmed_at,
     )
 
@@ -2382,6 +2404,8 @@ def record_consolidated_friend_payment(
     if amount > abs(settleable_balance):
         raise HTTPException(400, f"Payment cannot exceed the payment-ready balance of {normalized_currency} {abs(settleable_balance):.2f}")
 
+    payment_kind = "FULL" if amount == abs(settleable_balance) else "PARTIAL"
+
     remaining = amount
     allocations = []
     # Oldest first makes partial payments predictable and gives every source
@@ -2390,7 +2414,7 @@ def record_consolidated_friend_payment(
         if source.get("settlement_ready") is False or remaining <= 0 or Decimal(str(source["amount"])) * settleable_balance <= 0:
             continue
         applied = min(remaining, abs(Decimal(str(source["amount"]))))
-        allocation = {"kind": source["kind"], "amount": float(applied), "month_key": source.get("period_key")}
+        allocation = {"kind": source["kind"], "amount": float(applied), "month_key": source.get("period_key"), "payment_kind": payment_kind}
         if source["kind"] == "GROUP":
             allocation.update({
                 "period_id": source["period_id"], "payer_member_id": source["payer_member_id"],

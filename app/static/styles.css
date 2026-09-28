@@ -11,6 +11,14 @@
   --surface: #FFFFFF;
   --toast-bg: #0F172A;
   --toast-fg: #FFFFFF;
+  --surface-raised: #FFFFFF;
+  --surface-muted: #F1F5F9;
+  --surface-inset: #E8EEF5;
+  --on-brand: #FFFFFF;
+  --positive: #15803D;
+  --negative: #B91C1C;
+  --warning: #92400E;
+  --focus-ring: rgba(15, 118, 110, .28);
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
@@ -35,11 +43,15 @@ html {
 body {
   font-family: 'Inter', sans-serif;
   background: var(--paper);
+  color: var(--ink);
   overflow-x: hidden;
   padding-left: var(--safe-left);
   padding-right: var(--safe-right);
   padding-bottom: var(--safe-bottom);
 }
+
+button, input, select, textarea { font: inherit; }
+::selection { background: color-mix(in srgb, var(--brand) 28%, transparent); color: var(--ink); }
 
 
 .bb-bg { background-color: var(--paper); }
@@ -257,7 +269,7 @@ html.theme-dark #periodSelect.bb-input {
 }
 
 /* Modern fintech polish shared by every existing workflow. */
-.page-header { background: rgba(255,255,255,.94); box-shadow: 0 1px 0 var(--line); }
+.page-header { background: color-mix(in srgb, var(--paper) 96%, transparent); box-shadow: 0 1px 0 var(--line); }
 .header-bar { min-height: 64px; }
 .site-nav { background: transparent !important; padding: 0 !important; gap: 4px; }
 .site-nav .nav-tab { border-radius: 0; padding: 10px 13px; }
@@ -1209,7 +1221,7 @@ html.theme-dark .category-pie-empty { fill: #1e293b; }
     position: fixed;
     bottom: 0; left: 0; right: 0;
     z-index: 45;
-    background: rgba(255,255,255,.97);
+    background: color-mix(in srgb, var(--paper) 98%, transparent);
     backdrop-filter: blur(12px);
     border-top: 1px solid var(--line);
     padding-bottom: var(--safe-bottom);
@@ -1230,7 +1242,12 @@ html.theme-dark .category-pie-empty { fill: #1e293b; }
     min-height: 54px;
   }
   .bottom-nav a svg { width: 20px; height: 20px; stroke: currentColor; }
-  .bottom-nav a.active, .bottom-nav a:active { color: var(--brand); }
+.bottom-nav a.active, .bottom-nav a:active { color: var(--brand); }
+
+/* The screen navigator owns horizontal gestures; normal feeds retain their
+   native vertical scrolling behavior. */
+.main-screen-swipe-surface,
+.expense-view-panel { touch-action: pan-y; }
   /* Push the old desktop FAB out of the way when bottom nav is shown */
   .mobile-quick-action { bottom: calc(70px + var(--safe-bottom)); }
   .mobile-quick-actions { bottom: calc(70px + var(--safe-bottom)); }
@@ -1297,6 +1314,14 @@ html.theme-dark {
   --surface: #1E293B;
   --toast-bg: #020617;
   --toast-fg: #F8FAFC;
+  --surface-raised: #273449;
+  --surface-muted: #334155;
+  --surface-inset: #0F172A;
+  --on-brand: #042F2E;
+  --positive: #86EFAC;
+  --negative: #FCA5A5;
+  --warning: #FDE68A;
+  --focus-ring: rgba(45, 212, 191, .36);
 }
 html.theme-dark body { background: var(--paper); color: var(--ink); }
 html.theme-dark .bb-bg { background-color: var(--paper) !important; }
@@ -1317,8 +1342,8 @@ html.theme-dark select.bb-input option {
   background-color: #0B1220;
   color: #F1F5F9;
 }
-html.theme-dark .page-header { background: rgba(11,18,32,.96); border-color: var(--line); }
-html.theme-dark .bottom-nav { background: rgba(11,18,32,.98); border-color: var(--line); }
+html.theme-dark .page-header { background: color-mix(in srgb, var(--paper) 96%, transparent); border-color: var(--line); }
+html.theme-dark .bottom-nav { background: color-mix(in srgb, var(--paper) 98%, transparent); border-color: var(--line); }
 html.theme-dark .bb-btn-secondary { background: #0B1220; border-color: #64748B; color: var(--ink); }
 html.theme-dark .bb-btn-secondary:hover { background: rgba(45,212,191,.12); border-color: var(--brand); color: var(--brand); }
 html.theme-dark .bb-btn-primary { color: #042F2E; }
@@ -1521,3 +1546,62 @@ html.theme-light { color-scheme: light; }
 }
 .theme-option.active { border-color: var(--brand); background: rgba(15,118,110,.1); color: var(--brand); }
 .theme-option:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+/* Theme-safe utility bridge. Dynamic views use a few Tailwind colour helpers;
+   map them back to the app palette so they remain legible in either theme. */
+.bg-white, .bg-white\/40, .bg-white\/45 { background-color: var(--surface) !important; }
+.bg-slate-200 { background-color: var(--surface-muted) !important; }
+.text-slate-500, .text-slate-600 { color: var(--muted) !important; }
+.text-emerald-600, .text-emerald-700, .text-emerald-900,
+.text-green-700, .text-green-800 { color: var(--positive) !important; }
+.text-red-700, .text-red-800 { color: var(--negative) !important; }
+.text-amber-700, .text-amber-900 { color: var(--warning) !important; }
+.bg-emerald-50, .bg-green-600\/10 { background-color: color-mix(in srgb, var(--positive) 12%, var(--surface)) !important; }
+.bg-red-600\/10 { background-color: color-mix(in srgb, var(--negative) 12%, var(--surface)) !important; }
+.bg-amber-50, .bg-amber-500\/10 { background-color: color-mix(in srgb, var(--warning) 14%, var(--surface)) !important; }
+.border-emerald-200, .border-green-700\/20 { border-color: color-mix(in srgb, var(--positive) 45%, var(--line)) !important; }
+.border-amber-200 { border-color: color-mix(in srgb, var(--warning) 45%, var(--line)) !important; }
+.border-red-700\/20 { border-color: color-mix(in srgb, var(--negative) 45%, var(--line)) !important; }
+.bg-emerald-500 { background-color: var(--positive) !important; }
+.bg-red-500 { background-color: var(--negative) !important; }
+.border-l-emerald-500 { border-left-color: var(--positive) !important; }
+.border-l-red-500 { border-left-color: var(--negative) !important; }
+.border-l-slate-300 { border-left-color: var(--line) !important; }
+.bb-btn-primary, .mobile-quick-action { color: var(--on-brand) !important; }
+.bb-btn-primary:focus-visible, .bb-btn-secondary:focus-visible, .split-type-pill:focus-visible,
+.nav-tab:focus-visible, .tab-btn:focus-visible, .theme-option:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+html.theme-dark .landing-step,
+html.theme-dark .landing-faq,
+html.theme-dark .notification-item,
+html.theme-dark .mobile-quick-actions .create-group { background: var(--surface-raised); }
+html.theme-dark .landing-stat-grid { background: var(--surface-raised); }
+html.theme-dark .landing-feature > p:not(.landing-number),
+html.theme-dark .landing-feature li,
+html.theme-dark .landing-step p,
+html.theme-dark .public-page > p,
+html.theme-dark .public-page h2 + p { color: var(--muted); }
+
+/* Keep native filter menus in the active theme. Category choices retain their
+   own color swatches; member choices use the page surface for reliable text
+   contrast on Windows as well as mobile browsers. */
+html.theme-dark select { color-scheme: dark; }
+html.theme-dark #expenseMemberFilter option.member-filter-option {
+  background-color: #0B1220 !important;
+  color: #F1F5F9 !important;
+}
+html.theme-light #expenseMemberFilter option.member-filter-option {
+  background-color: #FFFFFF !important;
+  color: #0F172A !important;
+}
+
+/* The secondary mobile action sits on a surface, not on the solid brand CTA.
+   Override the generic quick-action foreground so both themes keep contrast. */
+.mobile-quick-actions .mobile-quick-action.create-group {
+  background: var(--surface-raised) !important;
+  color: var(--brand) !important;
+  border: 1px solid color-mix(in srgb, var(--brand) 45%, var(--line)) !important;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, .16);
+}

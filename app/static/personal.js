@@ -411,7 +411,16 @@ async function submitExpenseForm(e) {
     window.location.href = "/login.html";
   });
 
-  // Swipe right → Friends (Expenses); swipe left has nowhere further
+  function navigateMainScreen(screen, direction = -1) {
+    const destination = screen === "groups" ? "/index.html?view=groups" : "/index.html?view=friends";
+    document.querySelector("main.page-main")?.animate(
+      [{ transform: "translateX(0)", opacity: 1 }, { transform: `translateX(${direction > 0 ? "-4%" : "4%"})`, opacity: 0 }],
+      { duration: 140, easing: "ease-out", fill: "forwards" },
+    ).finished.finally(() => { window.location.href = destination; });
+  }
+
+  // Personal is the end of the non-looping sequence. A left swipe returns to
+  // Groups; a right swipe stays on Personal.
   const SWIPE_BLOCK =
     ".page-header, .bottom-nav, .mobile-quick-action, .mobile-quick-actions, " +
     "input, textarea, select, button, a, label, [role='dialog'], .modal, .modal-overlay, [data-no-swipe]";
@@ -462,16 +471,15 @@ async function submitExpenseForm(e) {
     const dy = touch.clientY - _swipe.y;
     _swipe = null;
     if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.35) return;
-    if (dx > 0) {
-      try { sessionStorage.setItem("sharesquad_expense_view", "friends"); } catch (_) {}
-      window.location.href = "/index.html?view=friends";
-    }
+    if (dx < 0) navigateMainScreen("groups", -1);
   }, { passive: true });
 
   document.addEventListener("touchcancel", () => { _swipe = null; }, { passive: true });
 
   try {
     const me = await ShareSquad.api("/auth/me");
+    const greeting = $("#userGreeting");
+    if (greeting) greeting.textContent = me.account.display_name;
     $("#headerInitials").textContent = ShareSquad.initials(me.account.display_name);
     if (me.account.has_avatar) {
       ShareSquad.setAuthImage($("#headerAvatar"), "/auth/me/avatar");

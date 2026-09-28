@@ -35,6 +35,40 @@ function gid() {
   return state.currentGroupId;
 }
 
+function expenseFilterStorageKey() {
+  return `sharesquad_group_expense_filters_${gid()}`;
+}
+
+function savedExpenseFilters() {
+  try {
+    return JSON.parse(localStorage.getItem(expenseFilterStorageKey()) || "null") || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveExpenseFilters() {
+  const category = $("#groupCategoryFilter")?.value || "All";
+  const memberId = $("#expenseMemberFilter")?.value || "";
+  const onlyMyExpenses = Boolean($("#onlyMyExpenses")?.checked);
+  localStorage.setItem(expenseFilterStorageKey(), JSON.stringify({ category, memberId, onlyMyExpenses }));
+}
+
+function restoreExpenseFilters() {
+  const saved = savedExpenseFilters();
+  const category = $("#groupCategoryFilter");
+  const member = $("#expenseMemberFilter");
+  const onlyMine = $("#onlyMyExpenses");
+  if (category?.querySelector(`option[value="${CSS.escape(saved.category || "All")}"]`)) {
+    category.value = saved.category || "All";
+    ShareSquad.syncCategorySelect(category);
+  }
+  if (member?.querySelector(`option[value="${CSS.escape(String(saved.memberId || ""))}"]`)) {
+    member.value = String(saved.memberId || "");
+  }
+  if (onlyMine) onlyMine.checked = typeof saved.onlyMyExpenses === "boolean" ? saved.onlyMyExpenses : true;
+}
+
 function groupCurrency() {
   return state.group?.currency || "USD";
 }
@@ -159,7 +193,7 @@ function populateMemberFilter() {
   const select = $("#expenseMemberFilter");
   if (!select) return;
   const selected = select.value;
-  select.innerHTML = '<option value="">All members</option>' + activeMembers().map((member) => `<option value="${member.id}">${ShareSquad.escapeHtml(member.display_name)}</option>`).join("");
+  select.innerHTML = '<option value="" class="member-filter-option">All members</option>' + activeMembers().map((member) => `<option class="member-filter-option" value="${member.id}">${ShareSquad.escapeHtml(member.display_name)}</option>`).join("");
   select.value = selected;
 }
 
@@ -1513,6 +1547,13 @@ async function handleReceiptUpload(file) {
     requestAnimationFrame(() => { $("#extractionPanel").scrollIntoView({ behavior: "smooth", block: "start" }); setTimeout(() => $("#f_store").focus(), 300); });
   });
 
+  // Add / Scan is intentionally not a tab: people land on balances first and
+  // open the entry workspace only when they choose to add a bill.
+  $("#openAddExpenseBtn")?.addEventListener("click", () => {
+    switchTab("upload");
+    $("#tab-upload")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+
   $("#cancelEditBtn").addEventListener("click", cancelEdit);
   $("#saveExpenseBtn")?.addEventListener("click", (e) => {
     e.preventDefault();
@@ -1589,9 +1630,9 @@ async function handleReceiptUpload(file) {
   });
 
   // Category filter on expenses
-  $("#groupCategoryFilter").addEventListener("change", loadExpenses);
-  $("#expenseMemberFilter")?.addEventListener("change", loadExpenses);
-  $("#onlyMyExpenses")?.addEventListener("change", loadExpenses);
+  $("#groupCategoryFilter").addEventListener("change", () => { saveExpenseFilters(); loadExpenses(); });
+  $("#expenseMemberFilter")?.addEventListener("change", () => { saveExpenseFilters(); loadExpenses(); });
+  $("#onlyMyExpenses")?.addEventListener("change", () => { saveExpenseFilters(); loadExpenses(); });
   let searchDelay;
   $("#expenseSearch")?.addEventListener("input", () => {
     clearTimeout(searchDelay);
@@ -1720,7 +1761,7 @@ async function handleReceiptUpload(file) {
   });
 
   // Swipe left/right between group tabs — content only, not chrome/controls
-  const TAB_ORDER = ["upload", "expenses", "balances", "insights", "activity", "reports", "members"];
+  const TAB_ORDER = ["balances", "expenses", "insights", "activity", "reports", "members"];
   const SWIPE_BLOCK =
     "#mainNav, .page-header, #periodBar, #balanceStrip, .bottom-nav, .mobile-quick-action, " +
     "input, textarea, select, button, a, label, .tab-nav, [role='dialog'], .modal, " +
@@ -1797,8 +1838,9 @@ async function handleReceiptUpload(file) {
 
   await loadGroupSettings();
   await loadGroup();
+  restoreExpenseFilters();
   await loadPeriods();
-  await loadExpenses();
+  switchTab("balances");
   await loadNotificationCount();
   startGroupSync();
   focusNotificationTarget();

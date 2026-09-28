@@ -365,7 +365,9 @@ document.addEventListener("DOMContentLoaded", () => setTimeout(() => {
   initMobileQuickAction();
   initSearchPalette();
   initDatePickers();
-  if (!/(^|\/)index\.html$|\/$/.test(window.location.pathname)) $("#logoutBtn")?.remove();
+  // The dashboard and Personal ledger share the full account header. Other
+  // focused workflows keep their compact header without a sign-out control.
+  if (!/(^|\/)(?:index|personal)\.html$|\/$/.test(window.location.pathname)) $("#logoutBtn")?.remove();
 }, 0));
 
 async function api(path, opts = {}) {
@@ -792,7 +794,10 @@ function fillCategorySelect(select, selected = "", { includeAll = false, allLabe
   const known = options.some((cat) => cat.id === current);
   const useCustom = allowCustom && !includeAll && current && current !== "All" && !isKnownCategory(current);
   select.innerHTML = options.map((cat) => {
-    const cls = cat.slug ? ` class="${escapeHtml(categoryClass(cat.id === CUSTOM_CATEGORY_VALUE ? "General" : cat.id))}"` : "";
+    // The "All categories" option needs a themed swatch too. Without a
+    // category class, native dark-mode menus can render it as light text on a
+    // light system popup.
+    const cls = ` class="${escapeHtml(categoryClass(cat.slug ? (cat.id === CUSTOM_CATEGORY_VALUE ? "General" : cat.id) : "General"))}"`;
     return `<option value="${escapeHtml(cat.id)}"${cls}>${escapeHtml(cat.label)}</option>`;
   }).join("");
   select.value = useCustom ? CUSTOM_CATEGORY_VALUE : (known ? current : options[0].id);

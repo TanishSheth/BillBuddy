@@ -10,7 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20260925swipePers">
+<link rel="stylesheet" href="/styles.css?v=20260928contrast">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -51,19 +51,19 @@
     </div>
   </header>
 
-  <main class="page-main max-w-5xl mx-auto px-4 sm:px-5 py-6 sm:py-8 flex-1 w-full">
+  <main class="page-main main-screen-swipe-surface max-w-5xl mx-auto px-4 sm:px-5 py-6 sm:py-8 flex-1 w-full">
     <div class="flex gap-1 flex-wrap mb-3" id="expenseViewSelector" role="tablist" aria-label="Expenses view">
-      <button type="button" class="split-type-pill active" data-expense-view="groups" role="tab" aria-selected="true">Groups</button>
-      <button type="button" class="split-type-pill" data-expense-view="friends" role="tab" aria-selected="false">Friends</button>
+      <button type="button" class="split-type-pill active" data-expense-view="friends" data-main-screen="friends" role="tab" aria-selected="true">Friends</button>
+      <button type="button" class="split-type-pill" data-expense-view="groups" data-main-screen="groups" role="tab" aria-selected="false">Groups</button>
     </div>
 
     <div class="how-it-works mb-5">
-      <p id="expenseViewHelp"><strong>Groups:</strong> Shared multi-person expenses for trips, roommates, and projects.</p>
+      <p id="expenseViewHelp"><strong>Friends:</strong> Total = group Who pays whom with that person + private bills. Shared group expenses appear for viewing only and are not added again.</p>
     </div>
 
     <section id="onboardingChecklist" class="hidden bb-card mb-5 onboarding-card"></section>
 
-    <section id="expenseGroupsPanel" class="expense-view-panel" data-expense-panel="groups">
+    <section id="expenseGroupsPanel" class="expense-view-panel hidden" data-expense-panel="groups">
       <div id="groupsGrid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
       <div id="emptyGroups" class="hidden bb-card max-w-md mx-auto text-center py-10">
         <div class="stamp-mark mx-auto mb-3">$</div>
@@ -75,7 +75,7 @@
       </div>
     </section>
 
-    <section id="expenseFriendsPanel" class="expense-view-panel hidden" data-expense-panel="friends">
+    <section id="expenseFriendsPanel" class="expense-view-panel" data-expense-panel="friends">
       <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
         <p class="text-xs text-ink/55">Open a friend to review balances, add a bill, or settle.</p>
         <a href="/friends.html" class="bb-btn-secondary !py-1.5 !px-3 text-[11px] shrink-0">Manage friends</a>
@@ -152,8 +152,8 @@
     </a>
   </nav>
 
-  <script src="/api.js?v=20260925markAll"></script>
-  <script src="/dashboard.js?v=20260925swipePers"></script>
+  <script src="/api.js?v=20260927stableLabelColor"></script>
+  <script src="/dashboard.js?v=20260928screenSwipeNoDuplicate"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

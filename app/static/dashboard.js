@@ -7,17 +7,14 @@ const EXPENSE_VIEW_HELP = {
 };
 
 function normalizeExpenseView(value) {
-  return value === "friends" ? "friends" : "groups";
+  return value === "groups" ? "groups" : "friends";
 }
 
 function resolveExpenseView() {
   const fromQuery = new URLSearchParams(location.search).get("view");
-  if (fromQuery === "friends" || fromQuery === "groups") return fromQuery;
-  try {
-    return normalizeExpenseView(sessionStorage.getItem(EXPENSE_VIEW_KEY));
-  } catch {
-    return "groups";
-  }
+  if (fromQuery === "groups") return "groups";
+  // Friends is the dashboard landing view. Groups remain one tap away.
+  return "friends";
 }
 
 function setExpenseView(view, { updateUrl = true } = {}) {
@@ -29,8 +26,18 @@ function setExpenseView(view, { updateUrl = true } = {}) {
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-selected", active ? "true" : "false");
   });
+  $$("[data-main-screen]").forEach((btn) => {
+    const active = btn.dataset.mainScreen === next;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
   $("#expenseGroupsPanel")?.classList.toggle("hidden", next !== "groups");
   $("#expenseFriendsPanel")?.classList.toggle("hidden", next !== "friends");
+  const activePanel = next === "friends" ? $("#expenseFriendsPanel") : $("#expenseGroupsPanel");
+  activePanel?.animate(
+    [{ transform: "translateX(10px)", opacity: 0 }, { transform: "translateX(0)", opacity: 1 }],
+    { duration: 180, easing: "ease-out" },
+  );
 
   const help = $("#expenseViewHelp");
   if (help) help.innerHTML = EXPENSE_VIEW_HELP[next];
@@ -51,6 +58,22 @@ function setExpenseView(view, { updateUrl = true } = {}) {
 function openGroup(groupId) {
   ShareSquad.setStoredGroupId(groupId);
   window.location.href = "/group.html";
+}
+
+function navigateMainScreen(screen, direction = 1) {
+  if (screen === "friends" || screen === "groups") {
+    setExpenseView(screen);
+    return;
+  }
+  if (screen !== "personal") return;
+  const destination = "/personal.html";
+  // A short exit animation keeps the move to the separate Personal page from
+  // feeling abrupt. Browsers that support cross-document view transitions can
+  // enhance this naturally; others use this safe fallback.
+  document.querySelector("main.page-main")?.animate(
+    [{ transform: "translateX(0)", opacity: 1 }, { transform: `translateX(${direction > 0 ? "-4%" : "4%"})`, opacity: 0 }],
+    { duration: 140, easing: "ease-out", fill: "forwards" },
+  ).finished.finally(() => { window.location.href = destination; });
 }
 
 let createGroupFriends = [];
@@ -411,10 +434,13 @@ async function submitCreateGroup(e) {
   $$("#expenseViewSelector [data-expense-view]").forEach((btn) => {
     btn.addEventListener("click", () => setExpenseView(btn.dataset.expenseView));
   });
+  $$('[data-main-screen="personal"]').forEach((btn) => {
+    btn.addEventListener("click", () => navigateMainScreen("personal", 1));
+  });
   setExpenseView(resolveExpenseView(), { updateUrl: true });
 
-  // Swipe: Groups ↔ Friends ↔ Personal (Personal is a page navigate)
-  const EXPENSE_VIEW_ORDER = ["groups", "friends", "personal"];
+  // Right swipe advances Friends → Groups → Personal; left swipe reverses it.
+  const EXPENSE_VIEW_ORDER = ["friends", "groups", "personal"];
   const SWIPE_BLOCK =
     ".page-header, .bottom-nav, .mobile-quick-action, .mobile-quick-actions, " +
     "#expenseViewSelector, input, textarea, select, button, a, label, " +
@@ -443,15 +469,7 @@ async function submitCreateGroup(e) {
     return normalizeExpenseView(active?.dataset.expenseView);
   }
 
-  function goExpenseSwipeTarget(next) {
-    if (!next) return;
-    if (next === "personal") {
-      try { sessionStorage.setItem(EXPENSE_VIEW_KEY, "friends"); } catch (_) {}
-      window.location.href = "/personal.html";
-      return;
-    }
-    setExpenseView(next);
-  }
+  function goExpenseSwipeTarget(next, direction) { if (next) navigateMainScreen(next, direction); }
 
   document.addEventListener("touchstart", (e) => {
     const touch = e.touches[0];
@@ -493,8 +511,9 @@ async function submitCreateGroup(e) {
     if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.35) return;
     const idx = EXPENSE_VIEW_ORDER.indexOf(currentExpenseView());
     if (idx === -1) return;
-    const next = dx < 0 ? EXPENSE_VIEW_ORDER[idx + 1] : EXPENSE_VIEW_ORDER[idx - 1];
-    goExpenseSwipeTarget(next);
+    const direction = dx > 0 ? 1 : -1;
+    const next = direction > 0 ? EXPENSE_VIEW_ORDER[idx + 1] : EXPENSE_VIEW_ORDER[idx - 1];
+    goExpenseSwipeTarget(next, direction);
   }, { passive: true });
 
   document.addEventListener("touchcancel", () => { _swipe = null; }, { passive: true });
