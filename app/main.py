@@ -13,6 +13,7 @@ from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal
 from calendar import monthrange
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Query, status
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -21,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from . import models, schemas
 from .config import (
@@ -69,6 +71,7 @@ from .demo_service import create_sandbox, purge_expired_sandboxes, reset_sandbox
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+BUSINESS_TIMEZONE = ZoneInfo(os.environ.get("APP_TIMEZONE", "America/New_York"))
 
 BLOCKED_INVITE_DOMAINS = {
     "example.com", "example.org", "example.net", "test.com", "localhost", "invalid",
@@ -451,6 +454,11 @@ def public_landing_page():
 # ---------------------------------------------------------------------------
 def _period_key_for(d: date) -> str:
     return f"{d.year:04d}-{d.month:02d}"
+
+
+def _business_today() -> date:
+    """Calendar date used for monthly close and the default current period."""
+    return datetime.now(BUSINESS_TIMEZONE).date()
 
 
 def _group_reports_dir(group_id: int) -> str:
@@ -949,6 +957,98 @@ def build_balances_and_settlements(
     return balances, settlements, expenses
 
 
+def _period_report_inputs(db: Session, group: models.Group, period: models.MonthlyPeriod):
+    balances, settlements, expenses = build_balances_and_settlements(db, group.id, period)
+    members_by_id = {member.id: member.display_name for member in db.query(models.GroupMember).filter_by(group_id=group.id).all()}
+    expense_dicts = [{
+        "bill_date": expense.bill_date.isoformat(),
+        "store_name": expense.store_name,
+        "category": expense.category or "General",
+        "payer_name": ", ".join(f"{members_by_id.get(payer.member_id, '?')} {payer.amount_paid}" for payer in expense.payers) if expense.payers else members_by_id.get(expense.payer_member_id, "?"),
+        "participant_names": [members_by_id.get(split.member_id, "?") for split in expense.splits],
+        "total_amount": float(expense.total_amount),
+        "currency": expense.currency or group.currency or "USD",
+        "image_path": expense.image_path,
+    } for expense in expenses]
+    return balances, settlements, expense_dicts
+
+
+def _settle_group_period(db: Session, group: models.Group, period: models.MonthlyPeriod, *, automatic: bool) -> tuple[Optional[str], Optional[str]]:
+    """Close a period once and preserve the exact settlement/report snapshot."""
+    balances, settlements, expense_dicts = _period_report_inputs(db, group, period)
+    pdf_path = pdf_filename = None
+    try:
+        pdf_path, pdf_filename = generate_monthly_pdf(
+            period.period_key, balances, settlements, expense_dicts, _group_reports_dir(group.id),
+            group_name=group.name, base_currency=group.currency or "USD",
+            target_currency=period.target_currency,
+            fx_rate=float(period.settlement_fx_rate) if period.settlement_fx_rate else None,
+        )
+        period.pdf_filename = pdf_filename
+        period.pdf_path = pdf_path
+    except Exception:
+        # A report delivery problem must not leave an expired month editable.
+        # The settled period can still be re-exported from Reports afterwards.
+        logger.exception("Could not generate automatic report for group %s period %s", group.id, period.period_key)
+    period.status = "SETTLED"
+    period.settled_at = datetime.now(timezone.utc)
+    summary = f"ShareSquad automatically settled {period.period_key}" if automatic else f"A member settled {period.period_key}"
+    _record_activity(db, group.id, None, "period_settled", summary, "period", period.id)
+    _notify_group_members(
+        db, group.id,
+        f"{period.period_key} was {'automatically ' if automatic else ''}settled. Review your consolidated Friend balance.",
+        _group_focus_link(group.id, "balances", "settlementList"),
+    )
+    return pdf_path, pdf_filename
+
+
+def _email_period_report_to_opted_in_members(db: Session, group: models.Group, period: models.MonthlyPeriod) -> None:
+    """Email the settled report only after the database close is durable."""
+    if not period.pdf_path or not period.pdf_filename or not is_email_configured():
+        return
+    members = db.query(models.GroupMember).filter(
+        models.GroupMember.group_id == group.id,
+        or_(models.GroupMember.is_active.is_(True), models.GroupMember.is_active.is_(None)),
+    ).all()
+    for member in members:
+        settings = db.query(models.AccountSettings).filter_by(account_id=member.account_id).first()
+        if settings is not None and not settings.email_monthly_reports:
+            continue
+        try:
+            send_monthly_report_email(member.account.email, member.display_name, group.name, period.period_key, period.pdf_path, period.pdf_filename)
+        except Exception:
+            logger.exception("Could not email monthly report for group %s to account %s", group.id, member.account_id)
+
+
+def _rollover_monthly_periods() -> None:
+    """Catch up expired active periods and always create the current calendar month."""
+    db = SessionLocal()
+    settled: list[tuple[models.Group, models.MonthlyPeriod]] = []
+    try:
+        current_key = _period_key_for(_business_today())
+        expired = db.query(models.MonthlyPeriod).filter(
+            models.MonthlyPeriod.status == "ACTIVE", models.MonthlyPeriod.period_key < current_key,
+        ).order_by(models.MonthlyPeriod.period_key.asc()).all()
+        for period in expired:
+            group = db.query(models.Group).get(period.group_id)
+            if not group:
+                continue
+            _settle_group_period(db, group, period, automatic=True)
+            settled.append((group, period))
+        for group in db.query(models.Group).all():
+            if not db.query(models.MonthlyPeriod.id).filter_by(group_id=group.id, period_key=current_key).first():
+                db.add(models.MonthlyPeriod(group_id=group.id, period_key=current_key, status="ACTIVE"))
+        db.commit()
+        for group, period in settled:
+            notify_group_change(group.id, "period-auto-settled")
+            _email_period_report_to_opted_in_members(db, group, period)
+    except Exception:
+        db.rollback()
+        logger.exception("Monthly period rollover failed")
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # Auth Endpoints
 # ---------------------------------------------------------------------------
@@ -1081,12 +1181,20 @@ def start_account_deletion_cleanup() -> None:
         _repair_all_group_payment_snapshots(db)
     finally:
         db.close()
+    # Catch up after downtime, then close every month at midnight in the
+    # product timezone. The catch-up makes rollover reliable across restarts.
+    _rollover_monthly_periods()
     if not DISABLE_SCHEDULER and not account_cleanup_scheduler.running:
         account_cleanup_scheduler.add_job(_purge_expired_account_deletions, "interval", hours=24, id="account-deletion-cleanup", replace_existing=True)
         account_cleanup_scheduler.add_job(_purge_stale_read_notifications, "interval", hours=6, id="read-notification-cleanup", replace_existing=True)
         account_cleanup_scheduler.add_job(
             lambda: _purge_demo_sandboxes_job(), "interval", minutes=30,
             id="demo-sandbox-cleanup", replace_existing=True,
+        )
+        account_cleanup_scheduler.add_job(
+            _rollover_monthly_periods,
+            CronTrigger(hour=0, minute=0, timezone=BUSINESS_TIMEZONE),
+            id="monthly-period-rollover", replace_existing=True,
         )
         account_cleanup_scheduler.start()
 
@@ -4163,6 +4271,12 @@ def list_periods(
     db: Session = Depends(get_db),
 ):
     require_group_member(group_id, account, db)
+    # The UI must advance to the new calendar month even before its first
+    # expense is recorded. This also covers deployments restarted after midnight.
+    current_key = _period_key_for(_business_today())
+    if not db.query(models.MonthlyPeriod.id).filter_by(group_id=group_id, period_key=current_key).first():
+        db.add(models.MonthlyPeriod(group_id=group_id, period_key=current_key, status="ACTIVE"))
+        db.commit()
     periods = (
         db.query(models.MonthlyPeriod)
         .filter_by(group_id=group_id)
@@ -4289,6 +4403,7 @@ def generate_report(
     _notify_group_members(db, group_id, f"{account.display_name} settled the {period_key} period. Review your consolidated Friend balance.", _group_focus_link(group_id, "balances", "settlementList"), exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "period-settled")
+    _email_period_report_to_opted_in_members(db, group, period)
 
     return {"ok": True, "filename": filename, "pdf_url": f"/api/groups/{group_id}/reports/{filename}"}
 

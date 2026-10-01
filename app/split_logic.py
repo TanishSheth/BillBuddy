@@ -310,6 +310,9 @@ def graph_constrained_settlements(
     if not debtors or not lenders:
         return []
 
+    # Keep the real debtor→payer links, but make the resulting flow stable.
+    # A set's iteration order can change between processes, which previously
+    # made the same group ledger show different Friends results after reload.
     edges = set()
     for exp in expenses:
         payments = exp.get("payments") or [{"payer_id": exp["payer_id"], "amount": exp["total_amount"]}]
@@ -347,7 +350,17 @@ def graph_constrained_settlements(
         queue = deque([source])
         while queue and sink not in parent:
             current = queue.popleft()
-            for neighbor in adjacency.get(current, set()):
+            # Prefer the creditor with the largest remaining credit, then a
+            # stable member id. This matches the standard min-cash-flow view
+            # while preserving the real payer↔participant constraint.
+            def neighbor_priority(neighbor):
+                if neighbor in lenders:
+                    return (0, -net_cents[neighbor], int(neighbor))
+                if isinstance(neighbor, int):
+                    return (1, 0, neighbor)
+                return (2, 0, str(neighbor))
+
+            for neighbor in sorted(adjacency.get(current, set()), key=neighbor_priority):
                 if neighbor not in parent and capacity.get((current, neighbor), 0) > 0:
                     parent[neighbor] = current
                     queue.append(neighbor)

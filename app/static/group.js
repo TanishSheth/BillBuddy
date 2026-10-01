@@ -1285,6 +1285,11 @@ async function generateReport() {
     msg.textContent = `Report generated: ${res.filename}`;
     msg.className = "text-xs mt-3 font-mono balance-positive font-bold";
     ShareSquad.showToast("Monthly PDF report generated!", "success");
+    // If the just-settled month is in the past, move the workspace to the
+    // newly opened calendar period instead of leaving the user on history.
+    const now = new Date();
+    const currentKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    if (state.currentPeriod < currentKey) state.currentPeriod = currentKey;
     await loadPeriods();
     await loadReports();
     try {
