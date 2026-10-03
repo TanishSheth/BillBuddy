@@ -16,7 +16,7 @@ from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, Query, status
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse, RedirectResponse
 from PIL import Image, ImageOps
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, or_, update
@@ -71,6 +71,10 @@ from .demo_service import create_sandbox, purge_expired_sandboxes, reset_sandbox
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# PDF generation subsets fonts; keep that chatter out of normal app logs.
+logging.getLogger("fontTools").setLevel(logging.WARNING)
+logging.getLogger("fontTools.subset").setLevel(logging.WARNING)
+logging.getLogger("weasyprint").setLevel(logging.WARNING)
 BUSINESS_TIMEZONE = ZoneInfo(os.environ.get("APP_TIMEZONE", "America/New_York"))
 
 BLOCKED_INVITE_DOMAINS = {
@@ -1331,10 +1335,13 @@ def start_account_deletion_cleanup() -> None:
     # Catch up after downtime, then close every month at midnight in the
     # product timezone. The catch-up makes rollover reliable across restarts.
     _rollover_monthly_periods()
-    # If the server was offline during delivery, retry the just-finished month.
-    today = _business_today()
-    previous_month = date(today.year - (today.month == 1), 12 if today.month == 1 else today.month - 1, 1)
-    _deliver_monthly_digests(_period_key_for(previous_month))
+    # Production catch-up: if the server was offline during delivery, retry the
+    # just-finished month. Skip on local run.ps1 so startup is not blocked by
+    # regenerating digest PDFs for every account on every restart.
+    if not IS_DEVELOPMENT:
+        today = _business_today()
+        previous_month = date(today.year - (today.month == 1), 12 if today.month == 1 else today.month - 1, 1)
+        _deliver_monthly_digests(_period_key_for(previous_month))
     if not DISABLE_SCHEDULER and not account_cleanup_scheduler.running:
         account_cleanup_scheduler.add_job(_purge_expired_account_deletions, "interval", hours=24, id="account-deletion-cleanup", replace_existing=True)
         account_cleanup_scheduler.add_job(_purge_stale_read_notifications, "interval", hours=6, id="read-notification-cleanup", replace_existing=True)
@@ -5185,5 +5192,94 @@ def list_vlm_providers():
 # ---------------------------------------------------------------------------
 # Static Files & Mounts
 # ---------------------------------------------------------------------------
+_CLEAN_PAGE_FILES = {
+    "app": "index.html",
+    "friends": "friends.html",
+    "group": "group.html",
+    "personal": "personal.html",
+    "settings": "settings.html",
+    "quick-split": "quick-split.html",
+    "login": "login.html",
+}
+
+
+def _clean_page_response(page: str) -> FileResponse:
+    return FileResponse(os.path.join(STATIC_DIR, _CLEAN_PAGE_FILES[page]))
+
+
+def _legacy_page_redirect(request: Request, page: str) -> RedirectResponse:
+    query = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/{page}{query}", status_code=308)
+
+
+@app.get("/app", include_in_schema=False)
+def clean_dashboard():
+    return _clean_page_response("app")
+
+
+@app.get("/friends", include_in_schema=False)
+def clean_friends():
+    return _clean_page_response("friends")
+
+
+@app.get("/group", include_in_schema=False)
+def clean_group():
+    return _clean_page_response("group")
+
+
+@app.get("/personal", include_in_schema=False)
+def clean_personal():
+    return _clean_page_response("personal")
+
+
+@app.get("/settings", include_in_schema=False)
+def clean_settings():
+    return _clean_page_response("settings")
+
+
+@app.get("/quick-split", include_in_schema=False)
+def clean_quick_split():
+    return _clean_page_response("quick-split")
+
+
+@app.get("/login", include_in_schema=False)
+def clean_login():
+    return _clean_page_response("login")
+
+
+@app.get("/index.html", include_in_schema=False)
+def redirect_index(request: Request):
+    return _legacy_page_redirect(request, "app")
+
+
+@app.get("/friends.html", include_in_schema=False)
+def redirect_friends(request: Request):
+    return _legacy_page_redirect(request, "friends")
+
+
+@app.get("/group.html", include_in_schema=False)
+def redirect_group(request: Request):
+    return _legacy_page_redirect(request, "group")
+
+
+@app.get("/personal.html", include_in_schema=False)
+def redirect_personal(request: Request):
+    return _legacy_page_redirect(request, "personal")
+
+
+@app.get("/settings.html", include_in_schema=False)
+def redirect_settings(request: Request):
+    return _legacy_page_redirect(request, "settings")
+
+
+@app.get("/quick-split.html", include_in_schema=False)
+def redirect_quick_split(request: Request):
+    return _legacy_page_redirect(request, "quick-split")
+
+
+@app.get("/login.html", include_in_schema=False)
+def redirect_login(request: Request):
+    return _legacy_page_redirect(request, "login")
+
 if os.path.exists(STATIC_DIR):
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

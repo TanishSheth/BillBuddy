@@ -2,7 +2,8 @@ from datetime import datetime
 from decimal import Decimal
 
 from app import models
-from app.main import _apply_private_participant_payment, _membership_belongs_in_period, _period_dates, _private_participant_remaining
+from app.main import _apply_private_participant_payment, _membership_belongs_in_period, _period_dates, _private_participant_remaining, redirect_friends
+from starlette.requests import Request
 
 
 def test_period_dates_use_the_full_calendar_month():
@@ -43,3 +44,10 @@ def test_partial_private_payment_keeps_the_bill_open_until_the_full_share_is_pai
     assert _apply_private_participant_payment(split, participant, Decimal("15.00")) == Decimal("15.00")
     assert participant.payment_status == "CONFIRMED"
     assert _private_participant_remaining(split, participant) == Decimal("0.00")
+
+
+def test_legacy_html_friend_url_redirects_to_the_clean_route_with_its_query():
+    request = Request({"type": "http", "method": "GET", "path": "/friends.html", "query_string": b"friend=7", "headers": []})
+    response = redirect_friends(request)
+    assert response.status_code == 308
+    assert response.headers["location"] == "/friends?friend=7"

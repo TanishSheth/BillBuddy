@@ -333,7 +333,7 @@ function initGlobalNotifications() {
 function initMobileQuickAction() {
   if (!getToken() || $(".mobile-quick-action")) return;
   const onDashboard = /(^|\/)index\.html$|\/$/.test(window.location.pathname);
-  const onFriends = /friends\.html$/.test(window.location.pathname);
+  const onFriends = /\/friends(?:\.html)?$/.test(window.location.pathname);
   if (onFriends) return;
   const target = onDashboard ? null : ["#addExpenseBtn", "#openAddBill", "#quickSplitBtn"].map((selector) => $(selector)).find(Boolean);
   if (!onDashboard && !target) return;
@@ -357,7 +357,7 @@ function initMobileQuickAction() {
 function openNotificationLink(link, message = "") {
   if (!link) return false;
   const target = new URL(link, window.location.origin);
-  if (target.pathname.endsWith("/group.html") && !target.searchParams.get("tab")) {
+  if ((target.pathname.endsWith("/group.html") || target.pathname === "/group") && !target.searchParams.get("tab")) {
     const text = String(message).toLowerCase();
     if (/payment|paid|received|confirmed/.test(text)) { target.searchParams.set("tab", "balances"); target.searchParams.set("focus", "paymentHistory"); }
     else if (/member|invite/.test(text)) { target.searchParams.set("tab", "members"); target.searchParams.set("focus", "groupMembers"); }

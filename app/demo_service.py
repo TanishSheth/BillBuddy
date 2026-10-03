@@ -10,9 +10,13 @@ from sqlalchemy.orm import Session
 
 from . import models
 from .auth import create_access_token, hash_password
+from .config import APP_VERSION
 from .split_logic import calculate_splits
 
-TEMPLATE_VERSION = "austin-apartment-v1"
+# Every released application version gets a fresh private template. New demos
+# and "Reset demo" therefore always show the current product fixture, while an
+# in-progress visitor sandbox is never silently overwritten.
+TEMPLATE_VERSION = f"sharesquad-product-demo-{APP_VERSION}"
 SANDBOX_TTL_HOURS = 2
 _PEOPLE = ("Alex", "Jordan", "Casey", "Morgan", "Riley")
 _EXPENSES = (
