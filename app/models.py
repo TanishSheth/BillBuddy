@@ -328,6 +328,22 @@ class PersonalExpense(Base):
     account = relationship("Account", back_populates="personal_expenses")
 
 
+class AccountMonthlyDigest(Base):
+    """One delivery artifact per person and calendar month, across all ledgers."""
+    __tablename__ = "account_monthly_digests"
+    __table_args__ = (UniqueConstraint("account_id", "period_key", name="uq_account_monthly_digest"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    period_key = Column(String(7), nullable=False, index=True)
+    pdf_filename = Column(String, nullable=True)
+    pdf_path = Column(String, nullable=True)
+    generated_at = Column(DateTime, nullable=True)
+    emailed_at = Column(DateTime, nullable=True)
+
+    account = relationship("Account")
+
+
 # A QuickSplit is a one-off bill shared directly with people, without asking
 # the creator to organise an ongoing group first.
 class QuickSplit(Base):

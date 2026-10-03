@@ -174,3 +174,37 @@ def generate_personal_pdf(
 
     HTML(string=html_str, base_url=TEMPLATE_DIR).write_pdf(out_path)
     return out_path, filename
+
+
+def generate_monthly_digest_pdf(
+    period_key: str,
+    user_name: str,
+    group_sections: list[dict],
+    personal_expenses: list[dict],
+    private_splits: list[dict],
+    output_dir: str,
+) -> tuple[str, str]:
+    """Create one account-level monthly report instead of one email per group."""
+    if not pdf_reports_available():
+        raise RuntimeError("PDF reports require WeasyPrint. Please install weasyprint or deploy with Docker.")
+    from weasyprint import HTML
+
+    logo_path = os.path.join(os.path.dirname(__file__), "static", "logo.png")
+    year, month = period_key.split("-")
+    month_label = datetime(int(year), int(month), 1).strftime("%B %Y")
+    html_str = _env.get_template("monthly_digest.html").render(
+        user_name=user_name,
+        month_label=month_label,
+        generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        group_sections=group_sections,
+        personal_expenses=personal_expenses,
+        private_splits=private_splits,
+        logo_data_uri=_image_to_data_uri(logo_path),
+        money=_money_label,
+    )
+    clean_user = "".join(c for c in user_name if c.isalnum() or c in (" ", "-", "_")).strip() or "ShareSquad"
+    filename = f"{clean_user} {period_key} Monthly Digest.pdf"
+    os.makedirs(output_dir, exist_ok=True)
+    out_path = os.path.join(output_dir, filename)
+    HTML(string=html_str, base_url=TEMPLATE_DIR).write_pdf(out_path)
+    return out_path, filename

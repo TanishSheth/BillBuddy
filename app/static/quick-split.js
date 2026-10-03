@@ -18,8 +18,14 @@ const people = () => {
 function showCreate(show) { $("#createPane").classList.toggle("hidden", !show); $("#detailPane").classList.toggle("hidden", show); }
 function renderValues(saved = {}) {
   const wrap = $("#qsSplitValues");
-  const hint = { EQUAL: "You and every invited person will pay an equal share.", PERCENTAGE: "Enter percentages for everyone. They must total 100%.", EXACT: "Enter exact amounts for everyone. They must equal the bill total.", SHARES: "Enter relative shares, such as 1, 1, 2." }[activeType];
-  $("#qsSplitHint").textContent = hint;
+  const amount = Number($("#qsAmount").value) || 0;
+  const count = people().length + 1;
+  const hint = activeType === "EQUAL" && amount
+    ? `Each person owes you ${$money(amount / count, $("#qsCurrency").value)}.`
+    : { PERCENTAGE: "Enter percentages for everyone. The final owed amount appears from each person’s percentage.", EXACT: "Enter exact amounts for everyone. Each person owes their entered amount.", SHARES: "Enter relative shares. Each person owes their calculated share." }[activeType] || "Enter an amount to preview what each person owes you.";
+  const hintEl = $("#qsSplitHint");
+  hintEl.textContent = hint;
+  hintEl.className = "text-[11px] font-mono mt-2 split-outcome is-lent";
   wrap.classList.toggle("hidden", activeType === "EQUAL");
   if (activeType === "EQUAL") { wrap.innerHTML = ""; return; }
   const label = activeType === "PERCENTAGE" ? "%" : activeType === "EXACT" ? "amount" : "shares";
@@ -58,6 +64,8 @@ async function loadGroupPeople() {
 $("#qsInviteMode")?.addEventListener("change", toggleInviteMode);
 $("#qsGroupPerson")?.addEventListener("change", () => renderValues());
 $("#qsEmails")?.addEventListener("input", () => renderValues());
+$("#qsAmount")?.addEventListener("input", () => renderValues());
+$("#qsCurrency")?.addEventListener("change", () => renderValues());
 $$("#qsSplitType .split-type-pill").forEach((b) => b.onclick = () => chooseType(b.dataset.type));
 $("#quickSplitForm")?.addEventListener("submit", async (event) => { event.preventDefault(); const msg = $("#qsMsg"); try { const split = editing ? await ShareSquad.api(`/quick-splits/${editing.id}`, { method: "PUT", body: JSON.stringify(payload()) }) : await ShareSquad.api("/quick-splits", { method: "POST", body: JSON.stringify(payload()) }); history.replaceState({}, "", `/quick-split.html?id=${split.id}`); render(split); ShareSquad.showToast("Quick split saved", "success"); } catch (err) { msg.textContent = err.message; msg.className = "text-xs font-mono balance-negative"; } });
 $("#copyShareLink")?.addEventListener("click", async () => { await navigator.clipboard.writeText($("#shareLink").value); ShareSquad.showToast("Private invite link copied", "success"); });

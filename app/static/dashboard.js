@@ -149,7 +149,7 @@ function openQuickSplit(id) {
   window.location.href = `/quick-split.html?id=${encodeURIComponent(id)}`;
 }
 
-function renderQuickSplits(_splits, contacts = [], settlementsByFriend = new Map(), consolidatedByFriend = new Map()) {
+function renderQuickSplits(_splits, contacts = [], consolidatedByFriend = new Map()) {
   const grid = $("#friendSplitsGrid");
   const empty = $("#emptyFriendSplits");
   const activeFriendIds = new Set(contacts.map((person) => person.id));
@@ -163,19 +163,11 @@ function renderQuickSplits(_splits, contacts = [], settlementsByFriend = new Map
     const personName = other?.display_name || ShareSquad.maskEmail(other?.email) || "Friend";
     const key = other?.account_id || other?.id || `split-${split.id}`;
     const entry = people.get(key) || { id: other?.account_id || other?.id || null, name: personName, balance: 0, count: 0, currency: split.currency || "USD", splitId: split.id };
-    const personShare = Number(split.participants?.find((person) => split.is_payer ? !person.is_me : person.is_me)?.share_amount || 0);
-    const billTotal = Number(split.total_amount || 0);
-    const payerPaid = split.payer_paid_amount == null ? billTotal : Number(split.payer_paid_amount);
-    const share = split.is_payer ? payerPaid - Number(split.payer_share_amount || 0) : (billTotal - payerPaid) - personShare;
-    const monthKey = String(split.bill_date).slice(0, 7);
-    const settlement = settlementsByFriend.get(entry.id)?.get(monthKey);
-    const wasIncludedInSettlement = settlement?.status === "SETTLED"
-      || (settlement?.settled_at && new Date(split.created_at) <= new Date(settlement.settled_at));
-    if (!wasIncludedInSettlement) entry.balance += split.is_payer ? share : -share;
     entry.count += 1;
     people.set(key, entry);
   });
-  // Friend cards: Who pays whom (pair) + direct bills. Individual group expenses are view-only on detail.
+  // Friend cards must use the same consolidated API as Friends detail.
+  // Raw bill math ignores confirmed Friend payments and can disagree across tabs.
   contacts.forEach((contact) => {
     const key = contact.id;
     const existing = people.get(key) || { id: contact.id, name: contact.display_name, balance: 0, count: 0, currency: "USD", splitId: null };
@@ -189,12 +181,34 @@ function renderQuickSplits(_splits, contacts = [], settlementsByFriend = new Map
       existing.balance = primary?.balance || 0;
       existing.currency = primary?.currency || existing.currency;
       existing.hasConsolidatedBalance = true;
+      existing.balancePending = false;
+    } else {
+      existing.balances = [];
+      existing.balance = 0;
+      existing.hasConsolidatedBalance = false;
+      existing.balancePending = true;
     }
     people.set(key, existing);
   });
   if (!people.size) { grid.innerHTML = ""; empty.classList.remove("hidden"); return; }
   empty.classList.add("hidden");
   grid.innerHTML = [...people.values()].map((person) => {
+    if (person.balancePending) {
+      const href = person.id ? `/friends.html?friend=${encodeURIComponent(person.id)}` : `/quick-split.html?id=${encodeURIComponent(person.splitId)}`;
+      return `<div class="bb-card friend-split-card flex flex-col justify-between gap-3 border-l-4 cursor-pointer border-l-slate-300" style="border-top-color:var(--line);border-right-color:var(--line);border-bottom-color:var(--line);" data-href="${href}" role="link" tabindex="0">
+  <div>
+    <div class="flex items-center justify-between gap-2">
+      <p class="font-mono text-[10px] tracking-widest text-brand uppercase">Friend</p>
+      <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-600">…</span>
+    </div>
+    <h3 class="font-mono font-bold text-base leading-tight text-ink mt-2">${ShareSquad.escapeHtml(person.name)}</h3>
+    <p class="text-xl font-bold font-mono mt-2 text-slate-500">—</p>
+    <p class="text-xs mt-1 text-ink/60">Open details for the live balance</p>
+    <p class="text-[10px] font-mono mt-2 text-ink/40">${person.count ? `${person.count} direct bill${person.count === 1 ? "" : "s"} in history` : "Friend"}</p>
+  </div>
+  <a class="bb-btn-secondary w-full !py-1.5 text-[11px]" href="${href}"><i data-lucide="receipt-text" class="w-3.5 h-3.5"></i> Open details</a>
+</div>`;
+    }
     const balanceLines = person.balances || [{ balance: person.balance, currency: person.currency }];
     const nonZeroBalances = balanceLines.filter((item) => Math.abs(item.balance) >= 0.005);
     const hasMultipleBalances = nonZeroBalances.length > 1;
@@ -378,12 +392,14 @@ async function loadDashboard() {
     }
     if ($("#headerInitials")) $("#headerInitials").textContent = ShareSquad.initials(me.account.display_name);
     const [groups, quickSplits, friends] = await Promise.all([ShareSquad.api("/groups"), ShareSquad.api("/quick-splits"), ShareSquad.api("/friends")]);
-    const settlementResults = await Promise.all(friends.map(async (friend) => [friend.id, await ShareSquad.api(`/friends/${friend.id}/settlements`).catch(() => [])]));
-    const consolidatedResults = await Promise.all(friends.map(async (friend) => [friend.id, await ShareSquad.api(`/friends/${friend.id}/consolidated-balances`).catch(() => null)]));
-    const settlementsByFriend = new Map(settlementResults.map(([friendId, settlements]) => [friendId, new Map(settlements.map((settlement) => [settlement.month_key, settlement]))]));
+    const consolidatedResults = await Promise.all(friends.map(async (friend) => {
+      let total = await ShareSquad.api(`/friends/${friend.id}/consolidated-balances`).catch(() => null);
+      if (!total) total = await ShareSquad.api(`/friends/${friend.id}/consolidated-balances`).catch(() => null);
+      return [friend.id, total];
+    }));
     const consolidatedByFriend = new Map(consolidatedResults.filter(([, total]) => total).map(([friendId, total]) => [friendId, total]));
     renderGroups(groups);
-    renderQuickSplits(quickSplits, friends, settlementsByFriend, consolidatedByFriend);
+    renderQuickSplits(quickSplits, friends, consolidatedByFriend);
     renderOnboarding(groups, friends, quickSplits);
   } catch (err) {
     console.error("Failed to load dashboard");

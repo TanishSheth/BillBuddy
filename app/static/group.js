@@ -306,6 +306,12 @@ async function loadPeriods() {
   }
 
   select.value = state.currentPeriod;
+  const currentLabel = $("#currentPeriodLabel");
+  if (currentLabel) {
+    const [year, month] = state.currentPeriod.split("-").map(Number);
+    const label = new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    currentLabel.textContent = state.currentPeriod === periods[0]?.period_key ? `Current month · ${label}` : `Viewing · ${label}`;
+  }
   updatePeriodStatus();
 }
 
@@ -525,7 +531,23 @@ function renderSplitOptions() {
   container.innerHTML = "";
 
   if (state.splitType === "EQUAL") {
-    notice.textContent = "Select members to split equally:";
+    const selected = activeMembers().filter((member) => state.selectedSplit.has(Number(member.id)));
+    const payerId = Number($("#f_payer").value);
+    const payer = activeMembers().find((member) => Number(member.id) === payerId);
+    const perPerson = selected.length ? totalAmt / selected.length : 0;
+    notice.className = "text-[11px] font-mono mb-2 split-outcome is-neutral";
+    if (!totalAmt || !selected.length || state.payMode === "multi") {
+      notice.textContent = "Choose who shares this cost. The outcome updates before you save.";
+    } else if (selected.length === 1 && Number(selected[0].id) !== payerId) {
+      const tone = payerId === Number(state.myMemberId) ? "is-lent" : Number(selected[0].id) === Number(state.myMemberId) ? "is-owed" : "is-neutral";
+      notice.className = `text-[11px] font-mono mb-2 split-outcome ${tone}`;
+      notice.textContent = `${selected[0].display_name} owes ${payer?.display_name || "the payer"} the full ${ShareSquad.formatMoneyText(totalAmt, curr)}.`;
+    } else if (selected.length > 1) {
+      const other = selected.find((member) => Number(member.id) !== payerId);
+      const tone = payerId === Number(state.myMemberId) ? "is-lent" : Number(other?.id) === Number(state.myMemberId) ? "is-owed" : "is-neutral";
+      notice.className = `text-[11px] font-mono mb-2 split-outcome ${tone}`;
+      notice.textContent = `${other?.display_name || "Each selected member"} owes ${payer?.display_name || "the payer"} ${ShareSquad.formatMoneyText(perPerson, curr)} each.`;
+    } else notice.textContent = "The payer also covers this full cost.";
     const chipsWrap = document.createElement("div");
     chipsWrap.className = "flex flex-wrap gap-2";
 
@@ -1495,6 +1517,27 @@ async function handleReceiptUpload(file) {
     loadBalances();
   });
 
+  $("#openPeriodHistoryBtn").addEventListener("click", () => {
+    const entries = (state.periods || []).map((period) => {
+      const [year, month] = period.period_key.split("-").map(Number);
+      const label = new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+      return `<button type="button" class="period-history-choice bb-btn-secondary w-full justify-between !py-2" data-period="${period.period_key}"><span>${label}</span><span class="text-[10px] uppercase text-ink/55">${period.status === "SETTLED" ? "Settled" : "Active"}</span></button>`;
+    }).join("") || '<p class="text-sm text-ink/60">No month history yet.</p>';
+    $("#periodHistoryList").innerHTML = entries;
+    $("#periodHistoryModal").classList.remove("hidden");
+    $$(".period-history-choice").forEach((button) => button.addEventListener("click", () => {
+      state.currentPeriod = button.dataset.period;
+      $("#periodSelect").value = state.currentPeriod;
+      updatePeriodStatus();
+      loadExpenses(); loadBalances(); loadReports();
+      $("#periodHistoryModal").classList.add("hidden");
+    }));
+  });
+  $("#closePeriodHistoryBtn").addEventListener("click", () => $("#periodHistoryModal").classList.add("hidden"));
+  $("#periodHistoryModal").addEventListener("click", (event) => {
+    if (event.target === $("#periodHistoryModal")) $("#periodHistoryModal").classList.add("hidden");
+  });
+
   // Reopen period
   $("#reopenPeriodBtn").addEventListener("click", async () => {
     if (!await ShareSquad.confirmDialog({ title: `Re-open ${state.currentPeriod}?`, message: "Members can edit this period again and balances may change.", confirmLabel: "Re-open period", danger: false })) return;
@@ -1516,12 +1559,14 @@ async function handleReceiptUpload(file) {
   });
 
   $("#f_amount").addEventListener("input", () => {
-    if (state.splitType !== "EQUAL") renderSplitOptions();
+    // Equal splits have a live financial preview too; rerendering keeps its
+    // color and per-person result in sync as soon as an amount is typed.
+    renderSplitOptions();
     if (state.payMode === "multi") renderMultiPayers();
   });
   $("#f_currency")?.addEventListener("change", () => {
     syncExpenseCurrencyUI();
-    if (state.splitType !== "EQUAL") renderSplitOptions();
+    renderSplitOptions();
   });
 
   $("#manualEntryBtn").addEventListener("click", () => {

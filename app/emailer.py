@@ -219,3 +219,37 @@ This PDF includes the complete itemized expenses, category breakdown, balance su
     except Exception:
         logger.exception("Failed to email monthly report to %s", to_email)
         raise
+
+
+def send_monthly_digest_email(
+    to_email: str, member_name: str, period_key: str, pdf_path: str, pdf_filename: str,
+) -> bool:
+    """Deliver one consolidated monthly report to one account."""
+    if not is_email_configured():
+        return False
+    period_label = _period_label(period_key)
+    subject = f"Your ShareSquad {period_label} monthly digest"
+    text_body = f"""Hi {member_name},
+
+Your single ShareSquad digest for {period_label} is attached. It combines settled group activity, private splits, and personal expenses, so you do not need to open a separate report for every group.
+
+— ShareSquad
+"""
+    html_body = f"""<html><body style="font-family:sans-serif;color:#18221B;max-width:560px;">
+<p>Hi <strong>{member_name}</strong>,</p>
+<p>Your single ShareSquad digest for <strong>{period_label}</strong> is attached. It combines settled group activity, private splits, and personal expenses.</p>
+<p style="color:#0F766E;font-size:13px;font-weight:bold;">— ShareSquad</p>
+</body></html>"""
+    msg = MIMEMultipart("mixed")
+    msg["Subject"] = subject
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(text_body, "plain"))
+    alt.attach(MIMEText(html_body, "html"))
+    msg.attach(alt)
+    with open(pdf_path, "rb") as pdf_file:
+        attachment = MIMEApplication(pdf_file.read(), _subtype="pdf")
+    attachment.add_header("Content-Disposition", "attachment", filename=pdf_filename)
+    msg.attach(attachment)
+    _send_message(msg, to_email)
+    logger.info("Monthly digest emailed to %s for %s", to_email, period_key)
+    return True

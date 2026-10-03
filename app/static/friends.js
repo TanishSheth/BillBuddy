@@ -144,11 +144,36 @@ function isDirectBillSettled(row, friend) {
   // independently of) the monthly Friend settlement. Keep it visibly paid in
   // either case so the ledger never loses its strike-through state.
   if (["PAID", "CONFIRMED"].includes(String(row.person?.payment_status || "").toUpperCase())) return true;
+  if (String(row.split?.status || "").toUpperCase() === "SETTLED") return true;
   if (friend.paidDirectSplitIds?.has(Number(row.split.id))) return true;
-  const settlement = friend.settlements?.get(String(row.split.bill_date).slice(0, 7));
+  if (Math.abs(Number(row.balance || 0)) < 0.005) return true;
+  const monthKey = String(row.split.bill_date).slice(0, 7);
+  const currency = row.split.currency || friend.currency || "USD";
+  if (monthDirectFullyCovered(friend, monthKey, currency)) return true;
+  const settlement = friend.settlements?.get(monthKey);
   if (!settlement) return false;
   if (settlement.status === "SETTLED") return true;
   return Boolean(settlement.settled_at && row.split.created_at && new Date(row.split.created_at) <= new Date(settlement.settled_at));
+}
+
+function monthDirectFullyCovered(friend, monthKey, currency) {
+  // When confirmed Friend payments have already zeroed this month's direct
+  // source, every private bill in that month belongs in Paid private bills —
+  // even if an older payment never wrote quick_split_id / payment_status.
+  const totals = friend.consolidatedBalances?.balances || (friend.consolidated ? [friend.consolidated] : []);
+  const total = totals.find((item) => String(item.currency || "USD") === String(currency || "USD"));
+  if (!total) return false;
+  const remaining = (total.sources || [])
+    .filter((source) => source.kind === "DIRECT" && String(source.period_key || "") === String(monthKey))
+    .reduce((sum, source) => sum + Number(source.amount || 0), 0);
+  if (Math.abs(remaining) >= 0.005) return false;
+  return (total.payments || []).some((payment) => (
+    payment.status === "CONFIRMED"
+    && (payment.allocations || []).some((allocation) => (
+      allocation.kind === "DIRECT"
+      && String(allocation.month_key || allocation.period_key || "") === String(monthKey)
+    ))
+  ));
 }
 
 function renderList() {
@@ -213,15 +238,53 @@ function renderValues() {
   if (notice) notice.textContent = total ? `Paid ${cents(mine + theirs).toFixed(2)} of ${total.toFixed(2)}.` : "Enter the cash each of you paid. The two amounts must add up to the bill.";
   const shareNotice = $("#friendShareNotice");
   if (shareNotice) {
-    if (!shareMe && !shareFriend) shareNotice.textContent = "Choose at least one person.";
+    const money = ShareSquad.formatMoneyText(total, $("#friendExpenseCurrency").value || "USD");
+    const setOutcome = (message, tone = "is-neutral") => {
+      shareNotice.className = `text-[11px] font-mono mt-2 split-outcome ${tone}`;
+      shareNotice.textContent = message;
+    };
+    const splitType = $("#friendExpenseType").value;
+    const payerValue = Number($("#friendPayerValue").value) || 0;
+    const otherValue = Number($("#friendOtherValue").value) || 0;
+    const myValue = friendPaid ? otherValue : payerValue;
+    const friendValue = friendPaid ? payerValue : otherValue;
+    const totalValues = myValue + friendValue;
+    const myShare = splitType === "EQUAL" ? total / 2
+      : splitType === "PERCENTAGE" ? total * myValue / 100
+      : splitType === "EXACT" ? myValue
+      : totalValues ? total * myValue / totalValues : 0;
+    const friendShare = splitType === "EQUAL" ? total / 2
+      : splitType === "PERCENTAGE" ? total * friendValue / 100
+      : splitType === "EXACT" ? friendValue
+      : totalValues ? total * friendValue / totalValues : 0;
+    const myPaid = Number($("#friendMyPaid").value) || 0;
+    const friendPaidAmount = Number($("#friendTheirPaid").value) || 0;
+    const bothPaidOutcome = (myOwedShare, friendOwedShare) => {
+      if (!total || Math.abs((myPaid + friendPaidAmount) - total) > 0.009) {
+        setOutcome("Enter both cash amounts so they add up to the bill total.");
+        return;
+      }
+      const myNet = myPaid - myOwedShare;
+      if (Math.abs(myNet) < 0.005) setOutcome("You are settled: each of you paid your own share.");
+      else if (myNet > 0) setOutcome(`${name} owes you ${ShareSquad.formatMoneyText(myNet, $("#friendExpenseCurrency").value || "USD")}.`, "is-lent");
+      else setOutcome(`You owe ${name} ${ShareSquad.formatMoneyText(Math.abs(myNet), $("#friendExpenseCurrency").value || "USD")}.`, "is-owed");
+    };
+    if (!shareMe && !shareFriend) setOutcome("Choose at least one person.");
     else if (onePersonCovers) {
       const person = shareMe ? "you" : name;
       const payer = paidBy === "friend" ? name : "you";
       const personLabel = person === "you" ? "You" : name;
-      shareNotice.textContent = paidBy === "both"
-        ? `The full share is assigned to ${person === "you" ? "you" : name}.`
-        : (person === payer ? `${personLabel} cover the full amount.` : `${personLabel} owe the full amount.`);
-    } else shareNotice.textContent = "Both of you are included. Choose a split below.";
+      if (paidBy === "both") bothPaidOutcome(shareMe ? total : 0, shareFriend ? total : 0);
+      else if (person === payer) setOutcome(`${personLabel} paid and covers the full ${money}.`);
+      else if (person === "you") setOutcome(`You owe ${name} the full ${money}.`, "is-owed");
+      else setOutcome(`${name} owes you the full ${money}.`, "is-lent");
+    } else if (paidBy === "both") {
+      bothPaidOutcome(myShare, friendShare);
+    } else if (paidBy === "me" && total) {
+      setOutcome(`${name} owes you ${ShareSquad.formatMoneyText(friendShare, $("#friendExpenseCurrency").value || "USD")}.`, "is-lent");
+    } else if (paidBy === "friend" && total) {
+      setOutcome(`You owe ${name} ${ShareSquad.formatMoneyText(myShare, $("#friendExpenseCurrency").value || "USD")}.`, "is-owed");
+    } else setOutcome(`You and ${name} share this cost. Enter the cash amounts and split to see the final result.`);
   }
 }
 
@@ -436,7 +499,11 @@ function renderLedger(friend) {
 
 function renderConsolidated(friend) {
   const breakdown = $("#consolidatedBreakdown"); const payments = $("#consolidatedPayments");
-  const totals = consolidatedTotals(friend);
+  // Keep a currency section when it has recorded transfers, even once its
+  // balance is zero. Otherwise payment history disappears for the people who
+  // successfully settled up.
+  const totals = (friend.consolidatedBalances?.balances || (friend.consolidated ? [friend.consolidated] : []))
+    .filter((total) => Math.abs(Number(total.balance || 0)) >= 0.005 || (total.payments || []).length);
   if (!totals.length) { breakdown.innerHTML = ""; payments.innerHTML = '<p class="text-xs text-ink/55">No balance to settle with this person.</p>'; return; }
   const multiple = totals.length > 1;
   breakdown.innerHTML = `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/50 mb-2">Balance breakdown</p><p class="text-[10px] text-ink/55 mb-3">Balances are separated by currency. Total = group Who pays whom (for this pair) + private direct bills; shared group expenses in the ledger are view-only.</p>${totals.map((total) => {
@@ -529,6 +596,7 @@ async function refresh() {
   renderList();
   await Promise.all(friends.filter((friend) => friend.friend.id).map(async (friend) => {
     const settlements = await ShareSquad.api(`/friends/${friend.friend.id}/settlements`).catch(() => []);
+    // consolidated-balances also repairs paid private-bill markers server-side.
     friend.consolidatedBalances = await ShareSquad.api(`/friends/${friend.friend.id}/consolidated-balances`).catch(() => null);
     friend.consolidated = consolidatedTotals(friend)[0] || friend.consolidatedBalances?.balances?.[0] || null;
     friend.groupContributions = await ShareSquad.api(`/friends/${friend.friend.id}/group-contributions`).catch(() => []);
@@ -541,6 +609,29 @@ async function refresh() {
     }, 0);
     indexPaidDirectBills(friend);
   }));
+  // Re-load private bills after repair so CONFIRMED payment_status is visible
+  // without requiring a second full page refresh.
+  const repairedSplits = await ShareSquad.api("/quick-splits").catch(() => null);
+  if (repairedSplits) {
+    const contactsOnly = friends.map((friend) => ({
+      id: friend.friend.id,
+      display_name: friend.friend.name,
+      email: friend.friend.email,
+      has_avatar: friend.friend.hasAvatar,
+    })).filter((contact) => contact.id);
+    const preserved = new Map(friends.map((friend) => [friend.key, friend]));
+    friends = mergeFriends(repairedSplits, contactsOnly).map((friend) => {
+      const prior = preserved.get(friend.key);
+      if (!prior) return friend;
+      friend.consolidatedBalances = prior.consolidatedBalances;
+      friend.consolidated = prior.consolidated;
+      friend.groupContributions = prior.groupContributions;
+      friend.settlements = prior.settlements;
+      friend.balance = prior.balance;
+      indexPaidDirectBills(friend);
+      return friend;
+    });
+  }
   renderList();
 }
 
@@ -616,6 +707,8 @@ $("#openAddBill").onclick = () => { const panel = $("#friendExpensePanel"); if (
 $("#cancelFriendExpenseEdit")?.addEventListener("click", () => resetExpenseForm());
 $("#friendExpenseType").onchange = renderValues;
 $("#friendPaidBy").onchange = renderValues;
+$("#friendPayerValue").oninput = renderValues;
+$("#friendOtherValue").oninput = renderValues;
 ["Me", "Friend"].forEach((person) => $("#friendShare" + person).addEventListener("click", () => {
   const selected = friendShareSelected(person);
   const other = person === "Me" ? "Friend" : "Me";

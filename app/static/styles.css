@@ -597,6 +597,13 @@ html.theme-dark .balance-chip.settled { background: #1e293b; color: #cbd5e1; }
 .balance-positive { color: #16A34A; }
 .balance-negative { color: var(--stamp); }
 
+/* A live, plain-language outcome shown before a bill is saved.  These fixed
+   semantic colors are paired with the theme variants below for contrast. */
+.split-outcome { font-weight: 800; text-decoration: underline; text-underline-offset: 3px; }
+.split-outcome.is-lent { color: #15803d; }
+.split-outcome.is-owed { color: #b91c1c; }
+.split-outcome.is-neutral { color: var(--ink); }
+
 .auth-card {
   max-width: 420px;
   margin: 0 auto;
@@ -1478,6 +1485,8 @@ html.theme-dark .period-bar,
 html.theme-dark .font-mono { color: inherit; }
 html.theme-dark .balance-positive { color: #4ADE80; }
 html.theme-dark .balance-negative { color: #F87171; }
+html.theme-dark .split-outcome.is-lent { color: #86efac; }
+html.theme-dark .split-outcome.is-owed { color: #ef4444; }
 html.theme-dark .insight-value { color: var(--brand); }
 html.theme-dark .ui-skeleton-card { background: var(--surface); border-color: var(--line); }
 html.theme-dark .onboarding-card { border-color: rgba(45,212,191,.4); background: linear-gradient(135deg, #1E293B 0%, #0F766E33 100%); }

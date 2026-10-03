@@ -404,6 +404,23 @@ async function submitExpenseForm(e) {
     }
   });
 
+  $("#downloadDigestBtn").addEventListener("click", async () => {
+    const period = monthPicker.value;
+    const btn = $("#downloadDigestBtn");
+    btn.disabled = true;
+    try {
+      const res = await ShareSquad.api(`/reports/monthly-digest/${encodeURIComponent(period)}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `ShareSquad ${period} Monthly Digest.pdf`;
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      ShareSquad.showToast("Monthly digest downloaded", "success");
+    } catch (err) {
+      ShareSquad.showToast(err.message || "Could not create monthly digest", "error");
+    } finally { btn.disabled = false; }
+  });
+
   $("#settingsBtn")?.addEventListener("click", () => { window.location.href = "/settings.html"; });
   $("#logoutBtn")?.addEventListener("click", () => {
     ShareSquad.removeToken();

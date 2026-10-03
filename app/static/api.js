@@ -1026,6 +1026,18 @@ function setThemePreference(preference) {
 }
 
 applyTheme();
+// Numeric fields are frequently populated with a zero/default value by split
+// calculators. Make editing predictable everywhere: a default zero disappears
+// on focus, and any other existing value is selected so the next keystroke
+// replaces it rather than appending to it.
+document.addEventListener("focusin", (event) => {
+  const field = event.target;
+  if (!(field instanceof HTMLInputElement)) return;
+  const numeric = field.type === "number" || field.inputMode === "decimal" || field.inputMode === "numeric";
+  if (!numeric || field.readOnly || field.disabled) return;
+  if (/^0(?:\.0+)?$/.test(field.value.trim())) field.value = "";
+  else if (field.value) field.select();
+});
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", renderDemoBanner, { once: true });
 else renderDemoBanner();
 try {

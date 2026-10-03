@@ -80,8 +80,10 @@
       <div id="periodBar" class="period-bar flex items-center justify-between mb-6 font-mono text-sm flex-wrap gap-2">
         <div class="flex items-center gap-2 flex-wrap">
           <i data-lucide="calendar" class="w-4 h-4 text-brand shrink-0"></i>
-          <label class="text-ink/50 uppercase text-xs tracking-wide shrink-0">Month Period</label>
-          <select id="periodSelect" class="bb-input !w-auto min-w-[130px] border-b border-ink/30 font-bold"></select>
+          <span class="text-ink/50 uppercase text-xs tracking-wide shrink-0">Workspace</span>
+          <strong id="currentPeriodLabel" class="text-ink">Current month</strong>
+          <select id="periodSelect" class="hidden" aria-hidden="true" tabindex="-1"></select>
+          <button id="openPeriodHistoryBtn" type="button" class="bb-btn-secondary !py-1 !px-2 text-[10px]">View past months</button>
           <span id="periodStatus" class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full border"></span>
           <button id="reopenPeriodBtn" type="button" class="bb-btn-secondary !py-1 !px-2 text-[10px] hidden">
             <i data-lucide="unlock" class="w-3 h-3"></i> Enable editing
@@ -96,6 +98,17 @@
             <i data-lucide="banknote" class="w-3.5 h-3.5"></i> <span>Settle in…</span>
           </button>
         </div>
+      </div>
+
+      <div id="periodHistoryModal" class="modal-overlay hidden">
+        <section class="bb-card modal-card" role="dialog" aria-modal="true" aria-labelledby="periodHistoryTitle">
+          <div class="flex items-center justify-between gap-3 mb-4 border-b border-ink/10 pb-3">
+            <h2 id="periodHistoryTitle" class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Month history</h2>
+            <button type="button" id="closePeriodHistoryBtn" class="text-ink/40 hover:text-ink font-bold" aria-label="Close month history">×</button>
+          </div>
+          <p class="text-sm text-ink/70 mb-4">Use the current month for new work. Open a past month only to review its record.</p>
+          <div id="periodHistoryList" class="space-y-2"></div>
+        </section>
       </div>
 
       <div class="how-it-works mb-5">
@@ -180,7 +193,8 @@
                     </div>
                   </div>
                   <div class="sm:col-span-2">
-                    <label class="bb-label">Who paid</label>
+                    <label class="bb-label">1. Who paid upfront?</label>
+                    <p class="text-[10px] text-ink/55 mb-2">Record who contributed cash. This does not decide who shares the cost.</p>
                     <div class="flex gap-1 flex-wrap mb-2" id="payModeSelector">
                       <button type="button" class="split-type-pill active" data-pay-mode="single">One person</button>
                       <button type="button" class="split-type-pill" data-pay-mode="multi">Several people</button>
@@ -193,7 +207,7 @@
                 <!-- Custom Split Section -->
                 <div class="pt-2 border-t border-ink/10">
                   <div class="flex items-center justify-between mb-2">
-                    <label class="bb-label">Split Type</label>
+                    <label class="bb-label">2. Who should share this cost, and how?</label>
                     <div class="flex gap-1 flex-wrap" id="splitTypeSelector">
                       <button type="button" class="split-type-pill active" data-type="EQUAL">Equal (=)</button>
                       <button type="button" class="split-type-pill" data-type="PERCENTAGE">% Percent</button>
