@@ -183,6 +183,7 @@ def generate_monthly_digest_pdf(
     personal_expenses: list[dict],
     private_splits: list[dict],
     output_dir: str,
+    revision: int = 1,
 ) -> tuple[str, str]:
     """Create one account-level monthly report instead of one email per group."""
     if not pdf_reports_available():
@@ -199,6 +200,7 @@ def generate_monthly_digest_pdf(
         group_sections=group_sections,
         personal_expenses=personal_expenses,
         private_splits=private_splits,
+        revision=revision,
         logo_data_uri=_image_to_data_uri(logo_path),
         money=_money_label,
     )

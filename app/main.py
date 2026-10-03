@@ -19,7 +19,7 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, 
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from PIL import Image, ImageOps
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, update
 from sqlalchemy.orm import Session
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -64,7 +64,6 @@ from .emailer import (
     is_email_configured,
     send_invite_email,
     send_quick_split_email,
-    send_monthly_report_email,
     send_monthly_digest_email,
     send_password_reset_email,
 )
@@ -296,6 +295,14 @@ def _ensure_schema():
         ("accounts", "deletion_completed_at", timestamp_type),
         ("groups", "cover_image_path", "VARCHAR"),
         ("group_members", "is_active", "BOOLEAN DEFAULT TRUE"),
+        ("group_members", "joined_at", timestamp_type),
+        ("group_members", "left_at", timestamp_type),
+        ("monthly_periods", "report_revision", "INTEGER NOT NULL DEFAULT 1"),
+        ("account_monthly_digests", "delivery_claimed_at", timestamp_type),
+        ("account_monthly_digests", "delivery_error", "VARCHAR(300)"),
+        ("account_monthly_digests", "revision", "INTEGER NOT NULL DEFAULT 1"),
+        ("account_monthly_digests", "revised_at", timestamp_type),
+        ("account_monthly_digests", "source_fingerprint", "VARCHAR(64)"),
         ("pending_uploads", "ocr_store_name", "VARCHAR(150)"),
         ("pending_uploads", "ocr_phones", "VARCHAR(200)"),
         ("pending_uploads", "ocr_store_ids", "VARCHAR(80)"),
@@ -307,6 +314,7 @@ def _ensure_schema():
         ("quick_splits", "payer_paid_amount", "NUMERIC(10,2)"),
         ("quick_splits", "created_by_account_id", "INTEGER"),
         ("quick_split_participants", "split_value", "NUMERIC(10,2)"),
+        ("quick_split_participants", "paid_amount", "NUMERIC(10,2) NOT NULL DEFAULT 0"),
         ("quick_split_participants", "invite_token", "VARCHAR(64)"),
         ("group_payments", "expense_cutoff_id", "INTEGER"),
         ("group_payments", "cleared_amount", "NUMERIC(10,2)"),
@@ -1017,12 +1025,28 @@ def _period_dates(period_key: str) -> tuple[date, date]:
         raise HTTPException(400, "Period must use YYYY-MM")
 
 
+def _membership_belongs_in_period(membership: models.GroupMember, period_end: date) -> bool:
+    """Do not retroactively email a person who joined after a month closed."""
+    cutoff = datetime.combine(period_end + timedelta(days=1), datetime.min.time())
+    if membership.joined_at is not None:
+        joined = membership.joined_at.replace(tzinfo=None) if membership.joined_at.tzinfo else membership.joined_at
+        if joined >= cutoff:
+            return False
+    if membership.left_at is not None:
+        left = membership.left_at.replace(tzinfo=None) if membership.left_at.tzinfo else membership.left_at
+        if left < cutoff:
+            return False
+    return True
+
+
 def _build_account_monthly_digest(db: Session, account: models.Account, period_key: str) -> models.AccountMonthlyDigest:
     """Create one account-owned report from every ledger visible to that account."""
     start_d, end_d = _period_dates(period_key)
     group_sections = []
     memberships = db.query(models.GroupMember).filter_by(account_id=account.id).all()
     for membership in memberships:
+        if not _membership_belongs_in_period(membership, end_d):
+            continue
         group = db.query(models.Group).get(membership.group_id)
         period = db.query(models.MonthlyPeriod).filter_by(group_id=membership.group_id, period_key=period_key, status="SETTLED").first()
         if not group or not period:
@@ -1035,7 +1059,7 @@ def _build_account_monthly_digest(db: Session, account: models.Account, period_k
                 mine.append({"description": f"You pay {member_names.get(settlement['to_member_id'], 'member')}", "amount": -float(settlement["amount"])})
             elif settlement["to_member_id"] == membership.id:
                 mine.append({"description": f"{member_names.get(settlement['from_member_id'], 'Member')} pays you", "amount": float(settlement["amount"])})
-        group_sections.append({"name": group.name, "currency": group.currency or "USD", "expense_count": len(expenses), "settlements": mine})
+        group_sections.append({"name": group.name, "currency": group.currency or "USD", "expense_count": len(expenses), "report_revision": int(period.report_revision or 1), "settlements": mine})
 
     personal_expenses = [{
         "bill_date": item.bill_date.isoformat(), "store_name": item.store_name,
@@ -1070,10 +1094,18 @@ def _build_account_monthly_digest(db: Session, account: models.Account, period_k
         digest = models.AccountMonthlyDigest(account_id=account.id, period_key=period_key)
         db.add(digest)
         db.flush()
+    fingerprint_payload = {"groups": group_sections, "personal": personal_expenses, "private": private_splits}
+    source_fingerprint = hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    is_revision = bool(digest.source_fingerprint and digest.source_fingerprint != source_fingerprint)
+    if is_revision:
+        digest.revision = int(digest.revision or 1) + 1
+        digest.revised_at = datetime.now(timezone.utc)
     path, filename = generate_monthly_digest_pdf(
-        period_key, account.display_name, group_sections, personal_expenses, private_splits, _digest_reports_dir(account.id),
+        period_key, account.display_name, group_sections, personal_expenses, private_splits,
+        _digest_reports_dir(account.id), revision=int(digest.revision or 1),
     )
     digest.pdf_path, digest.pdf_filename, digest.generated_at = path, filename, datetime.now(timezone.utc)
+    digest.source_fingerprint = source_fingerprint
     return digest
 
 
@@ -1084,6 +1116,7 @@ def _deliver_monthly_digests(period_key: str) -> None:
         account_ids = {
             row[0] for row in db.query(models.GroupMember.account_id).join(models.MonthlyPeriod, models.MonthlyPeriod.group_id == models.GroupMember.group_id).filter(
                 models.MonthlyPeriod.period_key == period_key, models.MonthlyPeriod.status == "SETTLED",
+                or_(models.GroupMember.joined_at.is_(None), models.GroupMember.joined_at < datetime.combine(_period_dates(period_key)[1] + timedelta(days=1), datetime.min.time())),
             ).all()
         }
         start_d, end_d = _period_dates(period_key)
@@ -1098,38 +1131,36 @@ def _deliver_monthly_digests(period_key: str) -> None:
         if is_email_configured():
             for digest in db.query(models.AccountMonthlyDigest).filter_by(period_key=period_key, emailed_at=None).all():
                 settings = db.query(models.AccountSettings).filter_by(account_id=digest.account_id).first()
-                if settings is not None and not settings.email_monthly_reports:
+                if digest.account.deletion_completed_at or (settings is not None and not settings.email_monthly_reports):
                     continue
                 try:
+                    # Atomically claim this recipient. Concurrent workers and
+                    # deploy restarts cannot both pass this update.
+                    claimed = db.execute(update(models.AccountMonthlyDigest).where(
+                        models.AccountMonthlyDigest.id == digest.id,
+                        models.AccountMonthlyDigest.emailed_at.is_(None),
+                        models.AccountMonthlyDigest.delivery_claimed_at.is_(None),
+                    ).values(delivery_claimed_at=datetime.now(timezone.utc), delivery_error=None))
+                    db.commit()
+                    if claimed.rowcount != 1:
+                        continue
                     send_monthly_digest_email(digest.account.email, digest.account.display_name, period_key, digest.pdf_path, digest.pdf_filename)
-                    digest.emailed_at = datetime.now(timezone.utc)
+                    db.execute(update(models.AccountMonthlyDigest).where(models.AccountMonthlyDigest.id == digest.id).values(
+                        emailed_at=datetime.now(timezone.utc), delivery_claimed_at=None, delivery_error=None,
+                    ))
                     db.commit()
                 except Exception:
                     db.rollback()
+                    db.execute(update(models.AccountMonthlyDigest).where(models.AccountMonthlyDigest.id == digest.id).values(
+                        delivery_claimed_at=None, delivery_error="Delivery failed; the next scheduled close check may retry.",
+                    ))
+                    db.commit()
                     logger.exception("Could not email monthly digest to account %s", digest.account_id)
     except Exception:
         db.rollback()
         logger.exception("Monthly digest delivery failed for %s", period_key)
     finally:
         db.close()
-
-
-def _email_period_report_to_opted_in_members(db: Session, group: models.Group, period: models.MonthlyPeriod) -> None:
-    """Email the settled report only after the database close is durable."""
-    if not period.pdf_path or not period.pdf_filename or not is_email_configured():
-        return
-    members = db.query(models.GroupMember).filter(
-        models.GroupMember.group_id == group.id,
-        or_(models.GroupMember.is_active.is_(True), models.GroupMember.is_active.is_(None)),
-    ).all()
-    for member in members:
-        settings = db.query(models.AccountSettings).filter_by(account_id=member.account_id).first()
-        if settings is not None and not settings.email_monthly_reports:
-            continue
-        try:
-            send_monthly_report_email(member.account.email, member.display_name, group.name, period.period_key, period.pdf_path, period.pdf_filename)
-        except Exception:
-            logger.exception("Could not email monthly report for group %s to account %s", group.id, member.account_id)
 
 
 def _rollover_monthly_periods() -> None:
@@ -1206,6 +1237,7 @@ def _finalize_account_deletion(db: Session, account: models.Account) -> None:
             if replacement:
                 replacement.role = "owner"
         membership.is_active = False
+        membership.left_at = datetime.now(timezone.utc)
         membership.role = "member"
         membership.display_name = "Deleted member"
     for settings in db.query(models.GroupMemberSettings).filter_by(account_id=account.id).all():
@@ -1746,6 +1778,8 @@ def _quick_split_out(split: models.QuickSplit, account: models.Account) -> schem
                 email=None if p.email.endswith("@invite.local") else p.email,
                 display_name=p.display_name,
                 share_amount=float(p.share_amount),
+                paid_amount=float(p.paid_amount or 0),
+                remaining_amount=float(_private_participant_remaining(split, p)),
                 split_value=float(p.split_value) if p.split_value is not None else None,
                 payment_status=p.payment_status,
                 payment_marked_at=p.payment_marked_at,
@@ -2089,6 +2123,8 @@ def _record_direct_pair_payment(
     }
     if quick_split_id is not None:
         allocation["quick_split_id"] = quick_split_id
+        # The caller has already applied this exact bill payment locally.
+        allocation["private_applied"] = True
     payment = models.PairPayment(
         account_one_id=one,
         account_two_id=two,
@@ -2730,21 +2766,45 @@ def _month_date_bounds(month_key: str) -> tuple[date, date]:
     return start, end
 
 
-def _mark_quick_split_debtor_paid(split: models.QuickSplit, debtor_id: int) -> bool:
-    """Mark the debtor's private-bill share as paid so Friends ledger can strike it through."""
-    changed = False
-    for participant in split.participants:
-        if participant.account_id != debtor_id:
-            continue
-        if participant.payment_status == "CONFIRMED":
-            continue
+def _private_participant_remaining(split: models.QuickSplit, participant: models.QuickSplitParticipant) -> Decimal:
+    """Unpaid cash for this participant, including legacy fully-paid rows."""
+    raw_due = (
+        max(Decimal("0.00"), -_viewer_direct_effect(split, participant, participant.account_id))
+        if participant.account_id else Decimal(str(participant.share_amount or 0))
+    )
+    paid = Decimal(str(participant.paid_amount or 0))
+    if participant.payment_status == "CONFIRMED" and paid <= 0:
+        # Old rows used only a status; preserve their historical meaning.
+        return Decimal("0.00")
+    return max(Decimal("0.00"), raw_due - paid).quantize(Decimal("0.01"))
+
+
+def _apply_private_participant_payment(
+    split: models.QuickSplit, participant: models.QuickSplitParticipant, amount: Decimal,
+) -> Decimal:
+    """Apply only the requested portion; strike through only when fully covered."""
+    remaining = _private_participant_remaining(split, participant)
+    applied = min(max(Decimal("0.00"), amount), remaining).quantize(Decimal("0.01"))
+    if applied <= 0:
+        return Decimal("0.00")
+    participant.paid_amount = (Decimal(str(participant.paid_amount or 0)) + applied).quantize(Decimal("0.01"))
+    if _private_participant_remaining(split, participant) <= Decimal("0.00"):
         participant.payment_status = "CONFIRMED"
-        if not participant.payment_marked_at:
-            participant.payment_marked_at = datetime.utcnow()
-        changed = True
-    if changed and all(p.payment_status == "CONFIRMED" for p in split.participants):
+        participant.payment_marked_at = participant.payment_marked_at or datetime.now(timezone.utc)
+    else:
+        participant.payment_status = "PARTIAL"
+    if all(_private_participant_remaining(split, p) <= Decimal("0.00") for p in split.participants):
         split.status = "SETTLED"
-    return changed
+    return applied
+
+
+def _mark_quick_split_debtor_paid(split: models.QuickSplit, debtor_id: int, amount: Optional[Decimal] = None) -> Decimal:
+    """Apply a full or partial Friend payment to this debtor's private bill."""
+    applied = Decimal("0.00")
+    for participant in split.participants:
+        if participant.account_id == debtor_id:
+            applied += _apply_private_participant_payment(split, participant, amount if amount is not None else _private_participant_remaining(split, participant))
+    return applied
 
 
 def _debtor_owed_on_private_bill(
@@ -2753,7 +2813,12 @@ def _debtor_owed_on_private_bill(
     """Positive amount this debtor still owes on one private bill."""
     effect = _viewer_direct_effect(split, participant, debtor_id)
     owed = (-effect).quantize(Decimal("0.01"))
-    return owed if owed > 0 else Decimal("0.00")
+    if owed <= 0:
+        return Decimal("0.00")
+    paid = Decimal(str(participant.paid_amount or 0))
+    if participant.payment_status == "CONFIRMED" and paid <= 0:
+        return Decimal("0.00")
+    return max(Decimal("0.00"), owed - paid).quantize(Decimal("0.01"))
 
 
 def _sync_direct_bills_covered_by_pair_payment(db: Session, payment: models.PairPayment) -> bool:
@@ -2806,7 +2871,18 @@ def _sync_direct_bills_covered_by_pair_payment(db: Session, payment: models.Pair
         quick_split_id = allocation.get("quick_split_id")
         if quick_split_id:
             split = db.query(models.QuickSplit).get(int(quick_split_id))
-            if split and _mark_quick_split_debtor_paid(split, payment.payer_account_id):
+            if allocation.get("private_applied"):
+                rewritten.append(allocation)
+                continue
+            if split:
+                participant = next((p for p in split.participants if p.account_id == payment.payer_account_id), None)
+                if participant and participant.payment_status == "CONFIRMED" and Decimal(str(participant.paid_amount or 0)) <= 0:
+                    # Legacy full-payment markers have no numeric total; keep
+                    # their recorded allocation intact while making replays safe.
+                    allocation = {**allocation, "private_applied": True}
+                else:
+                    applied = _mark_quick_split_debtor_paid(split, payment.payer_account_id, amount)
+                    allocation = {**allocation, "private_applied": True, "amount": float(applied)}
                 changed = True
             rewritten.append(allocation)
             continue
@@ -2820,8 +2896,6 @@ def _sync_direct_bills_covered_by_pair_payment(db: Session, payment: models.Pair
         for split, participant in bill_rows_for_month(str(month_key)):
             if participant.account_id != payment.payer_account_id:
                 # Debtor of this transfer is the payment payer; only their unpaid share counts.
-                continue
-            if participant.payment_status == "CONFIRMED":
                 continue
             if payment_time and split.created_at and _as_utc(split.created_at) > _as_utc(payment_time):
                 continue
@@ -2854,13 +2928,16 @@ def _sync_direct_bills_covered_by_pair_payment(db: Session, payment: models.Pair
             continue
         payment_kind = allocation.get("payment_kind")
         for split, participant, take in applied_rows:
-            if _mark_quick_split_debtor_paid(split, payment.payer_account_id):
-                changed = True
+            applied = _apply_private_participant_payment(split, participant, take)
+            if applied <= 0:
+                continue
             entry = {
                 "kind": "DIRECT",
                 "month_key": str(month_key),
-                "amount": float(take),
+                "amount": float(applied),
                 "quick_split_id": split.id,
+                "participant_id": participant.id,
+                "private_applied": True,
             }
             if payment_kind:
                 entry["payment_kind"] = payment_kind
@@ -3190,24 +3267,21 @@ def _finalize_quick_split_participant_payment(
     db: Session, split: models.QuickSplit, participant: models.QuickSplitParticipant,
 ) -> None:
     """Apply a private-bill payment immediately (no second-person confirmation)."""
-    if participant.payment_status == "CONFIRMED":
+    remaining = _private_participant_remaining(split, participant)
+    if remaining <= 0:
         return
-    participant.payment_status = "CONFIRMED"
-    if not participant.payment_marked_at:
-        participant.payment_marked_at = datetime.utcnow()
+    applied = _apply_private_participant_payment(split, participant, remaining)
     if participant.account_id and split.payer_account_id:
         _record_direct_pair_payment(
             db,
             participant.account_id,
             split.payer_account_id,
-            Decimal(str(participant.share_amount or 0)),
+            applied,
             split.currency or "USD",
             split.bill_date.strftime("%Y-%m"),
             split.payer_account_id,
             quick_split_id=split.id,
         )
-    if all(p.payment_status == "CONFIRMED" for p in split.participants):
-        split.status = "SETTLED"
 
 
 @app.post("/api/quick-splits/{split_id}/participants/{participant_id}/mark-paid", response_model=schemas.QuickSplitOut)
@@ -3607,6 +3681,7 @@ def _purge_member_group_history(db: Session, group_id: int, member: models.Group
     # it into their historical balance view; new, unlocked group activity does
     # not include it.
     member.is_active = False
+    member.left_at = datetime.now(timezone.utc)
     return deleted
 
 
@@ -3773,6 +3848,9 @@ def _add_existing_group_member(group_id: int, member_account_id: int, actor: mod
     if membership:
         membership.is_active = True
         membership.display_name = target.display_name
+        if not already_member:
+            membership.joined_at = datetime.now(timezone.utc)
+            membership.left_at = None
     else:
         db.add(models.GroupMember(group_id=group.id, account_id=target.id, display_name=target.display_name, role="member"))
     if not already_member:
@@ -3804,6 +3882,9 @@ def join_group(
     if membership:
         membership.is_active = True
         membership.display_name = account.display_name
+        if newly_joined:
+            membership.joined_at = datetime.now(timezone.utc)
+            membership.left_at = None
     else:
         db.add(models.GroupMember(group_id=group.id, account_id=account.id, display_name=account.display_name, role="member"))
     if newly_joined:
@@ -4666,6 +4747,7 @@ def reopen_period(
         raise HTTPException(400, "Period is not settled")
 
     period.status = "ACTIVE"
+    period.report_revision = int(period.report_revision or 1) + 1
     period.pdf_filename = None
     period.pdf_path = None
     period.settled_at = None

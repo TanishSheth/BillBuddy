@@ -16,10 +16,10 @@ function splitRow(split) {
   const payerPaid = split.payer_paid_amount == null ? total : Number(split.payer_paid_amount);
   if (split.is_payer) {
     friend = { id: person.account_id || null, name: person.display_name || ShareSquad.maskEmail(person.email) || "Friend", hasAvatar: !!person.has_avatar };
-    balance = cents(payerPaid - Number(split.payer_share_amount));
+    balance = cents(payerPaid - Number(split.payer_share_amount) - Number(person.paid_amount || 0));
   } else if (person.is_me) {
     friend = { id: split.payer_account_id, name: split.payer_name || "Friend", hasAvatar: !!split.payer_has_avatar };
-    balance = cents((total - payerPaid) - Number(person.share_amount));
+    balance = cents((total - payerPaid) - Number(person.share_amount) + Number(person.paid_amount || 0));
   }
   return friend && friend.id !== me.account.id ? { split, person, friend, balance } : null;
 }

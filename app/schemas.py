@@ -177,6 +177,8 @@ class QuickSplitParticipantOut(BaseModel):
     email: Optional[str] = None
     display_name: Optional[str] = None
     share_amount: float
+    paid_amount: float = 0
+    remaining_amount: float = 0
     split_value: Optional[float] = None
     payment_status: str
     payment_marked_at: Optional[datetime] = None

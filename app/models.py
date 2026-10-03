@@ -122,6 +122,7 @@ class GroupMember(Base):
     role = Column(String(20), default="member")
     is_active = Column(Boolean, default=True, nullable=False)
     joined_at = Column(DateTime, server_default=func.now())
+    left_at = Column(DateTime, nullable=True)
 
     group = relationship("Group", back_populates="members")
     account = relationship("Account", back_populates="memberships")
@@ -186,6 +187,7 @@ class MonthlyPeriod(Base):
     target_currency = Column(String(10), nullable=True)
     settlement_fx_rate = Column(Numeric(12, 6), nullable=True)
     settled_at = Column(DateTime, nullable=True)
+    report_revision = Column(Integer, nullable=False, default=1)
 
     group = relationship("Group", back_populates="periods")
     expenses = relationship("Expense", back_populates="period")
@@ -340,6 +342,11 @@ class AccountMonthlyDigest(Base):
     pdf_path = Column(String, nullable=True)
     generated_at = Column(DateTime, nullable=True)
     emailed_at = Column(DateTime, nullable=True)
+    delivery_claimed_at = Column(DateTime, nullable=True)
+    delivery_error = Column(String(300), nullable=True)
+    revision = Column(Integer, nullable=False, default=1)
+    revised_at = Column(DateTime, nullable=True)
+    source_fingerprint = Column(String(64), nullable=True)
 
     account = relationship("Account")
 
@@ -380,6 +387,8 @@ class QuickSplitParticipant(Base):
     account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
     display_name = Column(String(100), nullable=True)
     share_amount = Column(Numeric(10, 2), nullable=False)
+    # Cash settled against this participant's remaining private-bill debt.
+    paid_amount = Column(Numeric(10, 2), nullable=False, default=0)
     split_value = Column(Numeric(10, 2), nullable=True)
     payment_status = Column(String(20), default="PENDING", nullable=False)
     payment_marked_at = Column(DateTime, nullable=True)

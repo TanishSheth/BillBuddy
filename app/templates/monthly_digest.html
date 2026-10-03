@@ -10,7 +10,7 @@
   th, td { padding: 6px 7px; border-bottom: 1px solid #e2e8f0; text-align: left; font-size: 9px; } th { background: #f8fafc; color: #475569; font-size: 8px; text-transform: uppercase; } .num { text-align:right; }
   .callout { background: #f0fdfa; border: 1px solid #99f6e4; border-radius: 6px; padding: 9px 11px; } .empty { color: #64748b; font-style: italic; }
 </style></head><body>
-  <div class="header">{% if logo_data_uri %}<img class="logo" src="{{ logo_data_uri }}">{% endif %}<div class="brand">ShareSquad</div><div class="sub">Your consolidated monthly digest</div><div class="meta"><strong>{{ user_name }}</strong><br>{{ month_label }}<br>Generated {{ generated_at }}</div><div class="clear"></div></div>
+  <div class="header">{% if logo_data_uri %}<img class="logo" src="{{ logo_data_uri }}">{% endif %}<div class="brand">ShareSquad</div><div class="sub">Your consolidated monthly digest{% if revision > 1 %} · Revised report #{{ revision }}{% endif %}</div><div class="meta"><strong>{{ user_name }}</strong><br>{{ month_label }}<br>Generated {{ generated_at }}</div><div class="clear"></div></div>
   <div class="callout">One report for all of your settled groups, private splits, and personal expenses. Individual group reports remain available in the app.</div>
   <h2>Shared groups</h2>
   {% if group_sections %}{% for group in group_sections %}<h3>{{ group.name }} · {{ group.currency }}</h3><p class="sub">{{ group.expense_count }} shared expense{{ '' if group.expense_count == 1 else 's' }}</p>
