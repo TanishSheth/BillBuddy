@@ -147,29 +147,30 @@ def _period_history_is_protected(db: Session, period: models.MonthlyPeriod) -> b
     return period.status == "SETTLED" or _period_has_paid_transfer(db, period.id)
 
 
+def _unlock_group_period(period: models.MonthlyPeriod) -> bool:
+    """Clear legacy settled locks so months stay editable after month-end email."""
+    if period.status != "SETTLED":
+        return False
+    period.status = "ACTIVE"
+    period.settled_at = None
+    return True
+
+
 def _require_expense_editable(
     db: Session, period: models.MonthlyPeriod, account: models.Account, group_id: int,
     owner_override: bool = False,
 ) -> bool:
-    """Owners may correct expenses after payment/settlement; overpay becomes credit."""
+    """Paid periods need an owner correction; legacy settled locks just reopen."""
     member = require_group_member(group_id, account, db)
-    settled = period.status == "SETTLED"
     paid = _period_has_paid_transfer(db, period.id)
-    if not settled and not paid:
+    _unlock_group_period(period)
+    if not paid:
         return False
     if member.role != "owner" or not owner_override:
-        if settled:
-            raise HTTPException(
-                400,
-                "This period is settled. Only the owner can correct expenses; recorded payments stay applied and any overpay becomes credit.",
-            )
         raise HTTPException(
             409,
             "A payment has been recorded for this period. Only the owner can correct expenses; balances will be recalculated and members notified.",
         )
-    if settled:
-        # Keep confirmed payments; reopen so the corrected ledger can show residual credit/debt.
-        period.status = "ACTIVE"
     return True
 
 
@@ -992,10 +993,9 @@ def _period_report_inputs(db: Session, group: models.Group, period: models.Month
     return balances, settlements, expense_dicts
 
 
-def _settle_group_period(db: Session, group: models.Group, period: models.MonthlyPeriod, *, automatic: bool) -> tuple[Optional[str], Optional[str]]:
-    """Close a period once and preserve the exact settlement/report snapshot."""
+def _snapshot_group_period_pdf(db: Session, group: models.Group, period: models.MonthlyPeriod) -> tuple[Optional[str], Optional[str]]:
+    """Write/refresh a group PDF snapshot without locking the month as settled."""
     balances, settlements, expense_dicts = _period_report_inputs(db, group, period)
-    pdf_path = pdf_filename = None
     try:
         pdf_path, pdf_filename = generate_monthly_pdf(
             period.period_key, balances, settlements, expense_dicts, _group_reports_dir(group.id),
@@ -1005,20 +1005,10 @@ def _settle_group_period(db: Session, group: models.Group, period: models.Monthl
         )
         period.pdf_filename = pdf_filename
         period.pdf_path = pdf_path
+        return pdf_path, pdf_filename
     except Exception:
-        # A report delivery problem must not leave an expired month editable.
-        # The settled period can still be re-exported from Reports afterwards.
-        logger.exception("Could not generate automatic report for group %s period %s", group.id, period.period_key)
-    period.status = "SETTLED"
-    period.settled_at = datetime.now(timezone.utc)
-    summary = f"ShareSquad automatically settled {period.period_key}" if automatic else f"A member settled {period.period_key}"
-    _record_activity(db, group.id, None, "period_settled", summary, "period", period.id)
-    _notify_group_members(
-        db, group.id,
-        f"{period.period_key} was {'automatically ' if automatic else ''}settled. Review your consolidated Friend balance.",
-        _group_focus_link(group.id, "balances", "settlementList"),
-    )
-    return pdf_path, pdf_filename
+        logger.exception("Could not generate report snapshot for group %s period %s", group.id, period.period_key)
+        return None, None
 
 
 def _period_dates(period_key: str) -> tuple[date, date]:
@@ -1052,7 +1042,8 @@ def _build_account_monthly_digest(db: Session, account: models.Account, period_k
         if not _membership_belongs_in_period(membership, end_d):
             continue
         group = db.query(models.Group).get(membership.group_id)
-        period = db.query(models.MonthlyPeriod).filter_by(group_id=membership.group_id, period_key=period_key, status="SETTLED").first()
+        # Month-end email is a data snapshot — do not require the period to be "settled".
+        period = db.query(models.MonthlyPeriod).filter_by(group_id=membership.group_id, period_key=period_key).first()
         if not group or not period:
             continue
         _, settlements, expenses = build_balances_and_settlements(db, group.id, period)
@@ -1063,7 +1054,30 @@ def _build_account_monthly_digest(db: Session, account: models.Account, period_k
                 mine.append({"description": f"You pay {member_names.get(settlement['to_member_id'], 'member')}", "amount": -float(settlement["amount"])})
             elif settlement["to_member_id"] == membership.id:
                 mine.append({"description": f"{member_names.get(settlement['from_member_id'], 'Member')} pays you", "amount": float(settlement["amount"])})
-        group_sections.append({"name": group.name, "currency": group.currency or "USD", "expense_count": len(expenses), "report_revision": int(period.report_revision or 1), "settlements": mine})
+        expenses_this_month = []
+        expenses_added_late = []
+        for expense in expenses:
+            row = {
+                "bill_date": expense.bill_date.isoformat(),
+                "store_name": expense.store_name,
+                "category": expense.category or "General",
+                "total_amount": float(expense.total_amount),
+                "currency": expense.currency or group.currency or "USD",
+                "payer_name": member_names.get(expense.payer_member_id, "Member"),
+            }
+            if expense.bill_date < start_d:
+                expenses_added_late.append(row)
+            else:
+                expenses_this_month.append(row)
+        group_sections.append({
+            "name": group.name,
+            "currency": group.currency or "USD",
+            "expense_count": len(expenses),
+            "report_revision": int(period.report_revision or 1),
+            "settlements": mine,
+            "expenses_this_month": expenses_this_month,
+            "expenses_added_late": expenses_added_late,
+        })
 
     personal_expenses = [{
         "bill_date": item.bill_date.isoformat(), "store_name": item.store_name,
@@ -1119,7 +1133,7 @@ def _deliver_monthly_digests(period_key: str) -> None:
     try:
         account_ids = {
             row[0] for row in db.query(models.GroupMember.account_id).join(models.MonthlyPeriod, models.MonthlyPeriod.group_id == models.GroupMember.group_id).filter(
-                models.MonthlyPeriod.period_key == period_key, models.MonthlyPeriod.status == "SETTLED",
+                models.MonthlyPeriod.period_key == period_key,
                 or_(models.GroupMember.joined_at.is_(None), models.GroupMember.joined_at < datetime.combine(_period_dates(period_key)[1] + timedelta(days=1), datetime.min.time())),
             ).all()
         }
@@ -1168,30 +1182,24 @@ def _deliver_monthly_digests(period_key: str) -> None:
 
 
 def _rollover_monthly_periods() -> None:
-    """Catch up expired active periods and always create the current calendar month."""
+    """Open the current calendar month for every group.
+
+    Past months stay editable. Month-end email/digest delivery is a separate
+    scheduled job and must not mark periods as settled.
+    """
     db = SessionLocal()
-    settled: list[tuple[models.Group, models.MonthlyPeriod]] = []
     try:
+        # Older builds auto-settled months at rollover. Clear those locks so
+        # members can still add or edit expenses in past months.
+        db.query(models.MonthlyPeriod).filter(models.MonthlyPeriod.status == "SETTLED").update(
+            {"status": "ACTIVE", "settled_at": None},
+            synchronize_session=False,
+        )
         current_key = _period_key_for(_business_today())
-        expired = db.query(models.MonthlyPeriod).filter(
-            models.MonthlyPeriod.status == "ACTIVE", models.MonthlyPeriod.period_key < current_key,
-        ).order_by(models.MonthlyPeriod.period_key.asc()).all()
-        for period in expired:
-            group = db.query(models.Group).get(period.group_id)
-            if not group:
-                continue
-            _settle_group_period(db, group, period, automatic=True)
-            settled.append((group, period))
         for group in db.query(models.Group).all():
             if not db.query(models.MonthlyPeriod.id).filter_by(group_id=group.id, period_key=current_key).first():
                 db.add(models.MonthlyPeriod(group_id=group.id, period_key=current_key, status="ACTIVE"))
         db.commit()
-        for group, period in settled:
-            notify_group_change(group.id, "period-auto-settled")
-        # Reports are intentionally consolidated after every group is closed:
-        # each person receives one digest, not one email for every group.
-        for period_key in {period.period_key for _, period in settled}:
-            _deliver_monthly_digests(period_key)
     except Exception:
         db.rollback()
         logger.exception("Monthly period rollover failed")
@@ -1332,12 +1340,12 @@ def start_account_deletion_cleanup() -> None:
         _repair_all_group_payment_snapshots(db)
     finally:
         db.close()
-    # Catch up after downtime, then close every month at midnight in the
-    # product timezone. The catch-up makes rollover reliable across restarts.
+    # Catch up after downtime: open the current calendar month for every group.
+    # Month-end does not lock periods as settled — digests are emailed separately.
     _rollover_monthly_periods()
     # Production catch-up: if the server was offline during delivery, retry the
-    # just-finished month. Skip on local run.ps1 so startup is not blocked by
-    # regenerating digest PDFs for every account on every restart.
+    # just-finished month's digest email. Skip on local run.ps1 so startup is
+    # not blocked by regenerating digest PDFs for every account on every restart.
     if not IS_DEVELOPMENT:
         today = _business_today()
         previous_month = date(today.year - (today.month == 1), 12 if today.month == 1 else today.month - 1, 1)
@@ -4273,10 +4281,10 @@ def create_expense(
     payer_ids = [item.member_id for item in payload.payers] if payload.payers and len(payload.payers) >= 2 else [payload.payer_member_id]
     _validate_expense_members(db, group_id, payer_ids[0], participant_ids + payer_ids[1:])
 
-    period_key = payload.period_key or _period_key_for(payload.bill_date)
+    # Period = month the bill is saved (balances / digests). bill_date stays the receipt date.
+    period_key = payload.period_key or _period_key_for(_business_today())
     period = get_or_create_period(db, group_id, period_key)
-    if period.status == "SETTLED":
-        raise HTTPException(400, f"Period {period_key} is already settled; cannot add expenses")
+    _unlock_group_period(period)
 
     expense = models.Expense(
         period_id=period.id,
@@ -4342,10 +4350,8 @@ def update_expense(
     payer_ids = [item.member_id for item in payload.payers] if payload.payers and len(payload.payers) >= 2 else [payload.payer_member_id]
     _validate_expense_members(db, group_id, payer_ids[0], participant_ids + payer_ids[1:])
 
-    period_key = payload.period_key or _period_key_for(payload.bill_date)
-    period = get_or_create_period(db, group_id, period_key)
-
-    expense.period_id = period.id
+    # Keep the month-saved period sticky; editing bill_date must not move the ledger month.
+    _unlock_group_period(expense.period)
     expense.store_name = payload.store_name.strip()
     expense.bill_date = payload.bill_date
     expense.total_amount = Decimal(str(payload.total_amount))
@@ -4450,7 +4456,8 @@ def list_expenses(
     if max_amount is not None:
         q = q.filter(models.Expense.total_amount <= Decimal(str(max_amount)))
 
-    return q.order_by(models.Expense.bill_date.desc(), models.Expense.id.desc()).all()
+    # Newest saves first; bill_date is display-only on the expenses ledger.
+    return q.order_by(models.Expense.created_at.desc(), models.Expense.id.desc()).all()
 
 
 def _group_expense_or_404(db: Session, group_id: int, expense_id: int) -> models.Expense:
@@ -4775,53 +4782,16 @@ def generate_report(
 ):
     require_group_member(group_id, account, db)
     period = get_or_create_period(db, group_id, period_key)
-    # Re-exporting is read-only: allow a settled period's report to be
-    # regenerated when payment confirmations have been recorded afterwards.
-
     group = db.query(models.Group).get(group_id)
-    balances, settlements, expenses = build_balances_and_settlements(db, group_id, period)
+    pdf_path, filename = _snapshot_group_period_pdf(db, group, period)
+    if not pdf_path or not filename:
+        raise HTTPException(503, "Could not generate the PDF report. Try again or contact support.")
 
-    members_by_id = {m.id: m.display_name for m in db.query(models.GroupMember).filter_by(group_id=group_id).all()}
-    expense_dicts = []
-    for e in expenses:
-        participant_names = [members_by_id.get(s.member_id, "?") for s in e.splits]
-        expense_dicts.append({
-            "bill_date": e.bill_date.isoformat(),
-            "store_name": e.store_name,
-            "category": e.category or "General",
-            "payer_name": ", ".join(
-                f"{members_by_id.get(payer.member_id, '?')} {payer.amount_paid}" for payer in e.payers
-            ) if e.payers else members_by_id.get(e.payer_member_id, "?"),
-            "participant_names": participant_names,
-            "total_amount": float(e.total_amount),
-            "currency": e.currency or group.currency or "USD",
-            "image_path": e.image_path,
-        })
-
-    reports_dir = _group_reports_dir(group_id)
-    try:
-        pdf_path, filename = generate_monthly_pdf(
-            period.period_key,
-            balances,
-            settlements,
-            expense_dicts,
-            reports_dir,
-            group_name=group.name,
-            base_currency=group.currency or "USD",
-            target_currency=period.target_currency,
-            fx_rate=float(period.settlement_fx_rate) if period.settlement_fx_rate else None,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(503, "Could not generate the PDF report. Try again or contact support.") from exc
-
-    period.pdf_filename = filename
-    period.pdf_path = pdf_path
-    period.status = "SETTLED"
-    period.settled_at = datetime.now()
-    _record_activity(db, group_id, account, "period_settled", f"{account.display_name} settled {period_key}", "period", period.id)
-    _notify_group_members(db, group_id, f"{account.display_name} settled the {period_key} period. Review your consolidated Friend balance.", _group_focus_link(group_id, "balances", "settlementList"), exclude_account_id=account.id)
+    # Generating a PDF is a snapshot only — do not lock the month as settled.
+    _record_activity(db, group_id, account, "report_generated", f"{account.display_name} generated a PDF report for {period_key}", "period", period.id)
+    _notify_group_members(db, group_id, f"{account.display_name} generated a PDF report for {period_key}.", _group_focus_link(group_id, "reports"), exclude_account_id=account.id)
     db.commit()
-    notify_group_change(group_id, "period-settled")
+    notify_group_change(group_id, "report-generated")
 
     return {"ok": True, "filename": filename, "pdf_url": f"/api/groups/{group_id}/reports/{filename}"}
 

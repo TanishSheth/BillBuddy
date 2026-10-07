@@ -204,6 +204,18 @@ select.bb-input {
   padding-right: 28px;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* Period month picker: underline control, no filled box */
 #periodSelect.bb-input {
   background-color: transparent;
@@ -212,7 +224,11 @@ select.bb-input {
   border-radius: 0;
   padding: 6px 28px 6px 4px;
   min-height: 36px;
+  min-width: 11rem;
+  max-width: min(100%, 18rem);
   box-shadow: none;
+  font-weight: 700;
+  color: var(--ink);
 }
 #periodSelect.bb-input:focus {
   border-bottom-color: var(--brand);
@@ -1607,14 +1623,28 @@ html.theme-dark .public-page > p,
 html.theme-dark .public-page h2 + p { color: var(--muted); }
 
 /* Keep native filter menus in the active theme. Category choices retain their
-   own color swatches; member choices use the page surface for reliable text
-   contrast on Windows as well as mobile browsers. */
+   own color swatches; month/member choices use the page surface for reliable
+   text contrast on Windows as well as mobile browsers. */
 html.theme-dark select { color-scheme: dark; }
-html.theme-dark #expenseMemberFilter option.member-filter-option {
+#expenseMonthFilter,
+#expenseMemberFilter,
+#expenseSearch,
+#insightMonthFilter {
+  color: var(--ink);
+  background-color: var(--surface);
+  border-color: var(--line);
+}
+html.theme-dark #expenseMonthFilter option.ledger-filter-option,
+html.theme-dark #expenseMemberFilter option.ledger-filter-option,
+html.theme-dark #expenseMemberFilter option.member-filter-option,
+html.theme-dark #insightMonthFilter option.ledger-filter-option {
   background-color: #0B1220 !important;
   color: #F1F5F9 !important;
 }
-html.theme-light #expenseMemberFilter option.member-filter-option {
+html.theme-light #expenseMonthFilter option.ledger-filter-option,
+html.theme-light #expenseMemberFilter option.ledger-filter-option,
+html.theme-light #expenseMemberFilter option.member-filter-option,
+html.theme-light #insightMonthFilter option.ledger-filter-option {
   background-color: #FFFFFF !important;
   color: #0F172A !important;
 }

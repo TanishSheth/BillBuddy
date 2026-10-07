@@ -239,6 +239,21 @@ def test_ocr_receipt_parsing():
 
     assert _find_date("09/13/268 extra") == (None, False)
 
+    labeled, labeled_ok = _find_date("ALDI\nDate: 09/13/26\nTOTAL 22.25")
+    assert labeled_ok and labeled == "2026-09-13", labeled
+
+    spaced, spaced_ok = _find_date("DATE 09 / 13 / 2026\nTOTAL 10.00")
+    assert spaced_ok and spaced == "2026-09-13", spaced
+
+    named, named_ok = _find_date("Purchase Date Sep 13th, 2026\nTOTAL 10.00")
+    assert named_ok and named == "2026-09-13", named
+
+    compact, compact_ok = _find_date("TXN 13SEP2026 TOTAL 10.00")
+    assert compact_ok and compact == "2026-09-13", compact
+
+    pipe_sep, pipe_ok = _find_date("DT 09|13|26\nTOTAL 10.00")
+    assert pipe_ok and pipe_sep == "2026-09-13", pipe_sep
+
     assert _is_register_line("*1935 FS67/003/006 09/13/26")
     assert not _is_register_line("TOTAL ........ $ 22.25")
     assert not _is_register_line("09/13/26")

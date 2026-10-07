@@ -28,7 +28,7 @@ function renderDemoBanner() {
   banner.id = "demoModeBanner";
   banner.className = "border-b border-brand/25 bg-brand/10 text-ink";
   banner.setAttribute("role", "status");
-  banner.innerHTML = '<div class="max-w-5xl mx-auto px-4 sm:px-5 py-2 text-center text-xs sm:text-sm"><strong class="font-mono text-brand">Demo mode</strong> · Try most features in this sample workspace; some details may differ from the full app. <a class="font-semibold underline underline-offset-2 hover:text-brand" href="/login.html?mode=signup">Sign up free</a> to use every feature with your own data. <button type="button" id="resetDemoSandbox" class="ml-1 font-semibold underline underline-offset-2 hover:text-brand">Reset demo</button></div>';
+  banner.innerHTML = '<div class="max-w-5xl mx-auto px-4 sm:px-5 py-2 text-center text-xs sm:text-sm"><strong class="font-mono text-brand">Demo mode</strong> · Same current ShareSquad as a regular account, filled with sample group data. Sandboxes expire after two hours. <a class="font-semibold underline underline-offset-2 hover:text-brand" href="/login.html?mode=signup">Sign up free</a> to keep your own data. <button type="button" id="resetDemoSandbox" class="ml-1 font-semibold underline underline-offset-2 hover:text-brand">Reset demo</button></div>';
   header.insertAdjacentElement("afterend", banner);
   banner.querySelector("#resetDemoSandbox")?.addEventListener("click", async () => {
     if (!await confirmDialog({
@@ -361,7 +361,7 @@ function openNotificationLink(link, message = "") {
     const text = String(message).toLowerCase();
     if (/payment|paid|received|confirmed/.test(text)) { target.searchParams.set("tab", "balances"); target.searchParams.set("focus", "paymentHistory"); }
     else if (/member|invite/.test(text)) { target.searchParams.set("tab", "members"); target.searchParams.set("focus", "groupMembers"); }
-    else if (/settled|reopened/.test(text)) { target.searchParams.set("tab", "balances"); target.searchParams.set("focus", "periodSelect"); }
+    else if (/settled|reopened|unlocked/.test(text)) { target.searchParams.set("tab", "balances"); }
     else if (/added|updated|deleted|comment/.test(text)) { target.searchParams.set("tab", "expenses"); target.searchParams.set("focus", "expensesBody"); }
   }
   const groupId = target.searchParams.get("group");

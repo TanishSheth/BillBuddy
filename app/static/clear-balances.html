@@ -4,17 +4,16 @@
 <script>(function(){try{var k="sharesquad_theme",p=localStorage.getItem(k)||"system",d=p==="dark"||(p!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("theme-dark",d);document.documentElement.classList.toggle("theme-light",!d);document.documentElement.dataset.theme=d?"dark":"light";var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",d?"#0B1220":"#F8FAFC");}catch(e){}})();</script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="ShareSquad balances: see who owes whom, settle payments, and keep a clear monthly history.">
+<meta name="description" content="ShareSquad balances: who pays whom for bills saved this month, record payments on Friends, and keep payment history.">
 <link rel="canonical" href="https://sharesquad.tanishsheth.com/clear-balances.html">
 <title>Clear Balances — ShareSquad</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
-<link rel="stylesheet" href="/styles.css?v=20260925final">
+<link rel="stylesheet" href="/styles.css?v=20261007monthSaved">
 </head>
 <body class="bb-bg text-ink min-h-screen">
 <header class="public-header">
-<script>(function(){try{var k="sharesquad_theme",p=localStorage.getItem(k)||"system",d=p==="dark"||(p!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("theme-dark",d);document.documentElement.classList.toggle("theme-light",!d);document.documentElement.dataset.theme=d?"dark":"light";var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",d?"#0B1220":"#F8FAFC");}catch(e){}})();</script>
 <a href="/" class="flex items-center gap-2">
 <img src="/logo.png" class="app-logo" alt="ShareSquad logo">
 <strong class="font-mono text-brand">ShareSquad</strong>
@@ -24,16 +23,16 @@
 <main class="public-page">
 <p class="landing-kicker">CLEAR BALANCES</p>
 <h1>Know who owes whom—without the awkward math.</h1>
-<p>Every saved expense records who paid and each person’s share. ShareSquad totals those shares for the period so the group can see balances at a glance.</p>
+<p>Every saved expense records who paid and each person’s share. ShareSquad totals those shares for the month the bill was <strong>saved</strong>, including older receipt dates added late.</p>
 
 <h2>How balances are calculated</h2>
-<p>Open a shared group and check <strong>Balances</strong> for the current month. The view combines every expense in that period: people who paid more than their share are owed; people who paid less owe the difference.</p>
+<p>Open a shared group and check <strong>Balances</strong>. <strong>Who pays whom</strong> combines every expense saved in the current calendar month. People who paid more than their share are owed; people who paid less owe the difference.</p>
 
 <h2>Settle when money moves</h2>
-<p>When someone pays you back, either person can record the transfer. Balances update as soon as the payment is saved — no second confirmation is needed. Recorded payments stay in the history while the group’s remaining balance updates.</p>
+<p>Record payments on <strong>Friends</strong> — full or partial. Balances update as soon as the payment is saved, and past payments stay in the friend payment history. Shared group expenses also appear on Friends for viewing; they are not double-counted in the total.</p>
 
 <h2>Reports and currency</h2>
-<p>Download a PDF report for the month when you need a shared record. Groups can use a settlement currency when reviewing balances, even if individual expenses were entered in other supported currencies.</p>
+<p>Download a PDF or open the monthly digest when you need a shared record. Digests list normal bills and an <strong>Added late</strong> section for older receipt dates. Change settlement currency from <strong>PDF Reports</strong> when you need a converted report. Months are not locked by digests or PDF generation.</p>
 
 <h2>Friends and personal spending</h2>
 <p>One-to-one friend splits have their own clear owed / owed-to-you card. Personal Tracker keeps your solo spending separate from shared group balances.</p>

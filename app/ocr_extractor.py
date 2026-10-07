@@ -61,7 +61,9 @@ _DIGIT_FIX_MAP = str.maketrans({
 })
 _MONEY_TOKEN_RE = re.compile(r"(?<![\w.])[0-9OoIlSsBZGD]{1,7}[.,][0-9OoIlSsBZGD]{2}(?![\w.])")
 _DATE_TOKEN_RE = re.compile(
-    r"(?<![\w./-])[0-9OoIlSsBZGD]{1,2}[/.\-][0-9OoIlSsBZGD]{1,2}[/.\-][0-9OoIlSsBZGD]{2,4}(?![\w./-])"
+    r"(?<![\w./-])"
+    r"[0-9OoIlSsBZGD]{1,2}\s*[/.\-]\s*[0-9OoIlSsBZGD]{1,2}\s*[/.\-]\s*[0-9OoIlSsBZGD]{2,4}"
+    r"(?![\w./-])"
 )
 
 
@@ -82,7 +84,12 @@ def _repair_date_confusable(match: "re.Match") -> str:
     token = match.group(0)
     if not any(ch.isdigit() for ch in token):
         return token
-    return token.translate(_DIGIT_FIX_MAP)
+    # Fix confusable digits inside numeral runs only — leave separators intact.
+    return re.sub(
+        r"[0-9OoIlSsBZGD]+",
+        lambda m: m.group(0).translate(_DIGIT_FIX_MAP),
+        token,
+    )
 
 
 def _repair_ocr_digits(text: str) -> str:
@@ -1050,18 +1057,36 @@ def _find_total(lines: list[str], line_boxes: list[dict] | None = None) -> tuple
     return None, False
 
 
+_DATE_LABEL_RE = re.compile(
+    r"(?i)\b(?:"
+    r"date|dated|dt|txn\s*date|tran(?:saction)?\s*date|purchase\s*date|"
+    r"bill\s*date|invoice\s*date|sale\s*date|order\s*date|printed|"
+    r"time\s*stamp|timestamp"
+    r")\b\s*[:#-]?\s*"
+)
+
 _DATE_PATTERNS = [
-    (r"\b(\d{4}-\d{2}-\d{2})\b", "%Y-%m-%d"),
-    # Year is exactly 2 or 4 digits so a timestamp (06:49PM) cannot glue onto 26.
-    (r"\b(\d{1,2}/\d{1,2}/\d{4})\b", None),
-    (r"\b(\d{1,2}/\d{1,2}/\d{2})(?!\d)", None),
-    (r"\b(\d{1,2}-\d{1,2}-\d{4})\b", None),
-    (r"\b(\d{1,2}-\d{1,2}-\d{2})(?!\d)", None),
+    # ISO first — unambiguous.
+    r"\b(\d{4}-\d{2}-\d{2})(?:[T\s]\d{1,2}:\d{2}(?::\d{2})?)?\b",
+    r"\b(\d{4}/\d{1,2}/\d{1,2})\b",
+    # Compact YYYYMMDD when clearly year-led.
+    r"\b((?:19|20)\d{2}[01]\d[0-3]\d)\b",
+    # Numeric with optional OCR spaces around separators.
+    r"\b(\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{4})\b",
+    r"\b(\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{2})(?!\d)",
+    r"\b(\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{4})\b",
+    r"\b(\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{2})(?!\d)",
     # Dot-separated, common outside the US (13.09.2026 / 13.09.26).
-    (r"\b(\d{1,2}\.\d{1,2}\.\d{4})\b", None),
-    (r"\b(\d{1,2}\.\d{1,2}\.\d{2})(?!\d)", None),
-    (r"\b([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})\b", None),
-    (r"\b(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})\b", None),
+    r"\b(\d{1,2}\s*\.\s*\d{1,2}\s*\.\s*\d{4})\b",
+    r"\b(\d{1,2}\s*\.\s*\d{1,2}\s*\.\s*\d{2})(?!\d)",
+    # OCR sometimes uses | or l as a separator.
+    r"\b(\d{1,2}\s*[|l]\s*\d{1,2}\s*[|l]\s*\d{2,4})\b",
+    # Month name forms, with optional ordinal / apostrophe year.
+    r"\b([A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+'?\d{2,4})\b",
+    r"\b(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]{3,9}\.?,?\s+'?\d{2,4})\b",
+    # Compact day+month+year without spaces: 13SEP2026 / 13SEP26.
+    r"\b(\d{1,2}(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\d{2,4})\b",
+    r"\b((?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\d{1,2},?\d{2,4})\b",
 ]
 
 _MONTH_NAMES = (
@@ -1093,46 +1118,156 @@ def _prefers_day_first(text: str) -> bool:
     return False
 
 
-def _try_parse_date(raw: str, day_first: bool = False) -> datetime | None:
-    raw = raw.strip().rstrip(",")
-    candidates = []
+def _normalize_date_raw(raw: str) -> str:
+    """Collapse OCR noise so parsers see a clean date token."""
+    text = (raw or "").strip().rstrip(",.;")
+    text = text.replace("'", "")
+    text = re.sub(r"(?i)(\d)(st|nd|rd|th)\b", r"\1", text)
+    text = re.sub(r"\s*[|l]\s*", "/", text)
+    text = re.sub(r"\s*([/.\-])\s*", r"\1", text)
+    text = re.sub(r"\s+", " ", text)
+    # Compact 20260913 → 2026-09-13
+    if re.fullmatch(r"(?:19|20)\d{6}", text):
+        return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    # Compact 13SEP2026 / SEP132026
+    m = re.fullmatch(
+        r"(?i)(\d{1,2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*(\d{2,4})",
+        text.replace(" ", ""),
+    )
+    if m:
+        return f"{m.group(1)} {m.group(2)[:3]} {m.group(3)}"
+    m = re.fullmatch(
+        r"(?i)(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|OCT|NOV|DEC)[A-Z]*(\d{1,2}),?(\d{2,4})",
+        text.replace(" ", ""),
+    )
+    if m:
+        return f"{m.group(1)[:3]} {m.group(2)} {m.group(3)}"
+    return text
 
-    if "-" in raw and raw[:4].isdigit():
+
+def _try_parse_date(raw: str, day_first: bool = False) -> datetime | None:
+    raw = _normalize_date_raw(raw)
+    if not raw:
+        return None
+    candidates: list[str] = []
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
         candidates.append("%Y-%m-%d")
+    elif re.fullmatch(r"\d{4}/\d{1,2}/\d{1,2}", raw):
+        candidates += ["%Y/%m/%d", "%Y/%d/%m"]
     elif "/" in raw or "-" in raw or "." in raw:
         sep = "/" if "/" in raw else ("-" if "-" in raw else ".")
         parts = raw.split(sep)
+        if len(parts) != 3:
+            return None
         # Dot-separated dates are almost always day-first regardless of locale.
         prefer_day_first = day_first or sep == "."
-        if len(parts[-1]) == 2:
+        if len(parts[0]) == 4 and parts[0].isdigit():
+            candidates += [f"%Y{sep}%m{sep}%d", f"%Y{sep}%d{sep}%m"]
+        elif len(parts[-1]) == 2:
             pair = [f"%d{sep}%m{sep}%y", f"%m{sep}%d{sep}%y"]
+            candidates += pair if prefer_day_first else pair[::-1]
         else:
             pair = [f"%d{sep}%m{sep}%Y", f"%m{sep}%d{sep}%Y"]
-        candidates += pair if prefer_day_first else pair[::-1]
+            candidates += pair if prefer_day_first else pair[::-1]
     else:
-        candidates += ["%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y"]
+        candidates += [
+            "%B %d %Y", "%b %d %Y", "%B %d %y", "%b %d %y",
+            "%d %B %Y", "%d %b %Y", "%d %B %y", "%d %b %y",
+            "%B %d, %Y", "%b %d, %Y", "%B %d, %y", "%b %d, %y",
+        ]
 
     for fmt in candidates:
         try:
-            return datetime.strptime(raw, fmt)
+            parsed = datetime.strptime(raw, fmt)
+            # strptime %y uses 1969-2068 window; clamp odd century for receipts.
+            if parsed.year < 1990 and len(raw) <= 12:
+                parsed = parsed.replace(year=parsed.year + 100)
+            return parsed
         except ValueError:
             continue
     return None
 
 
+def _date_candidate_score(
+    parsed: datetime,
+    *,
+    labeled: bool,
+    headerish: bool,
+    now: datetime,
+) -> tuple:
+    """Higher is better. Prefer labeled / header dates and nearer-to-today values."""
+    age_days = abs((now.date() - parsed.date()).days)
+    return (
+        3 if labeled else 0,
+        1 if headerish else 0,
+        -age_days,
+        -parsed.toordinal(),
+    )
+
+
+def _iter_date_raws(text: str) -> list[tuple[str, bool, bool]]:
+    """Yield (raw, labeled, headerish) date tokens from receipt text."""
+    if not text:
+        return []
+    repaired = _repair_ocr_digits(text)
+    # Soft-normalize separators before regex so spaced OCR still matches.
+    soft = re.sub(r"(\d)\s*([/.\-|])\s*(\d)", r"\1\2\3", repaired)
+    soft = re.sub(r"(\d)\s*([/.\-|])\s*(\d)", r"\1\2\3", soft)
+
+    lines = [ln.strip() for ln in soft.splitlines() if ln.strip()]
+    found: list[tuple[str, bool, bool]] = []
+    seen: set[str] = set()
+
+    def add(raw: str, labeled: bool, headerish: bool) -> None:
+        key = raw.strip().lower()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        found.append((raw, labeled, headerish))
+
+    # Pass 1: tokens after an explicit date label (highest signal).
+    for match in _DATE_LABEL_RE.finditer(soft):
+        window = soft[match.end(): match.end() + 40]
+        for pattern in _DATE_PATTERNS:
+            hit = re.search(pattern, window, flags=re.IGNORECASE)
+            if hit:
+                add(hit.group(1), True, True)
+                break
+
+    # Pass 2: every pattern across the receipt; mark early lines as headerish.
+    header_blob = "\n".join(lines[:16])
+    for pattern in _DATE_PATTERNS:
+        for raw in re.findall(pattern, soft, flags=re.IGNORECASE):
+            headerish = raw in header_blob or bool(re.search(re.escape(raw), header_blob, re.I))
+            add(raw, False, headerish)
+
+    return found
+
+
 def _find_date(text: str) -> tuple[str | None, bool]:
     now = datetime.now()
     earliest_sane = now - timedelta(days=365 * 5)
-    latest_sane = now + timedelta(days=1)  # allow for timezone edge cases
+    latest_sane = now + timedelta(days=2)  # timezone / clock skew on registers
     day_first = _prefers_day_first(text)
 
-    for pattern, _ in _DATE_PATTERNS:
-        for raw in re.findall(pattern, text, flags=re.IGNORECASE):
-            parsed = _try_parse_date(raw, day_first=day_first)
-            if parsed and earliest_sane <= parsed <= latest_sane:
-                return parsed.strftime("%Y-%m-%d"), True
+    best: tuple | None = None
+    best_parsed: datetime | None = None
+    for raw, labeled, headerish in _iter_date_raws(text):
+        parsed = _try_parse_date(raw, day_first=day_first)
+        if not parsed:
+            # If locale guess failed, try the opposite order before giving up.
+            parsed = _try_parse_date(raw, day_first=not day_first)
+        if not parsed or not (earliest_sane <= parsed <= latest_sane):
+            continue
+        score = _date_candidate_score(parsed, labeled=labeled, headerish=headerish, now=now)
+        if best is None or score > best:
+            best = score
+            best_parsed = parsed
 
-    return None, False
+    if best_parsed is None:
+        return None, False
+    return best_parsed.strftime("%Y-%m-%d"), True
 
 
 def _drop_child_promo_lines(lines: list[str], lefts: list[int] | None) -> list[str]:

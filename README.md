@@ -1,6 +1,6 @@
 ﻿# ShareSquad
 
-ShareSquad is a multi-user expense splitter and personal spending tracker. People can share a group (trips, apartments, friends), scan receipts, split bills in mixed currencies, settle up, and keep a separate personal ledger.
+ShareSquad is a multi-user expense splitter and personal spending tracker. People can share a group (trips, apartments, friends), scan receipts, split bills in mixed currencies, settle up on Friends, and keep a separate personal ledger.
 
 This folder is the web app. It is not the older desktop/local splitter. Locally it runs on **port 8001**. Production uses Docker, Postgres, and Caddy on Oracle Always Free.
 
@@ -15,32 +15,34 @@ How to run it, deploy it, and update it without losing data: **[OPERATIONS.md](O
 |------|----------------|
 | Accounts | Register, sign in, JWT session in the browser |
 | Shared groups | Create a group with a base currency, invite by email or link, open/leave/delete |
+| Ledger | Expenses list newest-first by **save time**; each row still shows the **receipt/bill date** |
+| Month rules | An expense belongs to the **calendar month it was saved**. Older receipt dates saved this month count toward this month’s balances and appear under **Added late** in digests |
 | Receipts | Photo upload → wrinkle-aware local OCR first; optional vision provider only if OCR is unsure **and** a key is set |
 | Splits | Equal, percent, exact, or shares; payer and participants per expense |
-| Money | Each expense can be USD, INR, CAD, EUR, and more; settle the month in another currency |
-| Balances | Who owes whom, record a payment, recipient confirmation, and live refresh in a group |
-| Group activity | A mobile-friendly activity feed, optional expense notes, and in-app notifications for expense and payment changes |
-| Insights & search | Search/filter the ledger by person, category, or your involvement; review category totals and largest expenses |
-| Reports | Monthly PDF with receipts (download; email if SMTP is configured) |
-| Personal tracker | Your own monthly expenses, same receipt scan, category totals, PDF export |
+| Money | Each expense can be USD, INR, CAD, EUR, and more; change settlement currency from **PDF Reports** when you need a converted report |
+| Balances | Who pays whom for bills saved this month (including late bills). **Record payments on Friends** — group Balances stay in sync |
+| Friends | One-to-one private bills plus consolidated group Who-pays-whom; partial/full payments and past payment history |
+| Group activity | Activity feed, optional expense notes, and in-app notifications |
+| Insights & search | Filter the ledger by month, person, or search; review category totals |
+| Reports | PDF / monthly digest with receipts (download; email if SMTP is configured). Digests do **not** lock the month |
+| Personal tracker | Your own expenses, same receipt scan, category totals, PDF export |
 | Settings | Preferred currency, compact list, your own vision API key, optional per-group override |
 
 ## Demo sandbox
 
-The landing-page **Try the full demo** button creates a private, writable sandbox from an internal template. The template itself is never exposed through a public account or URL.
+The landing-page **Try the full demo** button creates a private, writable sandbox from an internal template keyed to `APP_VERSION`. The template itself is never exposed through a public account or URL.
 
-- Every visitor receives their own accounts, group, receipts, expenses, friend balances, and API-key settings area.
-- Visitors can add, edit, and delete bills; create groups; test receipt scanning; try settlement; and configure their own AI provider key.
-- **Reset demo** discards only that visitor’s sandbox and opens a clean replacement. Sandboxes expire automatically after two hours and are removed by a scheduled cleanup job.
-- Demo balances remain separated by currency throughout Groups and Friends. The app never silently adds INR, USD, or other currencies together.
-
-The demo banner explains that it covers most product workflows while some production details may differ. A direct sign-up link is always available for a persistent account.
+- The sandbox is the **same current product** regular users get — sample roommate group, late bills, mixed currency, Friends payment history, personal expenses, and notifications.
+- Visitors can add, edit, and delete bills; create groups; test receipt scanning; record payments on Friends; and configure their own AI provider key.
+- **Reset demo** discards only that visitor’s sandbox and opens a clean copy of the current template. Sandboxes expire after two hours.
+- Demo balances stay separated by currency. The app never silently adds INR, USD, or other currencies together.
 
 ## Group history and corrections
 
-- Removing a member removes their involvement from active periods, while completed settled reports and history remain preserved.
-- Once a group payment is marked paid, ordinary expense edits are locked. A group owner can make a correction; confirmed payments remain applied, balances are recalculated, and affected members receive an in-app notification.
-- Expense notes are optional and intended for clarifications, not required bookkeeping.
+- Removing a member removes their involvement from active periods; completed reports and history stay preserved.
+- Months are **not** auto-locked at month end. Digests are snapshots only. Generating a PDF does not settle/lock the month. Legacy SETTLED months unlock when someone saves a new expense.
+- Once a group payment is applied via Friends, ordinary expense edits that affect settled debt stay carefully handled; owners can correct, and members get notified.
+- Expense notes are optional clarifications, not required bookkeeping.
 
 ## Receipt reading (important)
 
@@ -68,9 +70,17 @@ Open **http://localhost:8001**
 
 Local data is **SQLite** on disk. Cloud data is **Postgres**. They are not the same database.
 
+## Tests
+
+```powershell
+python -m pytest test_full_regression.py -v -W default
+# or everything:
+.\scripts\run_full_tests.ps1
+```
+
 ## Production in one sentence
 
-Oracle VM runs `app` + Postgres + Caddy. Domain DNS is on Cloudflare (**DNS only / grey cloud** for ShareSquad so Let’s Encrypt works). Updates: push to GitHub `main`, then on the VM `git fetch` + `git reset --hard origin/main` + rebuild **only the app** — never `docker compose down -v`.
+Oracle VM runs `app` + Postgres + Caddy. Domain DNS is on Cloudflare (**DNS only / grey cloud** for ShareSquad so Let’s Encrypt works). Updates: push to GitHub `main`, then on the VM `git fetch` + `git reset --hard origin/main` + rebuild **only the app** — never `docker compose down -v`. Confirm `/api/health` `"version"` matches `APP_VERSION` in `app/config.py`.
 
 ## Stack
 
@@ -85,6 +95,7 @@ Expense Splitter Web/
 ├── app/                  # API + static UI
 │   ├── main.py           # routes, startup schema updates
 │   ├── models.py
+│   ├── demo_service.py   # versioned demo template + sandboxes
 │   ├── ocr_extractor.py  # local receipt OCR
 │   ├── vlm.py            # OCR then optional API
 │   └── static/           # HTML / JS / CSS

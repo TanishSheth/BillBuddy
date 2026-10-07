@@ -1,8 +1,14 @@
-"""Private template and expiring sandbox lifecycle for the public product demo."""
+"""Private template and expiring sandbox lifecycle for the public product demo.
+
+Sandbox data mirrors the live product rules: expenses belong to the month they
+were saved, older receipt dates show as late bills, Friends is where payments
+are recorded, and months stay editable (digests only — no auto-SETTLED lock).
+"""
 from __future__ import annotations
 
-import secrets
+import json
 import os
+import secrets
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -19,13 +25,15 @@ from .split_logic import calculate_splits
 TEMPLATE_VERSION = f"sharesquad-product-demo-{APP_VERSION}"
 SANDBOX_TTL_HOURS = 2
 _PEOPLE = ("Alex", "Jordan", "Casey", "Morgan", "Riley")
+# store, total, category, payer, participants, bill_date_offset_days, currency, fx_to_group
 _EXPENSES = (
-    ("Costco run", 418.70, "Groceries", 4, (0, 1, 2, 3, 4)),
-    ("Uber to airport", 54.00, "Travel", 0, (0, 1, 2)),
-    ("Dinner at Olive Garden", 96.30, "Food", 3, (0, 2, 3)),
-    ("Internet bill", 80.00, "Utilities", 1, (0, 1, 2, 4)),
-    ("Movie tickets", 32.00, "Fun", 2, (2, 3)),
-    ("Airbnb cleaning fee", 125.00, "Travel", 4, (0, 1, 2, 3, 4)),
+    ("Costco run", 418.70, "Groceries", 4, (0, 1, 2, 3, 4), 0, "USD", 1.0),
+    ("Uber to airport", 54.00, "Travel", 0, (0, 1, 2), -28, "USD", 1.0),  # late bill
+    ("Dinner at Olive Garden", 96.30, "Food", 3, (0, 2, 3), -2, "USD", 1.0),
+    ("Internet bill", 80.00, "Utilities", 1, (0, 1, 2, 4), -5, "USD", 1.0),
+    ("Movie tickets", 32.00, "Fun", 2, (2, 3), -1, "USD", 1.0),
+    ("Airbnb cleaning fee", 125.00, "Travel", 4, (0, 1, 2, 3, 4), -3, "USD", 1.0),
+    ("Delhi street food", 2400.00, "Food", 0, (0, 1), -20, "INR", 0.012),  # late + FX
 )
 
 
@@ -51,23 +59,30 @@ def _add_expense(
     category: str,
     payer_index: int,
     participant_indexes: tuple[int, ...],
-) -> None:
+    bill_date: date,
+    currency: str = "USD",
+    fx_rate_to_group: float = 1.0,
+    created_at: datetime | None = None,
+) -> models.Expense:
     participants = [members[index] for index in participant_indexes]
     shares = calculate_splits("EQUAL", total, [member.id for member in participants])
     expense = models.Expense(
         period_id=period.id,
         store_name=store,
-        bill_date=date.today(),
+        bill_date=bill_date,
         total_amount=Decimal(str(total)),
-        currency="USD",
+        currency=currency,
         category=category,
         split_type="EQUAL",
+        fx_rate_to_group=Decimal(str(fx_rate_to_group)),
         payer_member_id=members[payer_index].id,
+        created_at=created_at or datetime.utcnow(),
     )
     db.add(expense)
     db.flush()
     for member_id, amount in shares.items():
         db.add(models.ExpenseSplit(expense_id=expense.id, member_id=member_id, share_amount=amount, split_value=1))
+    return expense
 
 
 def ensure_template(db: Session) -> models.DemoTemplate:
@@ -99,14 +114,25 @@ def ensure_template(db: Session) -> models.DemoTemplate:
         db.add(member)
         members.append(member)
     db.flush()
+    # One ACTIVE month = month saved. Older receipt dates live here as late bills.
     period = models.MonthlyPeriod(group_id=group.id, period_key=date.today().strftime("%Y-%m"), status="ACTIVE")
     db.add(period)
     db.flush()
-    for store, total, category, payer_index, participant_indexes in _EXPENSES:
+    now = datetime.utcnow()
+    for index, (store, total, category, payer_index, participant_indexes, day_offset, currency, fx) in enumerate(_EXPENSES):
         _add_expense(
             db, period, members, store=store, total=total, category=category,
             payer_index=payer_index, participant_indexes=participant_indexes,
+            bill_date=date.today() + timedelta(days=day_offset),
+            currency=currency, fx_rate_to_group=fx,
+            # Newest saves first in the ledger (created_at desc).
+            created_at=now - timedelta(hours=len(_EXPENSES) - index),
         )
+    db.add(models.GroupActivity(
+        group_id=group.id, actor_account_id=accounts[0].id,
+        event_type="expense_added", summary="Alex added Costco run",
+        entity_type="expense",
+    ))
     template = models.DemoTemplate(version=TEMPLATE_VERSION, group_id=group.id)
     db.add(template)
     db.commit()
@@ -147,12 +173,13 @@ def _copy_template_group(db: Session, template: models.DemoTemplate, sandbox_id:
     db.flush()
     period_map: dict[int, models.MonthlyPeriod] = {}
     for source_period in source_group.periods:
+        # Always ACTIVE — demo matches live product (no auto month-end SETTLED).
         period = models.MonthlyPeriod(group_id=group.id, period_key=source_period.period_key, status="ACTIVE")
         db.add(period)
         db.flush()
         period_map[source_period.id] = period
     for source_period in source_group.periods:
-        for source_expense in source_period.expenses:
+        for source_expense in sorted(source_period.expenses, key=lambda row: row.created_at or datetime.min):
             expense = models.Expense(
                 period_id=period_map[source_period.id].id,
                 store_name=source_expense.store_name,
@@ -163,6 +190,7 @@ def _copy_template_group(db: Session, template: models.DemoTemplate, sandbox_id:
                 split_type=source_expense.split_type,
                 fx_rate_to_group=source_expense.fx_rate_to_group,
                 payer_member_id=member_map[source_expense.payer_member_id].id,
+                created_at=source_expense.created_at or datetime.utcnow(),
             )
             db.add(expense)
             db.flush()
@@ -173,10 +201,20 @@ def _copy_template_group(db: Session, template: models.DemoTemplate, sandbox_id:
                     share_amount=source_split.share_amount,
                     split_value=source_split.split_value,
                 ))
+    db.add(models.GroupActivity(
+        group_id=group.id, actor_account_id=owner.id,
+        event_type="expense_added", summary="Alex added Costco run",
+        entity_type="expense",
+    ))
     db.add_all([
         models.PersonalExpense(account_id=owner.id, store_name="Whole Foods", bill_date=date.today(), total_amount=Decimal("64.20"), currency="USD", category="Groceries", notes="Demo personal expense"),
-        models.PersonalExpense(account_id=owner.id, store_name="Metro pass", bill_date=date.today(), total_amount=Decimal("28.00"), currency="USD", category="Travel", notes="Demo personal expense"),
+        models.PersonalExpense(account_id=owner.id, store_name="Metro pass", bill_date=date.today() - timedelta(days=12), total_amount=Decimal("28.00"), currency="USD", category="Travel", notes="Saved this month; older receipt date"),
     ])
+    db.add(models.Notification(
+        account_id=owner.id, group_id=group.id,
+        message="Welcome to your ShareSquad demo — same features as a real account, with sample data.",
+        link=f"/group.html?group={group.id}&tab=expenses",
+    ))
     if len(cloned_accounts) > 1:
         friend = cloned_accounts[1]
         one, two = sorted((owner.id, friend.id))
@@ -188,9 +226,25 @@ def _copy_template_group(db: Session, template: models.DemoTemplate, sandbox_id:
         )
         db.add(split)
         db.flush()
-        db.add(models.QuickSplitParticipant(
+        participant = models.QuickSplitParticipant(
             quick_split_id=split.id, email=friend.email, account_id=friend.id,
             display_name=friend.display_name, share_amount=Decimal("9.20"), split_value=1,
+            paid_amount=Decimal("5.00"), payment_status="PARTIAL",
+            payment_marked_at=datetime.utcnow() - timedelta(days=1),
+        )
+        db.add(participant)
+        month_key = date.today().strftime("%Y-%m")
+        # Past payment visible on Friends → payment history (same flow as regular users).
+        db.add(models.PairPayment(
+            account_one_id=one, account_two_id=two,
+            payer_account_id=friend.id, recipient_account_id=owner.id,
+            amount=Decimal("5.00"), currency="USD", status="CONFIRMED",
+            reported_by_account_id=owner.id,
+            allocations_json=json.dumps([{
+                "kind": "DIRECT", "amount": 5.0, "month_key": month_key, "payment_kind": "PARTIAL",
+            }]),
+            confirmed_at=datetime.utcnow() - timedelta(days=1),
+            created_at=datetime.utcnow() - timedelta(days=1),
         ))
     return owner, group, cloned_accounts
 
@@ -271,6 +325,14 @@ def purge_sandbox(db: Session, sandbox: models.DemoSandbox) -> None:
         if quick_ids:
             db.query(models.QuickSplitParticipant).filter(models.QuickSplitParticipant.quick_split_id.in_(quick_ids)).delete(synchronize_session=False)
             db.query(models.QuickSplit).filter(models.QuickSplit.id.in_(quick_ids)).delete(synchronize_session=False)
+        db.query(models.PairPayment).filter(
+            (models.PairPayment.account_one_id.in_(account_ids)) | (models.PairPayment.account_two_id.in_(account_ids))
+        ).delete(synchronize_session=False)
+        db.query(models.FriendMonthlySettlement).filter(
+            (models.FriendMonthlySettlement.account_one_id.in_(account_ids))
+            | (models.FriendMonthlySettlement.account_two_id.in_(account_ids))
+        ).delete(synchronize_session=False)
+        db.query(models.FriendInvite).filter(models.FriendInvite.inviter_account_id.in_(account_ids)).delete(synchronize_session=False)
         db.query(models.Notification).filter(models.Notification.account_id.in_(account_ids)).delete(synchronize_session=False)
         db.query(models.FriendConnection).filter(
             (models.FriendConnection.account_one_id.in_(account_ids)) | (models.FriendConnection.account_two_id.in_(account_ids))
@@ -278,6 +340,7 @@ def purge_sandbox(db: Session, sandbox: models.DemoSandbox) -> None:
         db.query(models.PersonalExpense).filter(models.PersonalExpense.account_id.in_(account_ids)).delete(synchronize_session=False)
         db.query(models.AccountVendor).filter(models.AccountVendor.account_id.in_(account_ids)).delete(synchronize_session=False)
         db.query(models.AccountSettings).filter(models.AccountSettings.account_id.in_(account_ids)).delete(synchronize_session=False)
+        db.query(models.AccountMonthlyDigest).filter(models.AccountMonthlyDigest.account_id.in_(account_ids)).delete(synchronize_session=False)
     db.query(models.DemoSandboxAccount).filter_by(sandbox_id=sandbox.id).delete(synchronize_session=False)
     db.delete(sandbox)
     if account_ids:

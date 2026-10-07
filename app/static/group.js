@@ -7,6 +7,7 @@ const state = {
   members: [],
   periods: [],
   currentPeriod: null,
+  insightPeriod: null,
   currentUploadId: null,
   editingExpenseId: null,
   splitType: "EQUAL", // EQUAL | PERCENTAGE | EXACT | SHARES
@@ -50,14 +51,16 @@ function savedExpenseFilters() {
 function saveExpenseFilters() {
   const category = $("#groupCategoryFilter")?.value || "All";
   const memberId = $("#expenseMemberFilter")?.value || "";
+  const month = $("#expenseMonthFilter")?.value || "";
   const onlyMyExpenses = Boolean($("#onlyMyExpenses")?.checked);
-  localStorage.setItem(expenseFilterStorageKey(), JSON.stringify({ category, memberId, onlyMyExpenses }));
+  localStorage.setItem(expenseFilterStorageKey(), JSON.stringify({ category, memberId, month, onlyMyExpenses }));
 }
 
 function restoreExpenseFilters() {
   const saved = savedExpenseFilters();
   const category = $("#groupCategoryFilter");
   const member = $("#expenseMemberFilter");
+  const month = $("#expenseMonthFilter");
   const onlyMine = $("#onlyMyExpenses");
   if (category?.querySelector(`option[value="${CSS.escape(saved.category || "All")}"]`)) {
     category.value = saved.category || "All";
@@ -65,6 +68,11 @@ function restoreExpenseFilters() {
   }
   if (member?.querySelector(`option[value="${CSS.escape(String(saved.memberId || ""))}"]`)) {
     member.value = String(saved.memberId || "");
+  }
+  if (month) {
+    if (!saved.month || month.querySelector(`option[value="${CSS.escape(String(saved.month))}"]`)) {
+      month.value = String(saved.month || "");
+    }
   }
   if (onlyMine) onlyMine.checked = typeof saved.onlyMyExpenses === "boolean" ? saved.onlyMyExpenses : true;
 }
@@ -91,11 +99,11 @@ function syncExpenseCurrencyUI() {
 // ---------------------------------------------------------------------------
 const GROUP_PAGE_HELP = {
   upload: "<strong>Add / Scan:</strong> Upload a receipt or enter a bill, choose who paid and who shares it, then save it to this month.",
-  expenses: "<strong>Expenses:</strong> Review this month's bills, search or filter them, and open an item to see its split and notes.",
-  balances: "<strong>Balances & settlement:</strong> Who pays whom follows who paid each bill. That pair amount plus any private friend bills make the Friend total. Individual shared expenses also show on Friends for viewing only.",
-  insights: "<strong>Insights:</strong> See this month's spending total, top categories, and largest expenses.",
+  expenses: "<strong>Expenses:</strong> Newest saves on top. The date column is the receipt date. Filter by the month you added a bill, category, member, or search.",
+  balances: "<strong>Balances & settlement:</strong> Who pays whom for bills saved in the current calendar month (including older receipt dates added late). Record payments on Friends.",
+  insights: "<strong>Insights:</strong> Pick a month to see total spending, top category, and largest bills saved that month.",
   activity: "<strong>Activity:</strong> Follow group changes, expenses, comments, and payment updates in time order.",
-  reports: "<strong>PDF Reports:</strong> Generate or download a clear monthly record of expenses, balances, and confirmed settlements.",
+  reports: "<strong>PDF Reports:</strong> Generate or download a PDF for the current calendar month, and reopen past PDFs below.",
   members: "<strong>Members:</strong> Add friends directly, send an email, or share a link. Email and link joins add members automatically. Only the owner can remove members or change group details.",
 };
 
@@ -193,7 +201,7 @@ function populateMemberFilter() {
   const select = $("#expenseMemberFilter");
   if (!select) return;
   const selected = select.value;
-  select.innerHTML = '<option value="" class="member-filter-option">All members</option>' + activeMembers().map((member) => `<option class="member-filter-option" value="${member.id}">${ShareSquad.escapeHtml(member.display_name)}</option>`).join("");
+  select.innerHTML = '<option value="" class="member-filter-option ledger-filter-option">All members</option>' + activeMembers().map((member) => `<option class="member-filter-option ledger-filter-option" value="${member.id}">${ShareSquad.escapeHtml(member.display_name)}</option>`).join("");
   select.value = selected;
 }
 
@@ -276,43 +284,77 @@ function applyDefaultSplit() {
   }
 }
 
+function periodOptionLabel(periodKey, isCurrent) {
+  const [year, month] = String(periodKey).split("-").map(Number);
+  const label = new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  return isCurrent ? `${label} · Current` : `Added in ${label}`;
+}
+
+function calendarPeriodKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function periodMonthKeys() {
+  const currentKey = calendarPeriodKey();
+  const keys = (state.periods || []).map((p) => p.period_key);
+  if (!keys.includes(currentKey)) keys.unshift(currentKey);
+  keys.sort((a, b) => String(b).localeCompare(String(a)));
+  return { currentKey, keys };
+}
+
+function fillExpenseMonthFilter() {
+  const select = $("#expenseMonthFilter");
+  if (!select) return;
+  const savedMonth = savedExpenseFilters().month;
+  const keep = select.value || (savedMonth != null ? String(savedMonth) : "");
+  const { currentKey, keys } = periodMonthKeys();
+  select.innerHTML = `<option value="" class="ledger-filter-option">All months added</option>` + keys.map((key) => {
+    const isCurrent = key === currentKey;
+    return `<option class="ledger-filter-option" value="${ShareSquad.escapeHtml(key)}">${ShareSquad.escapeHtml(periodOptionLabel(key, isCurrent))}</option>`;
+  }).join("");
+  if (keep && select.querySelector(`option[value="${CSS.escape(keep)}"]`)) {
+    select.value = keep;
+  } else {
+    select.value = "";
+  }
+}
+
+function fillInsightMonthFilter() {
+  const select = $("#insightMonthFilter");
+  if (!select) return;
+  const { currentKey, keys } = periodMonthKeys();
+  const keep = state.insightPeriod || select.value || state.currentPeriod || currentKey;
+  select.innerHTML = keys.map((key) => {
+    const isCurrent = key === currentKey;
+    return `<option class="ledger-filter-option" value="${ShareSquad.escapeHtml(key)}">${ShareSquad.escapeHtml(periodOptionLabel(key, isCurrent))}</option>`;
+  }).join("");
+  if (keep && select.querySelector(`option[value="${CSS.escape(keep)}"]`)) {
+    select.value = keep;
+  } else {
+    select.value = keys[0] || currentKey;
+  }
+  state.insightPeriod = select.value || currentKey;
+}
+
 async function loadPeriods() {
   const periods = await ShareSquad.api(`/groups/${gid()}/periods`);
   state.periods = periods;
 
-  const select = $("#periodSelect");
   const urlPeriod = new URLSearchParams(window.location.search).get("period");
   const keep = state.currentPeriod || (urlPeriod && !state._periodFromUrlApplied ? urlPeriod : null);
   if (urlPeriod) state._periodFromUrlApplied = true;
-  select.innerHTML = "";
 
+  const currentKey = calendarPeriodKey();
   if (!periods.length) {
-    const d = new Date();
-    const currentKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-    const opt = document.createElement("option");
-    opt.value = currentKey;
-    opt.textContent = `${currentKey} (Current)`;
-    select.appendChild(opt);
     state.currentPeriod = keep || currentKey;
   } else {
-    periods.forEach((p) => {
-      const opt = document.createElement("option");
-      opt.value = p.period_key;
-      opt.textContent = p.period_key;
-      select.appendChild(opt);
-    });
     const keys = periods.map((p) => p.period_key);
-    state.currentPeriod = keep && keys.includes(keep) ? keep : periods[0].period_key;
+    state.currentPeriod = keep && keys.includes(keep) ? keep : (keys.includes(currentKey) ? currentKey : periods[0].period_key);
   }
 
-  select.value = state.currentPeriod;
-  const currentLabel = $("#currentPeriodLabel");
-  if (currentLabel) {
-    const [year, month] = state.currentPeriod.split("-").map(Number);
-    const label = new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
-    currentLabel.textContent = state.currentPeriod === periods[0]?.period_key ? `Current month · ${label}` : `Viewing · ${label}`;
-  }
-  updatePeriodStatus();
+  fillExpenseMonthFilter();
+  fillInsightMonthFilter();
 }
 
 function isExpenseFormOpen() {
@@ -439,19 +481,7 @@ async function connectGroupEvents() {
 }
 
 function updatePeriodStatus() {
-  const periodRec = state.periods.find((p) => p.period_key === state.currentPeriod);
-  const badge = $("#periodStatus");
-  const reopenBtn = $("#reopenPeriodBtn");
-
-  if (periodRec && periodRec.status === "SETTLED") {
-    badge.textContent = "Settled";
-    badge.className = "status-chip status-settled";
-    reopenBtn.classList.remove("hidden");
-  } else {
-    badge.textContent = "Active";
-    badge.className = "status-chip status-active";
-    reopenBtn.classList.add("hidden");
-  }
+  // Global month picker removed; balances/insights/reports use state.currentPeriod.
 }
 
 function isCurrentPeriodSettled() {
@@ -669,13 +699,22 @@ function renderBalanceStrip(balances) {
 // Expenses Tab
 // ---------------------------------------------------------------------------
 async function loadExpenses() {
-  const filterCat = $("#groupCategoryFilter").value;
-  const params = new URLSearchParams({ period_key: state.currentPeriod });
+  const filterCat = $("#groupCategoryFilter")?.value || "All";
+  const month = $("#expenseMonthFilter")?.value || "";
+  const params = new URLSearchParams();
+  if (month) params.set("period_key", month);
   if (filterCat !== "All") params.set("category", filterCat);
   if ($("#expenseSearch")?.value.trim()) params.set("search", $("#expenseSearch").value.trim());
   if ($("#expenseMemberFilter")?.value) params.set("member_id", $("#expenseMemberFilter").value);
   if ($("#onlyMyExpenses")?.checked) params.set("involved_me", "true");
   const expenses = await ShareSquad.api(`/groups/${gid()}/expenses?${params}`);
+  // Newest saves first; bill_date is shown in the date column only.
+  expenses.sort((a, b) => {
+    const tb = new Date(b.created_at || 0).getTime();
+    const ta = new Date(a.created_at || 0).getTime();
+    if (tb !== ta) return tb - ta;
+    return Number(b.id || 0) - Number(a.id || 0);
+  });
   state.currentExpenses = expenses;
 
   const tbody = $("#expensesBody");
@@ -950,7 +989,8 @@ async function saveExpense() {
       payers,
       split_with: splitWith.length ? splitWith : null,
       split_details: splitDetails.length ? splitDetails : null,
-      period_key: state.currentPeriod,
+      // Ledger month = when saved (balances + digests). bill_date is the receipt date only.
+      period_key: calendarPeriodKey(),
     };
 
     if (state.editingExpenseId) {
@@ -985,39 +1025,12 @@ async function loadBalances() {
     ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments`),
   ]);
   renderBalanceStrip(balances);
-  const tbody = $("#balanceBody");
-  tbody.innerHTML = "";
 
   const baseCurr = groupCurrency();
   let targetCurr = null;
   let fxRate = null;
-
   balances.forEach((b) => {
     if (b.converted_currency) targetCurr = b.converted_currency;
-    const settleCurr = b.converted_currency || baseCurr;
-    const paid = b.converted_total_paid != null ? b.converted_total_paid : b.total_paid;
-    const owed = b.converted_total_share_owed != null ? b.converted_total_share_owed : b.total_share_owed;
-    const net = b.converted_net_balance != null ? b.converted_net_balance : b.net_balance;
-    const netClass = net >= 0 ? "balance-positive font-bold" : "balance-negative font-bold";
-    const plusSign = net > 0 ? "+" : "";
-
-    let origNote = "";
-    if (b.converted_currency && b.converted_currency !== baseCurr) {
-      origNote = `<div class="text-[10px] text-ink/40 font-normal">orig. ${ShareSquad.formatMoney(b.net_balance, baseCurr)}</div>`;
-    }
-
-    const tr = document.createElement("tr");
-    tr.className = "border-b border-ink/5";
-    tr.innerHTML = `
-      <td class="py-2 font-semibold text-ink">${ShareSquad.escapeHtml(b.name)}</td>
-      <td class="py-2 text-right text-ink/70">${ShareSquad.formatMoney(paid, settleCurr)}</td>
-      <td class="py-2 text-right text-ink/70">${ShareSquad.formatMoney(owed, settleCurr)}</td>
-      <td class="py-2 text-right ${netClass}">
-        ${plusSign}${ShareSquad.formatMoney(net, settleCurr)}
-        ${origNote}
-      </td>
-    `;
-    tbody.appendChild(tr);
   });
 
   const setList = $("#settlementList");
@@ -1050,44 +1063,32 @@ async function loadBalances() {
   }
 
   const banner = $("#conversionBanner");
-  const settleSelect = $("#settleCurrencySelect");
-  const shownCurr = targetCurr || baseCurr;
-  if (settleSelect) {
-    state.settleSelectQuiet = true;
-    ShareSquad.fillCurrencySelect(settleSelect, shownCurr);
-    state.settleSelectQuiet = false;
-  }
-
   if (targetCurr && targetCurr !== baseCurr) {
-    banner.classList.remove("hidden");
+    banner?.classList.remove("hidden");
     const rateLabel = fxRate != null ? ` · 1 ${baseCurr} = ${Number(fxRate).toFixed(4)} ${targetCurr}` : "";
-    $("#conversionBannerText").innerHTML = `Settling in <strong>${targetCurr}</strong>${rateLabel}. USD/INR/other receipts convert into ${targetCurr} once.`;
+    const bannerText = $("#conversionBannerText");
+    if (bannerText) {
+      bannerText.innerHTML = `Settling in <strong>${targetCurr}</strong>${rateLabel}. USD/INR/other receipts convert into ${targetCurr} once.`;
+    }
     lucide.createIcons();
   } else {
-    banner.classList.add("hidden");
+    banner?.classList.add("hidden");
   }
 
-  // Keep payment history wiring from previous implementation.
   await loadPaymentHistory(payments);
 }
 
-async function loadPaymentHistory(existingPayments = null) {
+async function loadPaymentHistory(_existingPayments = null) {
   const list = $("#paymentHistory");
   if (!list) return;
-  try {
-    const payments = existingPayments || await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments`);
-    const paymentOnlyNotice = isCurrentPeriodSettled()
-      ? '<p class="text-[11px] font-mono text-ink/55 mb-3">This period is settled. The owner can still correct expenses; recorded payments stay applied and any overpay becomes balance credit.</p>'
-      : "";
-    const pendingNotice = $("#paymentPendingNotice");
-    if (pendingNotice) {
-      pendingNotice.classList.add("hidden");
-      pendingNotice.textContent = "";
-    }
-    if (!payments.length) { list.innerHTML = ""; return; }
-    const members = new Map(state.members.map((member) => [Number(member.id), member.display_name]));
-    list.innerHTML = paymentOnlyNotice + `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/45">Payment history</p>` + payments.map((payment) => `<div class="p-2 rounded bg-ink/5 text-xs font-mono flex flex-wrap items-center justify-between gap-2"><span>${ShareSquad.escapeHtml(members.get(payment.payer_member_id) || "Member")} paid ${ShareSquad.escapeHtml(members.get(payment.recipient_member_id) || "Member")} ${ShareSquad.formatMoney(payment.amount, payment.currency)}</span><span class="font-bold ${payment.status === "CONFIRMED" || payment.status === "PAID" ? "text-emerald-700" : "text-amber-700"}">${payment.status === "PAID" ? "RECORDED" : payment.status}</span></div>`).join("");
-  } catch (_) { list.innerHTML = ""; }
+  const pendingNotice = $("#paymentPendingNotice");
+  if (pendingNotice) {
+    pendingNotice.classList.add("hidden");
+    pendingNotice.textContent = "";
+  }
+  list.innerHTML = isCurrentPeriodSettled()
+    ? '<p class="text-[11px] font-mono text-ink/55">This month was locked earlier. The owner can unlock it to edit; recorded payments stay applied.</p>'
+    : "";
 }
 
 async function applySettlementCurrency(code, customRate = null) {
@@ -1113,7 +1114,7 @@ async function openCurrencyModal() {
 
   const baseCurr = groupCurrency();
   const periodRec = state.periods.find((p) => p.period_key === state.currentPeriod);
-  const current = $("#settleCurrencySelect")?.value || periodRec?.target_currency || baseCurr;
+  const current = periodRec?.target_currency || baseCurr;
   ShareSquad.fillCurrencySelect($("#targetCurrencySelect"), current);
   $("#ratePrefix").textContent = `1 ${baseCurr} =`;
   $("#rateSuffix").textContent = $("#targetCurrencySelect").value;
@@ -1173,15 +1174,18 @@ async function loadActivity() {
 async function loadInsights() {
   const root = $("#insightsContent");
   if (!root) return;
+  fillInsightMonthFilter();
+  const periodKey = state.insightPeriod || state.currentPeriod || calendarPeriodKey();
   root.innerHTML = '<div class="bb-card text-sm font-mono text-ink/45">Loading insights...</div>';
   try {
-    const data = await ShareSquad.api(`/groups/${gid()}/dashboard?period_key=${state.currentPeriod}`);
+    const data = await ShareSquad.api(`/groups/${gid()}/dashboard?period_key=${encodeURIComponent(periodKey)}`);
     const categoryRows = Object.entries(data.category_totals || {}).sort((a, b) => b[1] - a[1]);
     const top = data.largest_expenses || [];
     const chart = ShareSquad.renderCategoryPieChart(categoryRows, data.total_spent, data.currency);
+    const monthLabel = periodOptionLabel(periodKey, periodKey === calendarPeriodKey());
     root.innerHTML = `
-      <div class="insight-kpis"><article class="bb-card"><p class="insight-label">Total spending</p><p class="insight-value">${ShareSquad.formatMoney(data.total_spent, data.currency)}</p><p class="text-xs text-ink/45">${state.currentPeriod}</p></article><article class="bb-card"><p class="insight-label">Top category</p><p class="insight-value text-lg"><span ${ShareSquad.categoryMark(categoryRows[0]?.[0] || "General")}>${ShareSquad.escapeHtml(categoryRows[0]?.[0] || "No expenses")}</span></p><p class="text-xs text-ink/45">${categoryRows[0] ? ShareSquad.formatMoney(categoryRows[0][1], data.currency) : ""}</p></article></div>
-      <div class="grid md:grid-cols-2 gap-4"><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">By category</h3>${chart}</article><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Largest expenses</h3>${top.length ? top.map((expense) => `<div class="insight-row cat-row"><span class="inline-flex items-center gap-2 min-w-0"><span ${ShareSquad.categoryMark(expense.category || "General")}>${ShareSquad.escapeHtml(expense.category || "General")}</span><span class="truncate">${ShareSquad.escapeHtml(expense.store_name)}</span></span><strong>${ShareSquad.formatMoney(expense.total_amount, expense.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses in this period.</p>'}</article></div>`;
+      <div class="insight-kpis"><article class="bb-card"><p class="insight-label">Total spending</p><p class="insight-value">${ShareSquad.formatMoney(data.total_spent, data.currency)}</p><p class="text-xs text-ink/45">${ShareSquad.escapeHtml(monthLabel)}</p></article><article class="bb-card"><p class="insight-label">Top category</p><p class="insight-value text-lg"><span ${ShareSquad.categoryMark(categoryRows[0]?.[0] || "General")}>${ShareSquad.escapeHtml(categoryRows[0]?.[0] || "No expenses")}</span></p><p class="text-xs text-ink/45">${categoryRows[0] ? ShareSquad.formatMoney(categoryRows[0][1], data.currency) : ""}</p></article></div>
+      <div class="grid md:grid-cols-2 gap-4"><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">By category</h3>${chart}</article><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Largest expenses</h3>${top.length ? top.map((expense) => `<div class="insight-row cat-row"><span class="inline-flex items-center gap-2 min-w-0"><span ${ShareSquad.categoryMark(expense.category || "General")}>${ShareSquad.escapeHtml(expense.category || "General")}</span><span class="truncate">${ShareSquad.escapeHtml(expense.store_name)}</span></span><strong>${ShareSquad.formatMoney(expense.total_amount, expense.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses saved in this month.</p>'}</article></div>`;
   } catch (err) { root.innerHTML = `<div class="bb-card balance-negative">${ShareSquad.escapeHtml(err.message)}</div>`; }
 }
 
@@ -1253,19 +1257,20 @@ async function loadReports() {
   const list = $("#reportsList");
   list.innerHTML = "";
 
-  const settled = periods.filter((p) => p.pdf_filename);
-  if (!settled.length) {
+  const withPdf = periods.filter((p) => p.pdf_filename);
+  if (!withPdf.length) {
     list.innerHTML = `<p class="py-4 text-xs text-muted font-mono italic">No archived PDF reports yet for this group.</p>`;
     return;
   }
 
-  settled.forEach((p) => {
+  withPdf.forEach((p) => {
     const div = document.createElement("div");
     div.className = "py-3 flex items-center justify-between text-xs font-mono";
+    const when = p.settled_at ? `Generated ${ShareSquad.formatDate(p.settled_at)}` : "PDF ready";
     div.innerHTML = `
       <div>
         <div class="font-bold text-ink">${ShareSquad.escapeHtml(p.pdf_filename)}</div>
-        <div class="text-[10px] text-muted mt-0.5">Period: ${p.period_key} &bull; Settled on ${ShareSquad.formatDate(p.settled_at)}</div>
+        <div class="text-[10px] text-muted mt-0.5">Month: ${p.period_key} &bull; ${when}</div>
       </div>
       <button type="button" class="download-report bb-btn-secondary !py-1 !px-2.5 text-[11px] flex items-center gap-1" data-filename="${encodeURIComponent(p.pdf_filename)}">
         <i data-lucide="download" class="w-3.5 h-3.5 text-brand"></i> Download PDF
@@ -1307,11 +1312,6 @@ async function generateReport() {
     msg.textContent = `Report generated: ${res.filename}`;
     msg.className = "text-xs mt-3 font-mono balance-positive font-bold";
     ShareSquad.showToast("Monthly PDF report generated!", "success");
-    // If the just-settled month is in the past, move the workspace to the
-    // newly opened calendar period instead of leaving the user on history.
-    const now = new Date();
-    const currentKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    if (state.currentPeriod < currentKey) state.currentPeriod = currentKey;
     await loadPeriods();
     await loadReports();
     try {
@@ -1509,47 +1509,6 @@ async function handleReceiptUpload(file) {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab));
   });
 
-  // Period select
-  $("#periodSelect").addEventListener("change", (e) => {
-    state.currentPeriod = e.target.value;
-    updatePeriodStatus();
-    loadExpenses();
-    loadBalances();
-  });
-
-  $("#openPeriodHistoryBtn").addEventListener("click", () => {
-    const entries = (state.periods || []).map((period) => {
-      const [year, month] = period.period_key.split("-").map(Number);
-      const label = new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
-      return `<button type="button" class="period-history-choice bb-btn-secondary w-full justify-between !py-2" data-period="${period.period_key}"><span>${label}</span><span class="text-[10px] uppercase text-ink/55">${period.status === "SETTLED" ? "Settled" : "Active"}</span></button>`;
-    }).join("") || '<p class="text-sm text-ink/60">No month history yet.</p>';
-    $("#periodHistoryList").innerHTML = entries;
-    $("#periodHistoryModal").classList.remove("hidden");
-    $$(".period-history-choice").forEach((button) => button.addEventListener("click", () => {
-      state.currentPeriod = button.dataset.period;
-      $("#periodSelect").value = state.currentPeriod;
-      updatePeriodStatus();
-      loadExpenses(); loadBalances(); loadReports();
-      $("#periodHistoryModal").classList.add("hidden");
-    }));
-  });
-  $("#closePeriodHistoryBtn").addEventListener("click", () => $("#periodHistoryModal").classList.add("hidden"));
-  $("#periodHistoryModal").addEventListener("click", (event) => {
-    if (event.target === $("#periodHistoryModal")) $("#periodHistoryModal").classList.add("hidden");
-  });
-
-  // Reopen period
-  $("#reopenPeriodBtn").addEventListener("click", async () => {
-    if (!await ShareSquad.confirmDialog({ title: `Re-open ${state.currentPeriod}?`, message: "Members can edit this period again and balances may change.", confirmLabel: "Re-open period", danger: false })) return;
-    try {
-      await ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/reopen`, { method: "POST" });
-      ShareSquad.showToast("Period re-opened for editing", "info");
-      await loadPeriods();
-    } catch (err) {
-      ShareSquad.showToast(err.message, "error");
-    }
-  });
-
   // Split type buttons
   $$("#splitTypeSelector .split-type-pill").forEach((btn) => {
     btn.addEventListener("click", () => setSplitType(btn.dataset.type));
@@ -1681,6 +1640,11 @@ async function handleReceiptUpload(file) {
 
   // Category filter on expenses
   $("#groupCategoryFilter").addEventListener("change", () => { saveExpenseFilters(); loadExpenses(); });
+  $("#expenseMonthFilter")?.addEventListener("change", () => { saveExpenseFilters(); loadExpenses(); });
+  $("#insightMonthFilter")?.addEventListener("change", () => {
+    state.insightPeriod = $("#insightMonthFilter").value || calendarPeriodKey();
+    loadInsights();
+  });
   $("#expenseMemberFilter")?.addEventListener("change", () => { saveExpenseFilters(); loadExpenses(); });
   $("#onlyMyExpenses")?.addEventListener("change", () => { saveExpenseFilters(); loadExpenses(); });
   let searchDelay;
@@ -1696,7 +1660,7 @@ async function handleReceiptUpload(file) {
   $("#commentForm")?.addEventListener("submit", submitComment);
 
   // Currency auto-conversion
-  $("#convertCurrencyBtn").addEventListener("click", openCurrencyModal);
+  $("#convertCurrencyBtn")?.addEventListener("click", openCurrencyModal);
   $("#closeCurrencyModalBtn").addEventListener("click", () => $("#currencyModal").classList.add("hidden"));
   $("#cancelCurrencyBtn").addEventListener("click", () => $("#currencyModal").classList.add("hidden"));
   $("#targetCurrencySelect").addEventListener("change", () => {
@@ -1709,18 +1673,7 @@ async function handleReceiptUpload(file) {
     if (rounded != null) $("#customRateInput").value = rounded;
   });
   $("#currencyForm").addEventListener("submit", submitCurrencyConversion);
-  $("#resetConversionBtn").addEventListener("click", openCurrencyModal);
-  $("#customizeSettleRateBtn")?.addEventListener("click", openCurrencyModal);
-  $("#settleCurrencySelect")?.addEventListener("change", async (e) => {
-    if (state.settleSelectQuiet) return;
-    const code = e.target.value;
-    try {
-      await applySettlementCurrency(code);
-      ShareSquad.showToast(`Settling this period in ${code}`, "success");
-    } catch (err) {
-      ShareSquad.showToast(err.message, "error");
-    }
-  });
+  $("#resetConversionBtn")?.addEventListener("click", openCurrencyModal);
 
   // Generate Report
   $("#generateReportBtn").addEventListener("click", generateReport);
