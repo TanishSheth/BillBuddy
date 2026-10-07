@@ -25,7 +25,35 @@ try:
     import pytesseract
     TESSERACT_AVAILABLE = True
 except ImportError:  # pragma: no cover - only hit if pytesseract isn't installed
+    pytesseract = None
     TESSERACT_AVAILABLE = False
+
+
+def tesseract_status() -> dict:
+    """Report whether the Python binding and the tesseract binary are usable."""
+    import shutil
+
+    binary = shutil.which("tesseract")
+    available = False
+    version = None
+    error = None
+    if not TESSERACT_AVAILABLE:
+        error = "pytesseract is not installed"
+    elif not binary:
+        error = "tesseract binary not found on PATH"
+    else:
+        try:
+            version = str(pytesseract.get_tesseract_version())
+            available = True
+        except Exception as err:  # pragma: no cover - depends on host install
+            error = str(err)[:200]
+    return {
+        "available": available,
+        "pytesseract": TESSERACT_AVAILABLE,
+        "binary": binary,
+        "version": version,
+        "error": error,
+    }
 
 try:
     import cv2
@@ -613,8 +641,9 @@ def _variant_score(text: str, mean_conf: float, token_count: int) -> float:
 def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list[int], list[dict]]:
     """Return OCR text, confidence, line text, and token-level receipt geometry."""
     empty = ("", 0.0, [], [], [], [])
-    if not TESSERACT_AVAILABLE:
-        logger.warning("pytesseract not installed — local OCR extraction unavailable.")
+    status = tesseract_status()
+    if not status.get("available"):
+        logger.warning("Local OCR unavailable: %s", status.get("error") or "tesseract missing")
         return empty
 
     if CV2_AVAILABLE:
@@ -841,6 +870,8 @@ _TOTAL_PHRASES = _prep_phrases([
     "Check Total", "Bill Total", "Statement Total", "Amount To Pay", "Total To Pay",
     "Total Price", "Net Price", "Total Charge", "Combined Total", "Aggregate Total",
     "End Total", "Total Cost", "Total Value", "Transaction Total", "To Pay",
+    # Common OCR misreads of TOTAL on thermal paper.
+    "T0TAL", "TOIAL", "TOTAI", "TOT AL", "TOTL", "TTL",
     "sum total", "gross amount", "due balance", "amount paid", "pay this",
     "aggregate", "tally", "Net Due", "Left to Pay", "Amount Owed", "Amount Owed",
     "Rent", "Rental", "Rent Payment", "Rent Amt", "Rent Amount", "House Rent",
@@ -1020,8 +1051,41 @@ def _find_total_by_geometry(lines: list[str], line_boxes: list[dict]) -> tuple[f
     best_score, best_amount, is_total_row = max(candidates, key=lambda candidate: candidate[0])
     # A label-free candidate is a useful form suggestion, but is deliberately
     # low confidence so the VLM/manual-review fallback still runs.
-    if is_total_row or best_score >= 38.0:
+    # Bottom-right money usually scores ~40; accept from 34 so the form prefills.
+    if is_total_row or best_score >= 34.0:
         return best_amount, is_total_row
+    return None, False
+
+
+def _find_total_bottom_fallback(
+    lines: list[str], line_boxes: list[dict] | None = None,
+) -> tuple[float | None, bool]:
+    """Last resort: largest plausible amount in the bottom third of the receipt."""
+    boxes = line_boxes or []
+    if boxes:
+        page_bottom = max((box.get("bottom", 0) for box in boxes), default=1)
+        cutoff = page_bottom * 0.68
+        amounts: list[float] = []
+        for index, box in enumerate(boxes):
+            if box.get("bottom", 0) < cutoff:
+                continue
+            line = lines[index] if index < len(lines) else ""
+            if _is_register_line(line) or _classify_amount_line(line) in _IGNORE_KINDS:
+                continue
+            for amount in _parse_amounts(line):
+                if _plausible_receipt_total(amount):
+                    amounts.append(amount)
+        if amounts:
+            return max(amounts), False
+    tail_amounts: list[float] = []
+    for line in lines[-8:]:
+        if _is_register_line(line) or _classify_amount_line(line) in _IGNORE_KINDS:
+            continue
+        for amount in _parse_amounts(line):
+            if _plausible_receipt_total(amount):
+                tail_amounts.append(amount)
+    if tail_amounts:
+        return max(tail_amounts), False
     return None, False
 
 
@@ -1054,7 +1118,7 @@ def _find_total(lines: list[str], line_boxes: list[dict] | None = None) -> tuple
                     found = amounts[0]
     if found is not None:
         return found, True
-    return None, False
+    return _find_total_bottom_fallback(lines, line_boxes)
 
 
 _DATE_LABEL_RE = re.compile(
@@ -1270,14 +1334,21 @@ def _find_date(text: str) -> tuple[str | None, bool]:
     return best_parsed.strftime("%Y-%m-%d"), True
 
 
-def _drop_child_promo_lines(lines: list[str], lefts: list[int] | None) -> list[str]:
+def _drop_child_promo_lines(
+    lines: list[str],
+    lefts: list[int] | None = None,
+    boxes: list[dict] | None = None,
+) -> tuple[list[str], list[int] | None, list[dict] | None]:
     """Skip indented BOGO / You saved children and $0.00 promo rows when picking a total."""
     if not lines:
-        return lines
-    lefts = lefts or [0] * len(lines)
-    span = max(max(lefts) if lefts else 1, 1)
-    out = []
-    for line, left in zip(lines, lefts):
+        return lines, lefts, boxes
+    lefts_in = lefts or [0] * len(lines)
+    span = max(max(lefts_in) if lefts_in else 1, 1)
+    out_lines: list[str] = []
+    out_lefts: list[int] = []
+    out_boxes: list[dict] = []
+    for index, line in enumerate(lines):
+        left = lefts_in[index] if index < len(lefts_in) else 0
         if left > span * 0.22 and re.search(r"you saved|saved:|bogo|\$0\.00|\b0\.00\b", line, re.I):
             continue
         if re.search(r"you saved", line, re.I):
@@ -1285,8 +1356,11 @@ def _drop_child_promo_lines(lines: list[str], lefts: list[int] | None) -> list[s
         amounts = _parse_amounts(line)
         if amounts and all(abs(a) < 0.005 for a in amounts) and _classify_amount_line(line) not in ("total", "subtotal", "tax"):
             continue
-        out.append(line)
-    return out
+        out_lines.append(line)
+        out_lefts.append(left)
+        if boxes and index < len(boxes):
+            out_boxes.append(boxes[index])
+    return out_lines, (out_lefts if lefts is not None else None), (out_boxes or None)
 
 
 _HEADER_LINE_COUNT = 12
@@ -1294,19 +1368,242 @@ _SHORT_ALIAS_MAX = 5
 _NEAR_EXACT_RATIO = 90
 _WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z]+)?", re.I)
 
+# Real retail chains only — never product/demo names. Used to canonicalize OCR
+# header guesses (and phone/store# hard matches). Users also learn vendors via
+# AccountVendor after they save a bill.
 _KNOWN_VENDORS = [
+    # —— United States ——
     {"name": "Publix", "phones": {"5613625305"}, "stores": {"0553", "1708", "553"}, "aliases": ["publix"]},
     {"name": "Walmart", "phones": set(), "stores": set(), "aliases": ["walmart", "wal-mart"], "labels": ["great value"]},
     {"name": "Costco", "phones": set(), "stores": set(), "aliases": ["costco"], "labels": ["kirkland"]},
     {"name": "Trader Joe's", "phones": set(), "stores": set(), "aliases": ["trader joe", "trader joes"], "labels": ["trader joe"]},
     {"name": "Target", "phones": set(), "stores": set(), "aliases": ["target"], "labels": ["good & gather", "good and gather"]},
-    {"name": "Kroger", "phones": set(), "stores": set(), "aliases": ["kroger"], "labels": []},
-    {"name": "Whole Foods", "phones": set(), "stores": set(), "aliases": ["whole foods"], "labels": ["365 whole"]},
-    {"name": "Aldi", "phones": set(), "stores": set(), "aliases": ["aldi"], "labels": []},
-    {"name": "Safeway", "phones": set(), "stores": set(), "aliases": ["safeway"], "labels": []},
-    {"name": "CVS", "phones": set(), "stores": set(), "aliases": ["cvs"], "labels": []},
-    {"name": "Walgreens", "phones": set(), "stores": set(), "aliases": ["walgreens"], "labels": []},
-    {"name": "Amazon", "phones": set(), "stores": set(), "aliases": ["amazon"], "labels": []},
+    {"name": "Kroger", "phones": set(), "stores": set(), "aliases": ["kroger"]},
+    {"name": "Whole Foods", "phones": set(), "stores": set(), "aliases": ["whole foods", "whole foods market"], "labels": ["365 whole"]},
+    {"name": "Aldi", "phones": set(), "stores": set(), "aliases": ["aldi"]},
+    {"name": "Safeway", "phones": set(), "stores": set(), "aliases": ["safeway"]},
+    {"name": "CVS", "phones": set(), "stores": set(), "aliases": ["cvs", "cvs pharmacy"]},
+    {"name": "Walgreens", "phones": set(), "stores": set(), "aliases": ["walgreens"]},
+    {"name": "Amazon", "phones": set(), "stores": set(), "aliases": ["amazon", "amazon.com", "amazon fresh", "whole foods amazon"]},
+    {"name": "Starbucks", "phones": set(), "stores": set(), "aliases": ["starbucks"]},
+    {"name": "McDonald's", "phones": set(), "stores": set(), "aliases": ["mcdonalds", "mcdonald's", "mcd"]},
+    {"name": "Chipotle", "phones": set(), "stores": set(), "aliases": ["chipotle"]},
+    {"name": "Dunkin'", "phones": set(), "stores": set(), "aliases": ["dunkin", "dunkin donuts", "dunkin'"]},
+    {"name": "Home Depot", "phones": set(), "stores": set(), "aliases": ["home depot", "the home depot"]},
+    {"name": "Best Buy", "phones": set(), "stores": set(), "aliases": ["best buy", "bestbuy"]},
+    {"name": "Uber", "phones": set(), "stores": set(), "aliases": ["uber", "uber trip"]},
+    {"name": "Lyft", "phones": set(), "stores": set(), "aliases": ["lyft"]},
+    {"name": "Shell", "phones": set(), "stores": set(), "aliases": ["shell"]},
+    {"name": "Exxon", "phones": set(), "stores": set(), "aliases": ["exxon", "exxonmobil", "mobil"]},
+    {"name": "Chevron", "phones": set(), "stores": set(), "aliases": ["chevron"]},
+    {"name": "7-Eleven", "phones": set(), "stores": set(), "aliases": ["7-eleven", "7 eleven", "seven eleven"]},
+    {"name": "Sam's Club", "phones": set(), "stores": set(), "aliases": ["sams club", "sam's club"]},
+    {"name": "BJ's Wholesale", "phones": set(), "stores": set(), "aliases": ["bjs", "bj's", "bjs wholesale"]},
+    {"name": "Meijer", "phones": set(), "stores": set(), "aliases": ["meijer"]},
+    {"name": "H-E-B", "phones": set(), "stores": set(), "aliases": ["h-e-b", "heb"]},
+    {"name": "Albertsons", "phones": set(), "stores": set(), "aliases": ["albertsons", "albertson's"]},
+    {"name": "Ralphs", "phones": set(), "stores": set(), "aliases": ["ralphs"]},
+    {"name": "Vons", "phones": set(), "stores": set(), "aliases": ["vons"]},
+    {"name": "Food Lion", "phones": set(), "stores": set(), "aliases": ["food lion"]},
+    {"name": "Harris Teeter", "phones": set(), "stores": set(), "aliases": ["harris teeter"]},
+    {"name": "Wegmans", "phones": set(), "stores": set(), "aliases": ["wegmans"]},
+    {"name": "Sprouts", "phones": set(), "stores": set(), "aliases": ["sprouts", "sprouts farmers market"]},
+    {"name": "WinCo Foods", "phones": set(), "stores": set(), "aliases": ["winco", "winco foods"]},
+    {"name": "ShopRite", "phones": set(), "stores": set(), "aliases": ["shoprite", "shop rite"]},
+    {"name": "Stop & Shop", "phones": set(), "stores": set(), "aliases": ["stop & shop", "stop and shop"]},
+    {"name": "Giant Eagle", "phones": set(), "stores": set(), "aliases": ["giant eagle"]},
+    {"name": "Piggly Wiggly", "phones": set(), "stores": set(), "aliases": ["piggly wiggly"]},
+    {"name": "Rite Aid", "phones": set(), "stores": set(), "aliases": ["rite aid", "riteaid"]},
+    {"name": "Lowe's", "phones": set(), "stores": set(), "aliases": ["lowes", "lowe's"]},
+    {"name": "Menards", "phones": set(), "stores": set(), "aliases": ["menards"]},
+    {"name": "Ace Hardware", "phones": set(), "stores": set(), "aliases": ["ace hardware"]},
+    {"name": "Walmart Neighborhood Market", "phones": set(), "stores": set(), "aliases": ["neighborhood market"]},
+    {"name": "Dollar General", "phones": set(), "stores": set(), "aliases": ["dollar general"]},
+    {"name": "Dollar Tree", "phones": set(), "stores": set(), "aliases": ["dollar tree"]},
+    {"name": "Family Dollar", "phones": set(), "stores": set(), "aliases": ["family dollar"]},
+    {"name": "Costco Gas", "phones": set(), "stores": set(), "aliases": ["costco gas", "costco fuel"]},
+    {"name": "Circle K", "phones": set(), "stores": set(), "aliases": ["circle k", "circlek"]},
+    {"name": "Wawa", "phones": set(), "stores": set(), "aliases": ["wawa"]},
+    {"name": "Sheetz", "phones": set(), "stores": set(), "aliases": ["sheetz"]},
+    {"name": "QuikTrip", "phones": set(), "stores": set(), "aliases": ["quiktrip", "qt"]},
+    {"name": "RaceTrac", "phones": set(), "stores": set(), "aliases": ["racetrac", "race trac"]},
+    {"name": "Speedway", "phones": set(), "stores": set(), "aliases": ["speedway"]},
+    {"name": "Marathon", "phones": set(), "stores": set(), "aliases": ["marathon", "marathon petroleum"]},
+    {"name": "Sunoco", "phones": set(), "stores": set(), "aliases": ["sunoco"]},
+    {"name": "Burger King", "phones": set(), "stores": set(), "aliases": ["burger king"]},
+    {"name": "Wendy's", "phones": set(), "stores": set(), "aliases": ["wendys", "wendy's"]},
+    {"name": "Taco Bell", "phones": set(), "stores": set(), "aliases": ["taco bell"]},
+    {"name": "Subway", "phones": set(), "stores": set(), "aliases": ["subway"]},
+    {"name": "Panera Bread", "phones": set(), "stores": set(), "aliases": ["panera", "panera bread"]},
+    {"name": "Chick-fil-A", "phones": set(), "stores": set(), "aliases": ["chick-fil-a", "chickfila", "chick fil a"]},
+    {"name": "KFC", "phones": set(), "stores": set(), "aliases": ["kfc", "kentucky fried"]},
+    {"name": "Domino's", "phones": set(), "stores": set(), "aliases": ["dominos", "domino's"]},
+    {"name": "Pizza Hut", "phones": set(), "stores": set(), "aliases": ["pizza hut"]},
+    {"name": "Papa John's", "phones": set(), "stores": set(), "aliases": ["papa johns", "papa john's"]},
+    {"name": "Olive Garden", "phones": set(), "stores": set(), "aliases": ["olive garden"]},
+    {"name": "Applebee's", "phones": set(), "stores": set(), "aliases": ["applebees", "applebee's"]},
+    {"name": "Chili's", "phones": set(), "stores": set(), "aliases": ["chilis", "chili's"]},
+    {"name": "DoorDash", "phones": set(), "stores": set(), "aliases": ["doordash", "door dash"]},
+    {"name": "Grubhub", "phones": set(), "stores": set(), "aliases": ["grubhub", "grub hub"]},
+    {"name": "Instacart", "phones": set(), "stores": set(), "aliases": ["instacart"]},
+    {"name": "Uber Eats", "phones": set(), "stores": set(), "aliases": ["uber eats"]},
+    {"name": "Netflix", "phones": set(), "stores": set(), "aliases": ["netflix"]},
+    # —— India ——
+    {"name": "Reliance Fresh", "phones": set(), "stores": set(), "aliases": ["reliance fresh", "reliance retail"]},
+    {"name": "Reliance Smart", "phones": set(), "stores": set(), "aliases": ["reliance smart", "smart bazaar"]},
+    {"name": "DMart", "phones": set(), "stores": set(), "aliases": ["dmart", "d-mart", "avenue supermarts"]},
+    {"name": "Big Bazaar", "phones": set(), "stores": set(), "aliases": ["big bazaar", "bigbazaar"]},
+    {"name": "More Retail", "phones": set(), "stores": set(), "aliases": ["more supermarket", "more megastore", "more retail"]},
+    {"name": "Nature's Basket", "phones": set(), "stores": set(), "aliases": ["natures basket", "nature's basket"]},
+    {"name": "Spencer's", "phones": set(), "stores": set(), "aliases": ["spencers", "spencer's"]},
+    {"name": "Blinkit", "phones": set(), "stores": set(), "aliases": ["blinkit", "grofers"]},
+    {"name": "Zepto", "phones": set(), "stores": set(), "aliases": ["zepto"]},
+    {"name": "Swiggy", "phones": set(), "stores": set(), "aliases": ["swiggy", "swiggy instamart"]},
+    {"name": "Zomato", "phones": set(), "stores": set(), "aliases": ["zomato"]},
+    {"name": "BigBasket", "phones": set(), "stores": set(), "aliases": ["bigbasket", "big basket"]},
+    {"name": "JioMart", "phones": set(), "stores": set(), "aliases": ["jiomart", "jio mart"]},
+    {"name": "Apollo Pharmacy", "phones": set(), "stores": set(), "aliases": ["apollo pharmacy", "apollo"]},
+    {"name": "MedPlus", "phones": set(), "stores": set(), "aliases": ["medplus", "med plus"]},
+    {"name": "Indian Oil", "phones": set(), "stores": set(), "aliases": ["indian oil", "indianoil", "iocl"]},
+    {"name": "HP Petrol", "phones": set(), "stores": set(), "aliases": ["hindustan petroleum", "hp petrol", "hpcl"]},
+    {"name": "IRCTC", "phones": set(), "stores": set(), "aliases": ["irctc"]},
+    {"name": "Cafe Coffee Day", "phones": set(), "stores": set(), "aliases": ["cafe coffee day", "ccd"]},
+    {"name": "Reliance Trends", "phones": set(), "stores": set(), "aliases": ["reliance trends"]},
+    {"name": "Reliance Digital", "phones": set(), "stores": set(), "aliases": ["reliance digital"]},
+    {"name": "Reliance Jewels", "phones": set(), "stores": set(), "aliases": ["reliance jewels"]},
+    {"name": "Jio Store", "phones": set(), "stores": set(), "aliases": ["jio store", "jio center"]},
+    {"name": "Star Bazaar", "phones": set(), "stores": set(), "aliases": ["star bazaar", "starbazaar"]},
+    {"name": "Hypercity", "phones": set(), "stores": set(), "aliases": ["hypercity"]},
+    {"name": "Nilgiris", "phones": set(), "stores": set(), "aliases": ["nilgiris"]},
+    {"name": "Heritage Fresh", "phones": set(), "stores": set(), "aliases": ["heritage fresh"]},
+    {"name": "Ratnadeep", "phones": set(), "stores": set(), "aliases": ["ratnadeep"]},
+    {"name": "Vishal Mega Mart", "phones": set(), "stores": set(), "aliases": ["vishal mega mart", "vishal megamart"]},
+    {"name": "Metro Cash & Carry", "phones": set(), "stores": set(), "aliases": ["metro cash", "metro cash and carry", "metro wholesale"]},
+    {"name": "Spar India", "phones": set(), "stores": set(), "aliases": ["spar india", "spar hypermarket"]},
+    {"name": "Lulu Hypermarket", "phones": set(), "stores": set(), "aliases": ["lulu", "lulu hypermarket", "lulu mall"]},
+    {"name": "Flipkart", "phones": set(), "stores": set(), "aliases": ["flipkart"]},
+    {"name": "Amazon India", "phones": set(), "stores": set(), "aliases": ["amazon.in", "amazon india"]},
+    {"name": "Myntra", "phones": set(), "stores": set(), "aliases": ["myntra"]},
+    {"name": "Ajio", "phones": set(), "stores": set(), "aliases": ["ajio"]},
+    {"name": "Nykaa", "phones": set(), "stores": set(), "aliases": ["nykaa"]},
+    {"name": "Tata 1mg", "phones": set(), "stores": set(), "aliases": ["1mg", "tata 1mg", "one mg"]},
+    {"name": "PharmEasy", "phones": set(), "stores": set(), "aliases": ["pharmeasy", "pharm easy"]},
+    {"name": "Netmeds", "phones": set(), "stores": set(), "aliases": ["netmeds"]},
+    {"name": "Wellness Forever", "phones": set(), "stores": set(), "aliases": ["wellness forever"]},
+    {"name": "Guardian Pharmacy", "phones": set(), "stores": set(), "aliases": ["guardian pharmacy"]},
+    {"name": "Bharat Petroleum", "phones": set(), "stores": set(), "aliases": ["bharat petroleum", "bpcl", "bharatgas"]},
+    {"name": "Nayara Energy", "phones": set(), "stores": set(), "aliases": ["nayara", "nayara energy"]},
+    {"name": "Shell India", "phones": set(), "stores": set(), "aliases": ["shell india"]},
+    {"name": "IndiGo", "phones": set(), "stores": set(), "aliases": ["indigo airlines", "goindigo", "interglobe aviation"]},
+    {"name": "Air India", "phones": set(), "stores": set(), "aliases": ["air india", "airindia"]},
+    {"name": "SpiceJet", "phones": set(), "stores": set(), "aliases": ["spicejet", "spice jet"]},
+    {"name": "Vistara", "phones": set(), "stores": set(), "aliases": ["vistara"]},
+    {"name": "Ola", "phones": set(), "stores": set(), "aliases": ["ola", "ola cabs", "ola electric"]},
+    {"name": "Rapido", "phones": set(), "stores": set(), "aliases": ["rapido"]},
+    {"name": "Uber India", "phones": set(), "stores": set(), "aliases": ["uber india"]},
+    {"name": "Starbucks India", "phones": set(), "stores": set(), "aliases": ["starbucks india", "tata starbucks"]},
+    {"name": "Barista", "phones": set(), "stores": set(), "aliases": ["barista"]},
+    {"name": "Chaayos", "phones": set(), "stores": set(), "aliases": ["chaayos"]},
+    {"name": "Chai Point", "phones": set(), "stores": set(), "aliases": ["chai point", "chaipoint"]},
+    {"name": "Domino's India", "phones": set(), "stores": set(), "aliases": ["dominos india", "jubilant foodworks"]},
+    {"name": "Pizza Hut India", "phones": set(), "stores": set(), "aliases": ["pizza hut india"]},
+    {"name": "McDonald's India", "phones": set(), "stores": set(), "aliases": ["mcdonalds india", "mcdonald's india"]},
+    {"name": "KFC India", "phones": set(), "stores": set(), "aliases": ["kfc india"]},
+    {"name": "Burger King India", "phones": set(), "stores": set(), "aliases": ["burger king india", "bk india"]},
+    {"name": "Subway India", "phones": set(), "stores": set(), "aliases": ["subway india"]},
+    {"name": "Haldiram's", "phones": set(), "stores": set(), "aliases": ["haldirams", "haldiram's"]},
+    {"name": "Bikanervala", "phones": set(), "stores": set(), "aliases": ["bikanervala"]},
+    {"name": "Faasos", "phones": set(), "stores": set(), "aliases": ["faasos", "rebel foods"]},
+    {"name": "Behrouz Biryani", "phones": set(), "stores": set(), "aliases": ["behrouz", "behrouz biryani"]},
+    {"name": "BookMyShow", "phones": set(), "stores": set(), "aliases": ["bookmyshow", "book my show"]},
+    {"name": "PVR INOX", "phones": set(), "stores": set(), "aliases": ["pvr inox", "pvr cinemas", "inox movies"]},
+    {"name": "Cinepolis India", "phones": set(), "stores": set(), "aliases": ["cinepolis india", "cinepolis"]},
+    {"name": "Decathlon India", "phones": set(), "stores": set(), "aliases": ["decathlon india"]},
+    {"name": "IKEA India", "phones": set(), "stores": set(), "aliases": ["ikea india"]},
+    {"name": "Westside", "phones": set(), "stores": set(), "aliases": ["westside"]},
+    {"name": "Pantaloons", "phones": set(), "stores": set(), "aliases": ["pantaloons"]},
+    {"name": "Lifestyle Stores", "phones": set(), "stores": set(), "aliases": ["lifestyle stores", "lifestyle india"]},
+    {"name": "Shoppers Stop", "phones": set(), "stores": set(), "aliases": ["shoppers stop"]},
+    {"name": "Croma", "phones": set(), "stores": set(), "aliases": ["croma"]},
+    {"name": "Vijay Sales", "phones": set(), "stores": set(), "aliases": ["vijay sales"]},
+    # —— Australia ——
+    {"name": "Woolworths", "phones": set(), "stores": set(), "aliases": ["woolworths", "woolies"]},
+    {"name": "Coles", "phones": set(), "stores": set(), "aliases": ["coles"]},
+    {"name": "ALDI Australia", "phones": set(), "stores": set(), "aliases": ["aldi australia"]},
+    {"name": "IGA", "phones": set(), "stores": set(), "aliases": ["iga", "independent grocers"]},
+    {"name": "Bunnings", "phones": set(), "stores": set(), "aliases": ["bunnings", "bunnings warehouse"]},
+    {"name": "Officeworks", "phones": set(), "stores": set(), "aliases": ["officeworks"]},
+    {"name": "Chemist Warehouse", "phones": set(), "stores": set(), "aliases": ["chemist warehouse"]},
+    {"name": "Priceline", "phones": set(), "stores": set(), "aliases": ["priceline", "priceline pharmacy"]},
+    {"name": "JB Hi-Fi", "phones": set(), "stores": set(), "aliases": ["jb hi-fi", "jb hifi", "jbhifi"]},
+    {"name": "Kmart Australia", "phones": set(), "stores": set(), "aliases": ["kmart australia"]},
+    {"name": "Kmart", "phones": set(), "stores": set(), "aliases": ["kmart"]},
+    {"name": "Hungry Jack's", "phones": set(), "stores": set(), "aliases": ["hungry jacks", "hungry jack's"]},
+    {"name": "Guzman y Gomez", "phones": set(), "stores": set(), "aliases": ["guzman y gomez", "gyg"]},
+    {"name": "Uber Eats Australia", "phones": set(), "stores": set(), "aliases": ["uber eats australia"]},
+    {"name": "Menulog", "phones": set(), "stores": set(), "aliases": ["menulog"]},
+    {"name": "Caltex", "phones": set(), "stores": set(), "aliases": ["caltex"]},
+    {"name": "BP Australia", "phones": set(), "stores": set(), "aliases": ["bp australia"]},
+    {"name": "Harris Farm Markets", "phones": set(), "stores": set(), "aliases": ["harris farm", "harris farm markets"]},
+    {"name": "FoodWorks", "phones": set(), "stores": set(), "aliases": ["foodworks", "food works"]},
+    {"name": "Drakes Supermarkets", "phones": set(), "stores": set(), "aliases": ["drakes", "drakes supermarket"]},
+    {"name": "Foodland", "phones": set(), "stores": set(), "aliases": ["foodland"]},
+    {"name": "SPAR Australia", "phones": set(), "stores": set(), "aliases": ["spar australia"]},
+    {"name": "Costco Australia", "phones": set(), "stores": set(), "aliases": ["costco australia"]},
+    {"name": "Target Australia", "phones": set(), "stores": set(), "aliases": ["target australia"]},
+    {"name": "Big W", "phones": set(), "stores": set(), "aliases": ["big w", "bigw"]},
+    {"name": "The Reject Shop", "phones": set(), "stores": set(), "aliases": ["the reject shop", "reject shop"]},
+    {"name": "Catch.com.au", "phones": set(), "stores": set(), "aliases": ["catch.com.au", "catch australia"]},
+    {"name": "Myer", "phones": set(), "stores": set(), "aliases": ["myer"]},
+    {"name": "David Jones", "phones": set(), "stores": set(), "aliases": ["david jones"]},
+    {"name": "Harvey Norman", "phones": set(), "stores": set(), "aliases": ["harvey norman"]},
+    {"name": "The Good Guys", "phones": set(), "stores": set(), "aliases": ["the good guys", "good guys"]},
+    {"name": "Bing Lee", "phones": set(), "stores": set(), "aliases": ["bing lee"]},
+    {"name": "Rebel Sport", "phones": set(), "stores": set(), "aliases": ["rebel sport"]},
+    {"name": "Amart Sports", "phones": set(), "stores": set(), "aliases": ["amart sports"]},
+    {"name": "Decathlon Australia", "phones": set(), "stores": set(), "aliases": ["decathlon australia"]},
+    {"name": "IKEA Australia", "phones": set(), "stores": set(), "aliases": ["ikea australia"]},
+    {"name": "Supercheap Auto", "phones": set(), "stores": set(), "aliases": ["supercheap auto", "super cheap auto"]},
+    {"name": "Repco", "phones": set(), "stores": set(), "aliases": ["repco"]},
+    {"name": "Autobarn", "phones": set(), "stores": set(), "aliases": ["autobarn"]},
+    {"name": "Ampol", "phones": set(), "stores": set(), "aliases": ["ampol"]},
+    {"name": "7-Eleven Australia", "phones": set(), "stores": set(), "aliases": ["7-eleven australia"]},
+    {"name": "United Petroleum", "phones": set(), "stores": set(), "aliases": ["united petroleum"]},
+    {"name": "Metro Petroleum", "phones": set(), "stores": set(), "aliases": ["metro petroleum"]},
+    {"name": "Liberty Oil", "phones": set(), "stores": set(), "aliases": ["liberty oil", "liberty convenience"]},
+    {"name": "McDonald's Australia", "phones": set(), "stores": set(), "aliases": ["mcdonalds australia", "maccas"]},
+    {"name": "KFC Australia", "phones": set(), "stores": set(), "aliases": ["kfc australia"]},
+    {"name": "Domino's Australia", "phones": set(), "stores": set(), "aliases": ["dominos australia"]},
+    {"name": "Pizza Hut Australia", "phones": set(), "stores": set(), "aliases": ["pizza hut australia"]},
+    {"name": "Subway Australia", "phones": set(), "stores": set(), "aliases": ["subway australia"]},
+    {"name": "Nando's", "phones": set(), "stores": set(), "aliases": ["nandos", "nando's"]},
+    {"name": "Grill'd", "phones": set(), "stores": set(), "aliases": ["grilld", "grill'd"]},
+    {"name": "Boost Juice", "phones": set(), "stores": set(), "aliases": ["boost juice"]},
+    {"name": "Gloria Jean's", "phones": set(), "stores": set(), "aliases": ["gloria jeans", "gloria jean's"]},
+    {"name": "The Coffee Club", "phones": set(), "stores": set(), "aliases": ["the coffee club", "coffee club"]},
+    {"name": "Starbucks Australia", "phones": set(), "stores": set(), "aliases": ["starbucks australia"]},
+    {"name": "Zambrero", "phones": set(), "stores": set(), "aliases": ["zambrero"]},
+    {"name": "Oporto", "phones": set(), "stores": set(), "aliases": ["oporto"]},
+    {"name": "Red Rooster", "phones": set(), "stores": set(), "aliases": ["red rooster"]},
+    {"name": "Crust Pizza", "phones": set(), "stores": set(), "aliases": ["crust pizza"]},
+    {"name": "DoorDash Australia", "phones": set(), "stores": set(), "aliases": ["doordash australia"]},
+    {"name": "Deliveroo", "phones": set(), "stores": set(), "aliases": ["deliveroo"]},
+    {"name": "Qantas", "phones": set(), "stores": set(), "aliases": ["qantas"]},
+    {"name": "Virgin Australia", "phones": set(), "stores": set(), "aliases": ["virgin australia", "virgin air"]},
+    {"name": "Jetstar", "phones": set(), "stores": set(), "aliases": ["jetstar"]},
+    {"name": "Tigerair", "phones": set(), "stores": set(), "aliases": ["tigerair", "tiger air"]},
+    {"name": "Sydney Trains", "phones": set(), "stores": set(), "aliases": ["sydney trains", "opal card"]},
+    {"name": "Metro Trains Melbourne", "phones": set(), "stores": set(), "aliases": ["metro trains melbourne", "myki"]},
+    {"name": "TransLink", "phones": set(), "stores": set(), "aliases": ["translink", "go card"]},
+    {"name": "Event Cinemas", "phones": set(), "stores": set(), "aliases": ["event cinemas"]},
+    {"name": "Hoyts", "phones": set(), "stores": set(), "aliases": ["hoyts"]},
+    {"name": "Village Cinemas", "phones": set(), "stores": set(), "aliases": ["village cinemas"]},
+    {"name": "Dan Murphy's", "phones": set(), "stores": set(), "aliases": ["dan murphys", "dan murphy's"]},
+    {"name": "BWS", "phones": set(), "stores": set(), "aliases": ["bws"]},
+    {"name": "Liquorland", "phones": set(), "stores": set(), "aliases": ["liquorland"]},
+    {"name": "First Choice Liquor", "phones": set(), "stores": set(), "aliases": ["first choice liquor"]},
+    {"name": "TerryWhite Chemmart", "phones": set(), "stores": set(), "aliases": ["terrywhite", "terry white chemmart", "chemmart"]},
+    {"name": "Blooms The Chemist", "phones": set(), "stores": set(), "aliases": ["blooms the chemist"]},
 ]
 
 _PHONE_RE = re.compile(r"\(?\d{3}\)?[\s.\-]*\d{3}[\s.\-]*\d{4}")
@@ -1635,6 +1932,24 @@ def _guess_category(text: str, store_name: str | None) -> str:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def _detect_currency(text: str) -> tuple[str, int]:
+    """Heuristic ISO currency from receipt text. Confidence 0–2."""
+    blob = text or ""
+    if _INR_MARK.search(blob) or "₹" in blob or re.search(r"\bRs\.?\s*\d", blob, re.I):
+        return "INR", 2
+    if "€" in blob or re.search(r"\bEUR\b", blob):
+        return "EUR", 2
+    if "£" in blob or re.search(r"\bGBP\b", blob):
+        return "GBP", 2
+    if re.search(r"\bCAD\b|C\$", blob) or _CA_POSTAL.search(blob):
+        return "CAD", 1
+    if re.search(r"\bAUD\b|A\$", blob):
+        return "AUD", 1
+    if "$" in blob or re.search(r"\bUSD\b", blob) or _US_STATE_ZIP.search(blob):
+        return "USD", 1
+    return "USD", 0
+
+
 def extract_receipt_data_ocr(
     image_bytes: bytes,
     learned_vendors: list[dict] | None = None,
@@ -1648,6 +1963,8 @@ def extract_receipt_data_ocr(
     """
     text, mean_conf, boxed_lines, line_lefts, line_heights, line_boxes = _run_ocr(image_bytes)
     lines = boxed_lines or [l for l in text.splitlines() if l.strip()]
+    # Drop indented BOGO / $0.00 promo children before total selection.
+    lines, line_lefts, line_boxes = _drop_child_promo_lines(lines, line_lefts, line_boxes)
     fingerprint = receipt_store_fingerprint(lines, text)
 
     store_name, store_confident = _find_store_name(
@@ -1655,6 +1972,7 @@ def extract_receipt_data_ocr(
     )
     bill_date, date_confident = _find_date(text)
     total_amount, total_confident = _find_total(lines, line_boxes)
+    currency, currency_confidence = _detect_currency(text)
     cached_category = None
     if store_name:
         needle = store_name.strip().lower()
@@ -1667,9 +1985,9 @@ def extract_receipt_data_ocr(
         store_name=store_name or "Unknown store",
         bill_date=bill_date or datetime.now().strftime("%Y-%m-%d"),
         total_amount=total_amount or 0.0,
-        currency="USD",
+        currency=currency,
         category=cached_category or _guess_category(text, store_name),
-        currency_confidence=0,
+        currency_confidence=currency_confidence,
     )
     fingerprint["guessed_name"] = extraction.store_name
     all_confident = (

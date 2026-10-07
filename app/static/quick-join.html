@@ -1,2 +1,71 @@
-﻿<!DOCTYPE html><html lang="en"><head>
-<script>(function(){try{var k="sharesquad_theme",p=localStorage.getItem(k)||"system",d=p==="dark"||(p!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("theme-dark",d);document.documentElement.classList.toggle("theme-light",!d);document.documentElement.dataset.theme=d?"dark":"light";var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",d?"#0B1220":"#F8FAFC");}catch(e){}})();</script><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ShareSquad — View Split</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="/styles.css?v=20260925final"></head><body class="bb-bg text-ink min-h-screen flex items-center justify-center px-5"><div class="auth-card bb-card text-center"><h1 class="font-mono font-bold text-lg text-brand">Quick Split</h1><p id="msg" class="text-sm text-ink/60 mt-3">Opening your shared bill…</p><a href="/login.html" class="bb-btn-secondary mt-4">Sign in or create an account</a></div><script src="/api.js?v=20260925final"></script><script>const q=new URLSearchParams(location.search),code=q.get('code'),slot=q.get('slot'),msg=document.getElementById('msg'),join=()=>ShareSquad.api('/quick-splits/join',{method:'POST',body:JSON.stringify({invite_code:code,participant_token:slot})}).then(s=>{localStorage.removeItem('sharesquad_pending_quick_split');localStorage.removeItem('sharesquad_pending_quick_split_slot');location.href='/quick-split.html?id='+s.id;}).catch(e=>msg.textContent=e.message);if(!code){msg.textContent='No quick split link was found.';}else{localStorage.setItem('sharesquad_pending_quick_split',code);if(slot)localStorage.setItem('sharesquad_pending_quick_split_slot',slot);if(ShareSquad.getToken())join();else msg.textContent='Sign in or create an account to view this split.';}</script></body></html>
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>
+    (function () {
+      try {
+        var k = "sharesquad_theme",
+          p = localStorage.getItem(k) || "system",
+          d = p === "dark" || (p !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.toggle("theme-dark", d);
+        document.documentElement.classList.toggle("theme-light", !d);
+        document.documentElement.dataset.theme = d ? "dark" : "light";
+        var m = document.querySelector('meta[name="theme-color"]');
+        if (m) m.setAttribute("content", d ? "#0B1220" : "#F8FAFC");
+      } catch (e) {}
+    })();
+  </script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ShareSquad — View Split</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/styles.css?v=20261007wave3" />
+</head>
+<body class="bb-bg text-ink min-h-screen flex items-center justify-center px-5">
+  <div class="auth-card bb-card text-center">
+    <h1 class="font-mono font-bold text-lg text-brand">Quick Split</h1>
+    <p id="msg" class="text-sm text-ink/60 mt-3">Opening your shared bill…</p>
+    <a id="signInLink" href="/login.html" class="bb-btn-primary mt-4 hidden">Sign in to view</a>
+  </div>
+  <script src="/api.js?v=20261007wave3"></script>
+  <script>
+    const PENDING_QUICK_SPLIT_KEY = "sharesquad_pending_quick_split";
+    const PENDING_QUICK_SPLIT_SLOT_KEY = "sharesquad_pending_quick_split_slot";
+    const q = new URLSearchParams(location.search);
+    const code = q.get("code");
+    const slot = q.get("slot");
+    const msg = document.getElementById("msg");
+    const signInLink = document.getElementById("signInLink");
+
+    function join() {
+      return ShareSquad.api("/quick-splits/join", {
+        method: "POST",
+        body: JSON.stringify({ invite_code: code, participant_token: slot }),
+      }).then((s) => {
+        localStorage.removeItem(PENDING_QUICK_SPLIT_KEY);
+        localStorage.removeItem(PENDING_QUICK_SPLIT_SLOT_KEY);
+        location.href = "/quick-split.html?id=" + s.id;
+      }).catch((e) => {
+        msg.textContent = e.message;
+      });
+    }
+
+    if (!code) {
+      msg.textContent = "No quick split link was found.";
+    } else {
+      localStorage.setItem(PENDING_QUICK_SPLIT_KEY, code);
+      if (slot) localStorage.setItem(PENDING_QUICK_SPLIT_SLOT_KEY, slot);
+      else localStorage.removeItem(PENDING_QUICK_SPLIT_SLOT_KEY);
+
+      if (ShareSquad.getToken()) {
+        join();
+      } else {
+        const next = `/quick-join.html?code=${encodeURIComponent(code)}${slot ? `&slot=${encodeURIComponent(slot)}` : ""}`;
+        signInLink.href = `/login.html?next=${encodeURIComponent(next)}`;
+        signInLink.classList.remove("hidden");
+        msg.textContent = "Sign in or create an account to view this split.";
+      }
+    }
+  </script>
+</body>
+</html>

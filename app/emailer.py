@@ -36,7 +36,9 @@ def _send_message(msg: MIMEMultipart, to_email: str) -> None:
     msg["From"] = from_addr
     msg["To"] = to_email
 
-    with smtplib.SMTP(host, port, timeout=30) as server:
+    # Keep invites snappy when SMTP is misconfigured or unreachable (QA: ~30s hangs).
+    smtp_timeout = float(os.environ.get("SMTP_TIMEOUT_SECONDS", "8"))
+    with smtplib.SMTP(host, port, timeout=smtp_timeout) as server:
         if use_tls:
             server.starttls()
         if user and password:
@@ -86,8 +88,9 @@ This link expires in 1 hour. If you didn't request this, you can ignore this ema
         logger.info("Password reset email sent to %s", to_email)
         return True
     except Exception:
+        # Never fail the HTTP request — callers always return a generic 200.
         logger.exception("Failed to send password reset email to %s", to_email)
-        raise
+        return False
 
 
 def send_invite_email(

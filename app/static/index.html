@@ -44,8 +44,9 @@
           <img id="headerAvatar" alt="" class="header-avatar hidden">
           <span id="headerInitials" class="avatar-initials avatar-initials-small">?</span>
         </button>
-        <button id="logoutBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] hover:text-stamp hover:border-stamp/40" title="Sign out">
-          <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
+        <button id="logoutBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] hover:text-stamp hover:border-stamp/40" title="Sign out" aria-label="Sign out">
+          <i data-lucide="log-out" class="w-3.5 h-3.5" aria-hidden="true"></i>
+          <span>Sign out</span>
         </button>
       </div>
     </div>
@@ -152,8 +153,8 @@
     </a>
   </nav>
 
-  <script src="/api.js?v=20260927stableLabelColor"></script>
-  <script src="/dashboard.js?v=20260928screenSwipeNoDuplicate"></script>
+  <script src="/api.js?v=20261007signOutLabel"></script>
+  <script src="/dashboard.js?v=20261007signOutLabel"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

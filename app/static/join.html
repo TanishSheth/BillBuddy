@@ -1,38 +1,33 @@
 ﻿<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#F6F3EC">
-<script>(function(){try{var k="sharesquad_theme",p=localStorage.getItem(k)||"system",d=p==="dark"||(p!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("theme-dark",d);document.documentElement.classList.toggle("theme-light",!d);document.documentElement.dataset.theme=d?"dark":"light";var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",d?"#0B1220":"#F8FAFC");}catch(e){}})();</script>
-<title>ShareSquad — Join Group</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.tailwindcss.com"></script>
-<link rel="stylesheet" href="/styles.css?v=20260925final">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Join group · ShareSquad</title>
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("sharesquad_theme") || "system";
+        var dark = t === "dark" || (t === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.classList.add(dark ? "theme-dark" : "theme-light");
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/styles.css" />
 </head>
-<body class="bb-bg text-ink min-h-screen flex items-center justify-center px-5 py-12">
-
-  <div class="auth-card w-full">
-    <div class="flex flex-col items-center gap-2 mb-8 text-center">
-      <img src="/logo.png" alt="ShareSquad" class="h-16 w-auto object-contain drop-shadow-sm mb-1" onerror="this.style.display='none'">
-      <div>
-        <h1 class="font-mono font-bold text-xl tracking-tight leading-none text-brand">JOIN GROUP</h1>
-        <p class="text-[11px] uppercase tracking-widest text-ink/50 leading-none mt-1">You've been invited to ShareSquad</p>
-      </div>
-    </div>
-
-    <div class="bb-card text-center">
-      <p id="statusMsg" class="font-mono text-sm text-ink/60 mb-4">Joining group…</p>
-      <a href="/login.html" class="bb-btn-secondary">Go to Sign In</a>
-    </div>
+<body class="bb-bg text-ink min-h-screen flex items-center justify-center px-4">
+  <div class="bb-card max-w-md w-full text-center p-6">
+    <h1 class="font-mono font-bold text-xl text-brand mb-2">Join group</h1>
+    <p id="statusMsg" class="font-mono text-sm text-ink/60 mb-4">Checking your invite…</p>
+    <a id="signInLink" href="/login.html" class="bb-btn-primary hidden">Sign in to join</a>
   </div>
 
-  <script src="/api.js?v=20260925final"></script>
+  <script src="/api.js?v=20261007scaleHardening"></script>
   <script>
     const PENDING_INVITE_KEY = "sharesquad_pending_invite";
     const code = new URLSearchParams(window.location.search).get("code");
     const msg = document.getElementById("statusMsg");
+    const signInLink = document.getElementById("signInLink");
 
     if (!code) {
       msg.textContent = "No group link was found.";
@@ -40,6 +35,9 @@
       localStorage.setItem(PENDING_INVITE_KEY, code);
       const token = ShareSquad.getToken();
       if (!token) {
+        const next = `/join.html?code=${encodeURIComponent(code)}`;
+        signInLink.href = `/login.html?next=${encodeURIComponent(next)}`;
+        signInLink.classList.remove("hidden");
         msg.textContent = "Sign in or create an account to join this group automatically.";
       } else {
         fetch("/api/groups/join", {
@@ -54,7 +52,7 @@
             ShareSquad.setStoredGroupId(data.id);
             msg.textContent = `Joined “${data.name}”. Opening the group…`;
             msg.className = "font-mono text-sm balance-positive mb-4";
-            setTimeout(() => { window.location.href = "/group.html"; }, 700);
+            setTimeout(() => { window.location.href = `/group?group=${encodeURIComponent(data.id)}`; }, 700);
           })
           .catch((err) => {
             msg.textContent = err.message;

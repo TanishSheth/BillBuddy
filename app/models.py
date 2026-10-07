@@ -66,7 +66,7 @@ class DemoTemplate(Base):
     __tablename__ = "demo_templates"
 
     id = Column(Integer, primary_key=True, index=True)
-    version = Column(String(40), unique=True, nullable=False, index=True)
+    version = Column(String(80), unique=True, nullable=False, index=True)
     group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
     created_at = Column(DateTime, server_default=func.now())
 
@@ -116,8 +116,8 @@ class GroupMember(Base):
     __table_args__ = (UniqueConstraint("group_id", "account_id", name="uq_group_account"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
-    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
     display_name = Column(String(100), nullable=False)
     role = Column(String(20), default="member")
     is_active = Column(Boolean, default=True, nullable=False)
@@ -179,7 +179,7 @@ class MonthlyPeriod(Base):
     __table_args__ = (UniqueConstraint("group_id", "period_key", name="uq_group_period"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True)
     period_key = Column(String(7), nullable=False)
     status = Column(String(20), default="ACTIVE")
     pdf_filename = Column(String, nullable=True)
@@ -197,7 +197,7 @@ class Expense(Base):
     __tablename__ = "expenses"
 
     id = Column(Integer, primary_key=True, index=True)
-    period_id = Column(Integer, ForeignKey("monthly_periods.id"))
+    period_id = Column(Integer, ForeignKey("monthly_periods.id"), index=True)
     store_name = Column(String(150), nullable=False)
     bill_date = Column(Date, nullable=False)
     total_amount = Column(Numeric(10, 2), nullable=False)
@@ -234,8 +234,8 @@ class ExpenseSplit(Base):
     __tablename__ = "expense_splits"
 
     id = Column(Integer, primary_key=True, index=True)
-    expense_id = Column(Integer, ForeignKey("expenses.id", ondelete="CASCADE"))
-    member_id = Column(Integer, ForeignKey("group_members.id", ondelete="CASCADE"))
+    expense_id = Column(Integer, ForeignKey("expenses.id", ondelete="CASCADE"), index=True)
+    member_id = Column(Integer, ForeignKey("group_members.id", ondelete="CASCADE"), index=True)
     share_amount = Column(Numeric(10, 2), nullable=False)
     split_value = Column(Numeric(10, 2), nullable=True)  # Stores %, exact, or share ratio entered
 
@@ -371,6 +371,11 @@ class QuickSplit(Base):
     invite_code = Column(String(64), unique=True, nullable=False, default=generate_invite_code)
     status = Column(String(20), default="OPEN", nullable=False)
     created_at = Column(DateTime, server_default=func.now())
+    # Set when this bill was changed after a confirmed friend payment (F5).
+    edited_after_payment = Column(Boolean, default=False, nullable=False)
+    edit_history_json = Column(Text, nullable=True)
+    # When set, this row is a current-month delta for a paid/settled source bill.
+    adjustment_of_split_id = Column(Integer, nullable=True, index=True)
 
     creator = relationship("Account", foreign_keys=[created_by_account_id])
     payer = relationship("Account", foreign_keys=[payer_account_id])
@@ -382,7 +387,7 @@ class QuickSplitParticipant(Base):
     __table_args__ = (UniqueConstraint("quick_split_id", "email", name="uq_quick_split_email"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    quick_split_id = Column(Integer, ForeignKey("quick_splits.id", ondelete="CASCADE"), nullable=False)
+    quick_split_id = Column(Integer, ForeignKey("quick_splits.id", ondelete="CASCADE"), nullable=False, index=True)
     email = Column(String(255), nullable=False)
     account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
     display_name = Column(String(100), nullable=True)
@@ -475,3 +480,44 @@ class AccountVendor(Base):
     created_at = Column(DateTime, server_default=func.now())
 
     account = relationship("Account", back_populates="vendors")
+
+
+class ScanJob(Base):
+    """Async receipt OCR/VLM job claimed by any worker via status transitions."""
+    __tablename__ = "scan_jobs"
+
+    id = Column(String(64), primary_key=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=True, index=True)
+    upload_id = Column(String(64), nullable=False, index=True)
+    file_path = Column(String, nullable=False)
+    mime_type = Column(String(80), nullable=False, default="image/jpeg")
+    status = Column(String(20), nullable=False, default="queued", index=True)
+    # queued | processing | succeeded | failed
+    fingerprint = Column(String(64), nullable=True, index=True)
+    result_json = Column(Text, nullable=True)
+    error = Column(String(300), nullable=True)
+    source = Column(String(40), nullable=True)
+    message = Column(String(300), nullable=True)
+    image_url = Column(String(300), nullable=True)
+    claimed_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+
+
+class FriendBalanceSnapshot(Base):
+    """Optional write-through cache for friend consolidated balances (Phase 2B)."""
+    __tablename__ = "friend_balance_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id", "friend_id", "currency",
+            name="uq_friend_balance_snapshot",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    friend_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False, index=True)
+    currency = Column(String(10), nullable=False)
+    payload_json = Column(Text, nullable=False, default="{}")
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

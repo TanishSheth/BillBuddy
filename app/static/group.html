@@ -55,14 +55,11 @@
         <a id="groupSettingsLink" href="/settings.html" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px]" title="Settings">
           <i data-lucide="settings" class="w-3.5 h-3.5"></i>
         </a>
-        <button id="logoutBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] hover:text-stamp" title="Sign out">
-          <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
-        </button>
       </div>
     </div>
 
     <nav id="mainNav" class="max-w-5xl mx-auto px-4 sm:px-5 pb-2">
-      <div class="tab-nav flex gap-1 overflow-x-auto pb-1">
+      <div class="tab-nav flex gap-1 overflow-x-auto pb-1" aria-label="Group sections">
         <button data-tab="balances" class="tab-btn active"><i data-lucide="scale" class="w-3.5 h-3.5 inline mr-1"></i> Balances & Settlement</button>
         <button data-tab="expenses" class="tab-btn"><i data-lucide="list" class="w-3.5 h-3.5 inline mr-1"></i> Expenses</button>
         <button data-tab="insights" class="tab-btn"><i data-lucide="chart-no-axes-combined" class="w-3.5 h-3.5 inline mr-1"></i> Insights</button>
@@ -70,6 +67,17 @@
         <button data-tab="reports" class="tab-btn"><i data-lucide="file-text" class="w-3.5 h-3.5 inline mr-1"></i> PDF Reports</button>
         <button data-tab="members" class="tab-btn"><i data-lucide="users" class="w-3.5 h-3.5 inline mr-1"></i> Members</button>
       </div>
+      <label class="tab-more-wrap">
+        <span class="sr-only">Group section</span>
+        <select id="groupTabSelect" class="bb-input tab-more-select" aria-label="Group section">
+          <option value="balances">Balances & Settlement</option>
+          <option value="expenses">Expenses</option>
+          <option value="insights">Insights</option>
+          <option value="activity">Activity</option>
+          <option value="reports">PDF Reports</option>
+          <option value="members">Members</option>
+        </select>
+      </label>
     </nav>
   </header>
 
@@ -89,8 +97,8 @@
 
       <!-- Add / Scan Expense Tab -->
       <section id="tab-upload" class="tab-panel hidden">
-        <div id="draftGroupNotice" class="how-it-works mb-5 hidden">
-          <p><strong>This group is being set up.</strong> Add at least one member from <strong>Members</strong>—directly, by email, or with a group link—before adding shared expenses. You can still change the group name or photo.</p>
+        <div id="draftGroupNotice" class="tone-banner tone-banner-warning mb-5 hidden" role="status">
+          <p><strong>This group is still a draft.</strong> Invite at least one member from <strong>Members</strong> (email or share link) before adding shared expenses. You can still edit the group name or photo.</p>
         </div>
         <div class="grid md:grid-cols-2 gap-6">
           <div>
@@ -105,7 +113,7 @@
               <label for="fileInputGallery" id="pickGalleryBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
                 <i data-lucide="folder-open" class="w-4 h-4"></i> Choose file
               </label>
-              <button type="button" id="pickCameraBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
+              <button type="button" id="pickCameraBtn" data-testid="receipt-camera" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
                 <i data-lucide="camera" class="w-4 h-4"></i> Take photo
               </button>
             </div>
@@ -210,11 +218,11 @@
             <h3 class="font-mono uppercase text-xs tracking-widest text-muted font-bold">Group Expense Ledger</h3>
             <div class="flex items-center gap-2 flex-wrap w-full sm:w-auto">
               <label class="sr-only" for="expenseMonthFilter">Month added</label>
-              <select id="expenseMonthFilter" class="text-xs font-mono border border-line rounded px-2 py-1" aria-label="Filter by month added">
+              <select id="expenseMonthFilter" class="bb-input !py-1 !px-2 text-xs font-mono !w-auto" aria-label="Filter by month added">
                 <option value="" class="ledger-filter-option">All months added</option>
               </select>
-              <input id="expenseSearch" class="text-xs font-mono border border-line rounded px-2 py-1 min-w-0 flex-1 sm:w-40" placeholder="Search expenses">
-              <select id="groupCategoryFilter" class="text-xs font-mono border border-line rounded px-2 py-1 bg-transparent">
+              <input id="expenseSearch" class="bb-input !py-1 !px-2 text-xs font-mono min-w-0 flex-1 sm:w-40" placeholder="Search expenses">
+              <select id="groupCategoryFilter" class="bb-input !py-1 !px-2 text-xs font-mono !w-auto" data-category-filter>
                 <option value="All">All Categories</option>
                 <option value="Food & Dining">Food & Dining</option>
                 <option value="Groceries">Groceries</option>
@@ -227,8 +235,8 @@
                 <option value="Healthcare">Healthcare</option>
                 <option value="General">General / Other</option>
               </select>
-              <select id="expenseMemberFilter" class="text-xs font-mono border border-line rounded px-2 py-1"><option value="" class="member-filter-option ledger-filter-option">All members</option></select>
-              <label class="text-[10px] font-mono text-muted whitespace-nowrap"><input id="onlyMyExpenses" type="checkbox" checked> Involving me</label>
+              <select id="expenseMemberFilter" class="bb-input !py-1 !px-2 text-xs font-mono !w-auto"><option value="" class="member-filter-option ledger-filter-option">All members</option></select>
+              <label class="text-[10px] font-mono text-muted whitespace-nowrap"><input id="onlyMyExpenses" type="checkbox"> Involving me</label>
             </div>
           </div>
 
@@ -257,12 +265,12 @@
       <section id="tab-balances" class="tab-panel">
         <div id="balanceStrip" class="balance-strip mb-5 hidden" aria-live="polite"></div>
 
-        <div id="conversionBanner" class="hidden p-3 mb-4 rounded-lg border border-brand/30 bg-brand/5 text-xs font-mono text-ink flex items-center justify-between gap-2">
+        <div id="conversionBanner" class="hidden tone-banner tone-banner-success mb-4">
           <div class="flex items-center gap-2 min-w-0">
-            <i data-lucide="check-circle" class="w-4 h-4 text-brand shrink-0"></i>
+            <i data-lucide="check-circle" class="w-4 h-4 tone-banner-icon shrink-0"></i>
             <span id="conversionBannerText">Currency auto-conversion applied</span>
           </div>
-          <button id="resetConversionBtn" class="text-[10px] underline font-bold text-brand hover:opacity-80 shrink-0">Edit rate</button>
+          <button id="resetConversionBtn" type="button" class="tone-banner-action text-[10px] underline font-bold shrink-0">Edit rate</button>
         </div>
 
         <div class="bb-card mb-4">
@@ -270,7 +278,7 @@
           <p class="text-[10px] text-ink/55 mb-3">Built from who paid each bill. Record payments on Friends — amounts here update when a payment is saved. Shared expenses also appear on Friends for viewing only (not double-counted).</p>
           <div id="settlementList" class="space-y-2 font-mono text-sm"></div>
           <p id="settlementEmpty" class="hidden text-ink/40 text-sm font-mono py-4">Everyone's settled up — no transfers needed.</p>
-          <div id="paymentPendingNotice" class="hidden mt-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs font-mono text-amber-900"></div>
+          <div id="paymentPendingNotice" class="hidden tone-banner tone-banner-warning mt-3"></div>
           <div id="paymentHistory" class="mt-4 pt-3 border-t border-ink/10 space-y-2"></div>
         </div>
       </section>
@@ -283,7 +291,7 @@
           </div>
           <label class="flex items-center gap-2 text-[10px] font-mono text-muted shrink-0">
             <span class="uppercase tracking-wider font-bold">Month</span>
-            <select id="insightMonthFilter" class="text-xs font-mono border border-line rounded px-2 py-1" aria-label="Insights month"></select>
+            <select id="insightMonthFilter" class="bb-input !py-1 !px-2 text-xs font-mono !w-auto" aria-label="Insights month"></select>
           </label>
         </div>
         <div id="insightsContent" class="space-y-4"></div>
@@ -337,8 +345,10 @@
               <p id="existingFriendMsg" class="text-xs font-mono mt-2"></p>
             </div>
             <div class="flex flex-wrap gap-2 mb-3" role="tablist" aria-label="Invite method">
-              <button id="showInviteEmailBtn" type="button" class="bb-btn-secondary !py-2 !px-3 text-xs">Send email</button>
-              <button id="showInviteLinkBtn" type="button" class="bb-btn-secondary !py-2 !px-3 text-xs">Share link</button>
+              <div class="flex gap-1 bg-ink/5 p-1 rounded-lg">
+                <button id="showInviteEmailBtn" type="button" class="split-type-pill active !py-2 !px-3 text-xs">Send email</button>
+                <button id="showInviteLinkBtn" type="button" class="split-type-pill !py-2 !px-3 text-xs">Share link</button>
+              </div>
             </div>
             <form id="inviteForm" class="space-y-3">
               <div>
@@ -471,8 +481,8 @@
     Add expense
   </button>
 
-  <script src="/api.js?v=20260928compactHeaders"></script>
-  <script src="/group.js?v=20261007insightMonth"></script>
+  <script src="/api.js?v=20261007signOutLabel"></script>
+  <script src="/group.js?v=20261007signOutTabs"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

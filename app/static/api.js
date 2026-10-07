@@ -26,9 +26,9 @@ function renderDemoBanner() {
   if (!header) return;
   const banner = document.createElement("aside");
   banner.id = "demoModeBanner";
-  banner.className = "border-b border-brand/25 bg-brand/10 text-ink";
+  banner.className = "tone-banner tone-banner-success rounded-none border-x-0";
   banner.setAttribute("role", "status");
-  banner.innerHTML = '<div class="max-w-5xl mx-auto px-4 sm:px-5 py-2 text-center text-xs sm:text-sm"><strong class="font-mono text-brand">Demo mode</strong> · Same current ShareSquad as a regular account, filled with sample group data. Sandboxes expire after two hours. <a class="font-semibold underline underline-offset-2 hover:text-brand" href="/login.html?mode=signup">Sign up free</a> to keep your own data. <button type="button" id="resetDemoSandbox" class="ml-1 font-semibold underline underline-offset-2 hover:text-brand">Reset demo</button></div>';
+  banner.innerHTML = '<div class="max-w-5xl mx-auto px-4 sm:px-5 py-2 text-center text-xs sm:text-sm w-full"><strong>Demo mode</strong> · Same current ShareSquad as a regular account, filled with sample group data. Sandboxes expire after two hours. <a class="tone-banner-action font-semibold underline underline-offset-2" href="/login.html?mode=signup">Sign up free</a> to keep your own data. <button type="button" id="resetDemoSandbox" class="ml-1 tone-banner-action font-semibold underline underline-offset-2">Reset demo</button></div>';
   header.insertAdjacentElement("afterend", banner);
   banner.querySelector("#resetDemoSandbox")?.addEventListener("click", async () => {
     if (!await confirmDialog({
@@ -41,7 +41,7 @@ function renderDemoBanner() {
       setToken(result.access_token);
       localStorage.setItem("sharesquad_demo_sandbox", "1");
       setStoredGroupId(result.group_id);
-      window.location.href = `/group.html?group=${encodeURIComponent(result.group_id)}&tab=balances&demo=1`;
+      window.location.href = `/group?group=${encodeURIComponent(result.group_id)}&tab=balances&demo=1`;
     } catch (error) {
       showToast(error.message || "Could not reset the demo", "error");
     }
@@ -96,7 +96,8 @@ function showToast(msg, type = "info", duration = 3500, undoCallback = null) {
   if (!container) {
     container = document.createElement("div");
     container.id = "toastContainer";
-    container.className = "fixed bottom-5 right-5 z-50 flex flex-col gap-2 max-w-sm w-full px-4 pointer-events-none";
+    container.className = "fixed right-5 z-50 flex flex-col gap-2 max-w-sm w-full px-4 pointer-events-none";
+    container.style.bottom = "calc(5.5rem + var(--safe-bottom, 0px))";
     document.body.appendChild(container);
   }
 
@@ -332,8 +333,10 @@ function initGlobalNotifications() {
 
 function initMobileQuickAction() {
   if (!getToken() || $(".mobile-quick-action")) return;
-  const onDashboard = /(^|\/)index\.html$|\/$/.test(window.location.pathname);
-  const onFriends = /\/friends(?:\.html)?$/.test(window.location.pathname);
+  const path = window.location.pathname;
+  if (/\/settings(?:\.html)?$/.test(path) || /\/login(?:\.html)?$/.test(path)) return;
+  const onDashboard = /(^|\/)(index\.html|app)?$/.test(path) || path === "/app";
+  const onFriends = /\/friends(?:\.html)?$/.test(path);
   if (onFriends) return;
   const target = onDashboard ? null : ["#addExpenseBtn", "#openAddBill", "#quickSplitBtn"].map((selector) => $(selector)).find(Boolean);
   if (!onDashboard && !target) return;
@@ -389,14 +392,39 @@ function initSearchPalette() {
   overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
 }
 
+function bindLogoutButton() {
+  // Sign out belongs only on Expenses (Friends/Groups) and Personal — not group,
+  // friends detail, settings, or other focused pages.
+  const path = (window.location.pathname || "/").replace(/\/+$/, "") || "/";
+  const keepLogout = new Set(["/", "/app", "/index", "/index.html", "/personal", "/personal.html"]).has(path);
+  if (!keepLogout) {
+    $("#logoutBtn")?.remove();
+    return;
+  }
+  const button = $("#logoutBtn");
+  if (!button) return;
+  // Always restore the same icon + label (covers stale cached HTML that was icon-only).
+  button.className = "bb-btn-secondary !py-1.5 !px-2.5 text-[11px] hover:text-stamp hover:border-stamp/40";
+  button.type = "button";
+  button.title = "Sign out";
+  button.setAttribute("aria-label", "Sign out");
+  button.innerHTML = '<i data-lucide="log-out" class="w-3.5 h-3.5" aria-hidden="true"></i><span>Sign out</span>';
+  if (window.lucide?.createIcons) window.lucide.createIcons();
+  if (button.dataset.boundLogout === "1") return;
+  button.dataset.boundLogout = "1";
+  button.addEventListener("click", () => {
+    removeToken();
+    removeStoredGroupId();
+    window.location.href = "/login";
+  });
+}
+
 document.addEventListener("DOMContentLoaded", () => setTimeout(() => {
   initGlobalNotifications();
   initMobileQuickAction();
   initSearchPalette();
   initDatePickers();
-  // The dashboard and Personal ledger share the full account header. Other
-  // focused workflows keep their compact header without a sign-out control.
-  if (!/(^|\/)(?:index|personal)\.html$|\/$/.test(window.location.pathname)) $("#logoutBtn")?.remove();
+  bindLogoutButton();
 }, 0));
 
 async function api(path, opts = {}) {
@@ -562,6 +590,34 @@ async function prepareReceiptFile(file) {
   }
 }
 
+async function waitForScanJob(jobId, { timeoutMs = 120000, intervalMs = 700 } = {}) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const job = await api(`/scans/${jobId}`);
+    if (job.status === "succeeded" && job.extraction) {
+      const extraction = job.extraction;
+      const weak =
+        !extraction.store_name ||
+        /^unknown/i.test(extraction.store_name) ||
+        !(Number(extraction.total_amount) > 0);
+      return {
+        upload_id: job.upload_id,
+        image_url: job.image_url,
+        extraction,
+        source: job.source || "ocr",
+        message: weak
+          ? (job.message || "Could not read the receipt clearly. Enter merchant and total manually, then save.")
+          : (job.message || null),
+      };
+    }
+    if (job.status === "failed") {
+      throw new Error(job.error || job.message || "Receipt scan failed. Enter the details manually.");
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error("Receipt scan timed out. Enter the details manually, or try again.");
+}
+
 async function uploadReceipt(path, file) {
   const prepared = await prepareReceiptFile(file);
   let lastErr;
@@ -569,7 +625,11 @@ async function uploadReceipt(path, file) {
     const formData = new FormData();
     formData.append("file", prepared);
     try {
-      return await api(path, { method: "POST", body: formData });
+      const started = await api(path, { method: "POST", body: formData });
+      // Async OCR returns a scan job; sync fallback already includes extraction.
+      if (started && started.extraction) return started;
+      if (started && started.job_id) return waitForScanJob(started.job_id);
+      return started;
     } catch (err) {
       lastErr = err;
       await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
@@ -747,7 +807,11 @@ function categoryAccentColor(name) {
 
 function categoryTintStyle(name) {
   const accent = categoryAccentColor(name);
-  return `--cat-accent:${accent};--cat-bg:color-mix(in srgb, ${accent} 16%, white);--cat-fg:color-mix(in srgb, ${accent} 72%, black)`;
+  const dark = typeof document !== "undefined" && document.documentElement.classList.contains("theme-dark");
+  if (dark) {
+    return `--cat-accent:${accent};--cat-bg:color-mix(in srgb, ${accent} 28%, #0B1220);--cat-fg:color-mix(in srgb, ${accent} 55%, #E2E8F0)`;
+  }
+  return `--cat-accent:${accent};--cat-bg:color-mix(in srgb, ${accent} 16%, var(--surface));--cat-fg:color-mix(in srgb, ${accent} 72%, var(--ink))`;
 }
 
 function categoryClass(name) {

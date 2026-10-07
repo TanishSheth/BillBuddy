@@ -14,11 +14,41 @@ services:
       DATA_DIR: /data
       DATABASE_URL: postgresql://billbuddy:${POSTGRES_PASSWORD}@db:5432/billbuddy
       PORT: "8000"
+      REDIS_URL: redis://redis:6379/0
+      RUN_SCHEDULER: "1"
+      RUN_OCR_POLLER: "0"
+      WEB_CONCURRENCY: "${WEB_CONCURRENCY:-2}"
     volumes:
       - billbuddy-data:/data
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_started
+
+  scan-worker:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "app.scan_worker_main"]
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data
+      DATABASE_URL: postgresql://billbuddy:${POSTGRES_PASSWORD}@db:5432/billbuddy
+      REDIS_URL: redis://redis:6379/0
+      RUN_OCR_POLLER: "1"
+      OCR_WORKER_CONCURRENCY: "${OCR_WORKER_CONCURRENCY:-2}"
+    volumes:
+      - billbuddy-data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
 
   db:
     image: postgres:16-alpine

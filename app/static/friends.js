@@ -292,8 +292,9 @@ function monthName(month) {
   return new Date(`${month}-01T00:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 
-function canEditBill(split, settled = false) {
-  return !!split?.is_owner && !settled;
+function canEditBill(split, _settled = false) {
+  // Paid bills stay editable; the API applies only the difference (F5).
+  return !!split?.is_owner;
 }
 
 function setExpenseFormMode(editing) {
@@ -323,11 +324,14 @@ function resetExpenseForm() {
 function startEditBill(row) {
   const split = row.split;
   if (!canEditBill(split, isDirectBillSettled(row, activeFriend))) {
-    return ShareSquad.showToast("This bill is locked because it was included in a completed payment.", "info");
+    return ShareSquad.showToast("Only someone on this bill can edit it.", "info");
   }
   const panel = $("#friendExpensePanel");
   if (panel.classList.contains("hidden")) return;
   setExpenseFormMode(split.id);
+  if (isDirectBillSettled(row, activeFriend)) {
+    $("#friendExpenseHelp").textContent = "This bill was already paid. Saving changes only adjusts the difference on your balance; the original payment stays as recorded.";
+  }
   $("#friendExpenseTitle").value = split.title || "";
   $("#friendExpenseAmount").value = split.total_amount;
   ShareSquad.fillCurrencySelect($("#friendExpenseCurrency"), split.currency);
@@ -383,10 +387,15 @@ function startEditBill(row) {
 
 async function deleteBill(row) {
   const split = row.split;
-  if (!canEditBill(split, isDirectBillSettled(row, activeFriend))) return ShareSquad.showToast("This bill is locked because it was included in a completed payment.", "info");
+  if (!canEditBill(split, isDirectBillSettled(row, activeFriend))) {
+    return ShareSquad.showToast("Only someone on this bill can delete it.", "info");
+  }
+  const paid = isDirectBillSettled(row, activeFriend);
   if (!await ShareSquad.confirmDialog({
     title: `Delete “${split.title}”?`,
-    message: "This private bill will be removed from both of your histories. You can undo for a few seconds.",
+    message: paid
+      ? "This bill was paid. Deleting it keeps the paid amount as a credit on your balance; it will not erase the payment record."
+      : "This private bill will be removed from both of your histories. You can undo for a few seconds.",
     confirmLabel: "Delete bill",
   })) return;
   const friendKey = activeFriend?.key;
@@ -443,7 +452,24 @@ function directLedgerRow(row, friend) {
     ? `<div class="flex justify-end gap-1.5 mt-2"><button type="button" class="edit-friend-bill bb-btn-secondary !py-1 !px-2 text-[10px]" data-split-id="${split.id}">Edit</button><button type="button" class="delete-friend-bill bb-btn-secondary !py-1 !px-2 text-[10px] text-stamp border-stamp/30" data-split-id="${split.id}">Delete</button></div>`
     : "";
   const settledClass = settled ? "line-through text-ink/45" : "";
-  return `<div class="member-row ${settled ? "opacity-70" : ""}" data-direct-split="${split.id}"><div class="min-w-0"><p class="font-semibold text-sm ${settledClass}">${ShareSquad.escapeHtml(split.title)}</p><p class="text-xs text-ink/55 ${settledClass}">${ShareSquad.formatDate(split.bill_date)} · ${split.payer_paid_amount == null ? (split.is_payer ? "You paid" : `${ShareSquad.escapeHtml(friend.friend.name)} paid`) : "You both paid"} ${money(split.total_amount, split.currency)}</p>${actions}</div><div class="text-right shrink-0"><p class="text-xs font-mono font-bold ${bill.tone}">${bill.text}</p><p class="text-[10px] text-ink/50">${bill.hint}</p></div></div>`;
+  const editedChip = split.edited_after_payment
+    ? '<span class="status-chip status-waiting mt-1">Edited after payment</span>'
+    : "";
+  const history = Array.isArray(split.edit_history) ? split.edit_history : [];
+  const historyHtml = history.length
+    ? `<details class="mt-1"><summary class="cursor-pointer text-[10px] font-mono text-ink/50">Edit history · ${history.length}</summary><div class="mt-1 space-y-1">${history.slice().reverse().map((entry) => {
+      const when = entry?.at ? ShareSquad.formatDate(String(entry.at).slice(0, 10)) : "";
+      const who = ShareSquad.escapeHtml(entry?.editor_name || "Someone");
+      const oldTotal = Number(entry?.old_total);
+      const newTotal = Number(entry?.new_total);
+      const delta = Number(entry?.delta);
+      const deltaText = Number.isFinite(delta) && Math.abs(delta) >= 0.005
+        ? ` · balance ${delta > 0 ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(delta), split.currency)}`
+        : "";
+      return `<p class="text-[10px] text-ink/55">${when ? `${when} · ` : ""}${who}: ${ShareSquad.formatMoney(oldTotal, split.currency)} → ${ShareSquad.formatMoney(newTotal, split.currency)}${deltaText}</p>`;
+    }).join("")}</div></details>`
+    : "";
+  return `<div class="member-row ${settled ? "opacity-70" : ""}" data-direct-split="${split.id}"><div class="min-w-0"><p class="font-semibold text-sm ${settledClass}">${ShareSquad.escapeHtml(split.title)}</p><p class="text-xs text-ink/55 ${settledClass}">${ShareSquad.formatDate(split.bill_date)} · ${split.payer_paid_amount == null ? (split.is_payer ? "You paid" : `${ShareSquad.escapeHtml(friend.friend.name)} paid`) : "You both paid"} ${money(split.total_amount, split.currency)}</p>${editedChip}${historyHtml}${actions}</div><div class="text-right shrink-0"><p class="text-xs font-mono font-bold ${bill.tone}">${bill.text}</p><p class="text-[10px] text-ink/50">${bill.hint}</p></div></div>`;
 }
 
 function renderLedger(friend) {
@@ -466,8 +492,7 @@ function renderLedger(friend) {
   $("#historyMonth").classList.toggle("hidden", activeLedger !== "history");
   [["#currentBillsTab", activeLedger === "current"], ["#historyBillsTab", activeLedger === "history"]].forEach(([selector, isActive]) => {
     const tab = $(selector);
-    tab.classList.toggle("bb-btn-primary", isActive);
-    tab.classList.toggle("bb-btn-secondary", !isActive);
+    tab?.classList.toggle("active", isActive);
   });
   const groupHtml = groupBlocks.length ? `<section class="space-y-2"><div class="flex items-center justify-between gap-3"><p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Group settlements</p><span class="text-[10px] text-ink/50">${groupBlocks.length} group${groupBlocks.length === 1 ? "" : "s"}</span></div>${groupBlocks.sort((a, b) => String(b.date).localeCompare(String(a.date))).map((group) => {
     const amount = Number(group.settlement?.amount || 0);
@@ -720,7 +745,6 @@ $("#friendExpenseAmount").oninput = renderValues;
 $("#friendMyPaid").oninput = renderValues;
 $("#friendTheirPaid").oninput = renderValues;
 $("#settingsBtn").onclick = () => { location.href = "/settings.html"; };
-$("#logoutBtn")?.addEventListener("click", () => { ShareSquad.removeToken(); ShareSquad.removeStoredGroupId(); location.href = "/login.html"; });
 $("#addFriendBtn").onclick = openFriendInvite;
 $("#addFriendHeaderBtn")?.addEventListener("click", openFriendInvite);
 const legacySplitButton = document.querySelector('a[href="/quick-split.html"]');

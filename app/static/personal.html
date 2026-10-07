@@ -44,8 +44,9 @@
           <img id="headerAvatar" alt="" class="header-avatar hidden">
           <span id="headerInitials" class="avatar-initials avatar-initials-small">?</span>
         </button>
-        <button id="logoutBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] hover:text-stamp hover:border-stamp/40" title="Sign out">
-          <i data-lucide="log-out" class="w-3.5 h-3.5"></i>
+        <button id="logoutBtn" type="button" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] hover:text-stamp hover:border-stamp/40" title="Sign out" aria-label="Sign out">
+          <i data-lucide="log-out" class="w-3.5 h-3.5" aria-hidden="true"></i>
+          <span>Sign out</span>
         </button>
       </div>
     </div>
@@ -109,7 +110,7 @@
     <div class="bb-card">
       <div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3">
         <h3 class="font-mono uppercase text-xs tracking-widest text-muted font-bold">Itemized Transactions</h3>
-        <select id="categoryFilter" class="text-xs font-mono border border-line rounded px-2 py-1 bg-transparent">
+        <select id="categoryFilter" class="bb-input !py-1 !px-2 text-xs font-mono !w-auto">
           <option value="All">All Categories</option>
           <option value="Food & Dining">Food & Dining</option>
           <option value="Groceries">Groceries</option>
@@ -269,8 +270,8 @@
 
 
 
-<script src="/api.js?v=20260928compactHeaders"></script>
-  <script src="/personal.js?v=20260928cleanPersonalHeader"></script>
+<script src="/api.js?v=20261007signOutLabel"></script>
+  <script src="/personal.js?v=20261007signOutLabel"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

@@ -184,7 +184,12 @@ async function saveGeneralSettings() {
 }
 
 async function clearGeneralKey() {
-  if (!await ShareSquad.confirmDialog({ title: "Remove custom API key?", message: "The saved key will be removed from your account.", confirmLabel: "Remove key" })) return;
+  if (!await ShareSquad.confirmDialog({
+    title: "Remove custom API key?",
+    message: "The saved key will be removed from your account.",
+    confirmLabel: "Remove key",
+    danger: true,
+  })) return;
   const msg = $("#generalMsg");
   try {
     const updated = await ShareSquad.api("/settings/account", {
@@ -288,7 +293,12 @@ async function saveGroupSettings() {
 async function clearGroupKey() {
   const gid = state.selectedGroupId;
   if (!gid) return;
-  if (!await ShareSquad.confirmDialog({ title: "Clear group API key?", message: "This group's custom key will be removed.", confirmLabel: "Clear key" })) return;
+  if (!await ShareSquad.confirmDialog({
+    title: "Clear group API key?",
+    message: "This group's custom key will be removed.",
+    confirmLabel: "Clear key",
+    danger: true,
+  })) return;
   const msg = $("#groupMsg");
   try {
     const updated = await ShareSquad.api(`/settings/groups/${gid}`, {

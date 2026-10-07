@@ -59,20 +59,17 @@ function setExpenseView(view, { updateUrl = true } = {}) {
   }
 }
 
-function openGroup(groupId) {
+function openGroup(groupId, options = {}) {
   ShareSquad.setStoredGroupId(groupId);
-  window.location.href = `/group.html?group=${encodeURIComponent(groupId)}`;
+  const params = new URLSearchParams({ group: String(groupId) });
+  if (options.tab) params.set("tab", options.tab);
+  window.location.href = `/group.html?${params.toString()}`;
 }
 
 async function detectDemoSandbox() {
-  if (localStorage.getItem("sharesquad_demo_sandbox") === "1") return true;
-  try {
-    await ShareSquad.api("/demo/sandbox");
-    localStorage.setItem("sharesquad_demo_sandbox", "1");
-    return true;
-  } catch (_) {
-    return false;
-  }
+  // Only trust the flag set when a sandbox is created. Probing GET /demo/sandbox
+  // for every normal account produced recurring 404 noise in the console.
+  return localStorage.getItem("sharesquad_demo_sandbox") === "1";
 }
 
 function navigateMainScreen(screen, direction = 1) {
@@ -111,7 +108,7 @@ function renderCreateGroupMembers() {
     });
   }
   if (chips) {
-    chips.innerHTML = createGroupEmails.map((email) => `<span class="inline-flex items-center gap-1.5 rounded-full bg-brand/10 text-brand px-2.5 py-1 text-xs font-mono">${ShareSquad.escapeHtml(ShareSquad.maskEmail(email))}<button type="button" class="remove-create-group-email text-brand/70 hover:text-stamp" data-email="${ShareSquad.escapeHtml(email)}" aria-label="Remove ${ShareSquad.escapeHtml(ShareSquad.maskEmail(email))}">×</button></span>`).join("");
+    chips.innerHTML = createGroupEmails.map((email) => `<span class="inline-flex items-center gap-1.5 rounded-full bg-brand/10 text-brand px-2.5 py-1 text-xs font-mono">${ShareSquad.escapeHtml(ShareSquad.maskEmail(email))}<button type="button" class="remove-create-group-email email-chip-remove" data-email="${ShareSquad.escapeHtml(email)}" aria-label="Remove ${ShareSquad.escapeHtml(ShareSquad.maskEmail(email))}">×</button></span>`).join("");
     chips.querySelectorAll(".remove-create-group-email").forEach((button) => {
       button.addEventListener("click", () => {
         createGroupEmails = createGroupEmails.filter((email) => email !== button.dataset.email);
@@ -272,7 +269,7 @@ function renderGroups(groups) {
   empty.classList.add("hidden");
   grid.innerHTML = dashboardGroups
     .map(
-      (g) => `<div class="bb-card group-card flex flex-col justify-between gap-3 cursor-pointer" data-id="${g.id}" role="link" tabindex="0">
+      (g) => `<div class="bb-card group-card flex flex-col justify-between gap-3 cursor-pointer" data-id="${g.id}" data-draft="${g.member_count < 2 ? "1" : "0"}" role="link" tabindex="0">
         <div>
           <div class="flex items-start justify-between gap-2">
             <div class="flex items-start gap-2 min-w-0">
@@ -285,12 +282,14 @@ function renderGroups(groups) {
             <span>${g.member_count} member${g.member_count === 1 ? "" : "s"}</span>
             ${g.role === "owner" ? ' &bull; <span class="text-brand font-bold">Owner</span>' : ""}
           </p>
-          ${g.member_count < 2 ? '<span class="status-chip status-draft mt-2">Draft · invite a member</span>' : '<span class="status-chip status-active mt-2">Active</span>'}
+          ${g.member_count < 2
+            ? '<span class="status-chip status-draft mt-2">Draft · invite a member</span><p class="text-[11px] text-ink/55 mt-1.5">Open Members to invite someone before shared bills unlock.</p>'
+            : '<span class="status-chip status-active mt-2">Active</span>'}
           <p class="text-[10px] text-ink/40 mt-1.5 font-mono">Created ${ShareSquad.formatDate(g.created_at)}</p>
         </div>
         <div class="flex gap-2 pt-3 border-t border-ink/10">
-          <button type="button" class="open-group bb-btn-primary flex-1 !py-1.5 text-[11px]" data-id="${g.id}">
-            <i data-lucide="folder-open" class="w-3.5 h-3.5"></i> Open Group
+          <button type="button" class="open-group bb-btn-primary flex-1 !py-1.5 text-[11px]" data-id="${g.id}" data-draft="${g.member_count < 2 ? "1" : "0"}">
+            <i data-lucide="folder-open" class="w-3.5 h-3.5"></i> ${g.member_count < 2 ? "Finish setup" : "Open Group"}
           </button>
           ${
             g.role === "owner"
@@ -314,11 +313,15 @@ function renderGroups(groups) {
   });
 
   grid.querySelectorAll(".open-group").forEach((btn) => {
-    btn.addEventListener("click", () => openGroup(Number(btn.dataset.id)));
+    btn.addEventListener("click", () => openGroup(Number(btn.dataset.id), {
+      tab: btn.dataset.draft === "1" ? "members" : undefined,
+    }));
   });
 
   grid.querySelectorAll(".group-card").forEach((card) => {
-    const open = () => openGroup(Number(card.dataset.id));
+    const open = () => openGroup(Number(card.dataset.id), {
+      tab: card.dataset.draft === "1" ? "members" : undefined,
+    });
     card.addEventListener("click", (event) => { if (!event.target.closest("button, a")) open(); });
     card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
   });
@@ -392,12 +395,18 @@ async function loadDashboard() {
     }
     if ($("#headerInitials")) $("#headerInitials").textContent = ShareSquad.initials(me.account.display_name);
     const [groups, quickSplits, friends] = await Promise.all([ShareSquad.api("/groups"), ShareSquad.api("/quick-splits"), ShareSquad.api("/friends")]);
-    const consolidatedResults = await Promise.all(friends.map(async (friend) => {
-      let total = await ShareSquad.api(`/friends/${friend.id}/consolidated-balances`).catch(() => null);
-      if (!total) total = await ShareSquad.api(`/friends/${friend.id}/consolidated-balances`).catch(() => null);
-      return [friend.id, total];
-    }));
-    const consolidatedByFriend = new Map(consolidatedResults.filter(([, total]) => total).map(([friendId, total]) => [friendId, total]));
+    let consolidatedByFriend = new Map();
+    try {
+      const summary = await ShareSquad.api("/friends/consolidated-balances-summary");
+      consolidatedByFriend = new Map((summary.friends || []).map((row) => [row.friend_id, row]));
+    } catch (err) {
+      // Fallback for older servers: one request per friend.
+      const consolidatedResults = await Promise.all(friends.map(async (friend) => {
+        const total = await ShareSquad.api(`/friends/${friend.id}/consolidated-balances`).catch(() => null);
+        return [friend.id, total];
+      }));
+      consolidatedByFriend = new Map(consolidatedResults.filter(([, total]) => total).map(([friendId, total]) => [friendId, total]));
+    }
     renderGroups(groups);
     renderQuickSplits(quickSplits, friends, consolidatedByFriend);
     renderOnboarding(groups, friends, quickSplits);
@@ -471,12 +480,6 @@ async function submitCreateGroup(e) {
   $("#createGroupModal")?.addEventListener("click", (e) => {
     if (e.target.id === "createGroupModal") hideCreateGroupModal();
   });
-  $("#logoutBtn")?.addEventListener("click", () => {
-    ShareSquad.removeToken();
-    ShareSquad.removeStoredGroupId();
-    window.location.href = "/login.html";
-  });
-
   ShareSquad.fillAllCurrencySelects();
   $$("#expenseViewSelector [data-expense-view]").forEach((btn) => {
     btn.addEventListener("click", () => setExpenseView(btn.dataset.expenseView));

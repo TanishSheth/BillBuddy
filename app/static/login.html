@@ -64,8 +64,17 @@
     const PENDING_QUICK_SPLIT_KEY = "sharesquad_pending_quick_split";
     const PENDING_QUICK_SPLIT_SLOT_KEY = "sharesquad_pending_quick_split_slot";
 
+    function safeAppRedirect(rawNext) {
+      const next = (rawNext || "").trim();
+      // Never bounce signed-in users to the marketing home page.
+      if (!next || next === "/" || next === "/landing.html" || next.startsWith("//") || !next.startsWith("/")) {
+        return "/app";
+      }
+      return next;
+    }
     if (ShareSquad.getToken()) {
-      window.location.href = "/index.html";
+      const next = new URLSearchParams(window.location.search).get("next");
+      window.location.replace(safeAppRedirect(next));
     }
 
     let mode = "signin"; // signin | register | forgot | restore
@@ -197,7 +206,8 @@
 
         ShareSquad.setToken(data.access_token);
 
-        let redirect = "/";
+        const params = new URLSearchParams(window.location.search);
+        let redirect = safeAppRedirect(params.get("next"));
         const inviteCode = localStorage.getItem(PENDING_INVITE_KEY);
         if (inviteCode) {
           localStorage.removeItem(PENDING_INVITE_KEY);
@@ -229,7 +239,7 @@
           }
         }
 
-        window.location.href = redirect;
+        window.location.replace(redirect);
       } catch (err) {
         msg.textContent = err.message;
         msg.className = "text-xs font-mono balance-negative";

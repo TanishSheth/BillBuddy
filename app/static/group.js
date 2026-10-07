@@ -74,7 +74,8 @@ function restoreExpenseFilters() {
       month.value = String(saved.month || "");
     }
   }
-  if (onlyMine) onlyMine.checked = typeof saved.onlyMyExpenses === "boolean" ? saved.onlyMyExpenses : true;
+  // Default off so category filters show the full month unless the user opted in.
+  if (onlyMine) onlyMine.checked = typeof saved.onlyMyExpenses === "boolean" ? saved.onlyMyExpenses : false;
 }
 
 function groupCurrency() {
@@ -115,6 +116,8 @@ function updateGroupPageHelp(tabName) {
 function switchTab(tabName) {
   $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tabName));
   $$(".tab-panel").forEach((p) => p.classList.toggle("hidden", p.id !== `tab-${tabName}`));
+  const tabSelect = $("#groupTabSelect");
+  if (tabSelect && tabSelect.value !== tabName) tabSelect.value = tabName;
   updateGroupPageHelp(tabName);
 
   if (tabName === "expenses") loadExpenses();
@@ -624,7 +627,9 @@ function renderSplitOptions() {
     `;
 
     row.querySelector(".split-val-input").addEventListener("input", (e) => {
-      state.splitValues[m.id] = parseFloat(e.target.value) || 0;
+      const mid = Number(m.id);
+      const raw = String(e.target.value || "").replace(/,/g, "").trim();
+      state.splitValues[mid] = raw === "" ? 0 : (parseFloat(raw) || 0);
       updateSplitNotice();
     });
 
@@ -637,17 +642,22 @@ function renderSplitOptions() {
 function updateSplitNotice() {
   const notice = $("#splitStatusNotice");
   if (!notice) return;
-  const totalAmt = parseFloat($("#f_amount").value) || 0;
+  const totalAmt = parseFloat(String($("#f_amount")?.value || "").replace(/,/g, "")) || 0;
   const curr = expenseCurrency();
+  // Keep only active-member keys so stale ids do not block recompute.
+  const activeIds = new Set(activeMembers().map((m) => Number(m.id)));
+  const activeValues = Object.entries(state.splitValues)
+    .filter(([id]) => activeIds.has(Number(id)))
+    .map(([, value]) => Number(value) || 0);
 
   if (state.splitType === "PERCENTAGE") {
-    const sumPct = Object.values(state.splitValues).reduce((a, b) => a + Number(b), 0);
+    const sumPct = activeValues.reduce((a, b) => a + Number(b), 0);
     const diff = (100 - sumPct).toFixed(1);
     const ok = Math.abs(sumPct - 100) < 0.01;
     notice.textContent = ok ? "Total: 100% (Balanced)" : `Total: ${sumPct.toFixed(1)}% (${diff}% remaining to reach 100%)`;
     notice.className = `split-total-bar ${ok ? "ok" : sumPct > 100 ? "over" : "under"}`;
   } else if (state.splitType === "EXACT") {
-    const sumAmt = Object.values(state.splitValues).reduce((a, b) => a + Number(b), 0);
+    const sumAmt = activeValues.reduce((a, b) => a + Number(b), 0);
     const diff = (totalAmt - sumAmt).toFixed(2);
     const ok = Math.abs(sumAmt - totalAmt) < 0.01;
     notice.textContent = ok
@@ -655,7 +665,7 @@ function updateSplitNotice() {
       : `Total: ${ShareSquad.formatMoneyText(sumAmt, curr)} (${ShareSquad.formatMoneyText(Math.abs(diff), curr)} ${Number(diff) >= 0 ? "remaining" : "over"})`;
     notice.className = `split-total-bar ${ok ? "ok" : sumAmt > totalAmt ? "over" : "under"}`;
   } else if (state.splitType === "SHARES") {
-    const totalShares = Object.values(state.splitValues).reduce((a, b) => a + Number(b), 0);
+    const totalShares = activeValues.reduce((a, b) => a + Number(b), 0);
     notice.textContent = `Total shares: ${totalShares}. Each share ≈ ${ShareSquad.formatMoneyText(totalAmt / (totalShares || 1), curr)}`;
     notice.className = "split-total-bar ok";
   } else {
@@ -725,6 +735,10 @@ async function loadExpenses() {
 
   if (!expenses.length) {
     empty.classList.remove("hidden");
+    const cat = $("#groupCategoryFilter")?.value || "All";
+    empty.textContent = cat !== "All"
+      ? `No expenses match “${cat}” with the current filters.`
+      : "No expenses match these filters yet.";
     return;
   }
   empty.classList.add("hidden");
@@ -965,15 +979,31 @@ async function saveExpense() {
         return;
       }
     } else {
-      state.members.forEach((m) => {
-        const val = state.splitValues[m.id];
-        if (val !== undefined && val > 0) {
-          splitDetails.push({ member_id: m.id, value: val });
+      activeMembers().forEach((m) => {
+        const mid = Number(m.id);
+        const val = Number(state.splitValues[mid] ?? state.splitValues[m.id] ?? 0);
+        if (val > 0) {
+          splitDetails.push({ member_id: mid, value: val });
         }
       });
       if (!splitDetails.length) {
         saveExpenseError("Enter split proportions for group members.");
         return;
+      }
+      if (state.splitType === "PERCENTAGE") {
+        const sumPct = splitDetails.reduce((a, row) => a + Number(row.value), 0);
+        if (Math.abs(sumPct - 100) >= 0.01) {
+          saveExpenseError(`Percentages must add up to 100% (currently ${sumPct.toFixed(1)}%).`);
+          updateSplitNotice();
+          return;
+        }
+      } else if (state.splitType === "EXACT") {
+        const sumAmt = splitDetails.reduce((a, row) => a + Number(row.value), 0);
+        if (Math.abs(sumAmt - totalAmount) >= 0.01) {
+          saveExpenseError(`Exact amounts must add up to ${ShareSquad.formatMoneyText(totalAmount, expenseCurrency())}.`);
+          updateSplitNotice();
+          return;
+        }
       }
     }
 
@@ -1491,12 +1521,18 @@ async function handleReceiptUpload(file) {
   ShareSquad.fillAllCurrencySelects();
   ShareSquad.bindAllCategorySelects();
 
-  const storedGid = ShareSquad.getStoredGroupId();
-  if (!storedGid) {
-    window.location.href = "/index.html";
-    return;
+  const urlGroup = Number(new URLSearchParams(window.location.search).get("group") || 0);
+  if (urlGroup) {
+    ShareSquad.setStoredGroupId(urlGroup);
+    state.currentGroupId = urlGroup;
+  } else {
+    const storedGid = ShareSquad.getStoredGroupId();
+    if (!storedGid) {
+      window.location.href = "/index.html";
+      return;
+    }
+    state.currentGroupId = Number(storedGid);
   }
-  state.currentGroupId = Number(storedGid);
 
   try {
     state.account = (await ShareSquad.api("/auth/me")).account;
@@ -1507,6 +1543,9 @@ async function handleReceiptUpload(file) {
   // Navigation tabs
   $$(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  });
+  $("#groupTabSelect")?.addEventListener("change", (event) => {
+    switchTab(event.target.value);
   });
 
   // Split type buttons
@@ -1682,10 +1721,8 @@ async function handleReceiptUpload(file) {
     const emailMode = method === "email";
     $("#inviteForm")?.classList.toggle("hidden", !emailMode);
     $("#inviteLinkPanel")?.classList.toggle("hidden", emailMode);
-    $("#showInviteEmailBtn")?.classList.toggle("bb-btn-primary", emailMode);
-    $("#showInviteEmailBtn")?.classList.toggle("bb-btn-secondary", !emailMode);
-    $("#showInviteLinkBtn")?.classList.toggle("bb-btn-primary", !emailMode);
-    $("#showInviteLinkBtn")?.classList.toggle("bb-btn-secondary", emailMode);
+    $("#showInviteEmailBtn")?.classList.toggle("active", emailMode);
+    $("#showInviteLinkBtn")?.classList.toggle("active", !emailMode);
   }
 
   $("#showInviteEmailBtn")?.addEventListener("click", () => setInviteMethod("email"));
@@ -1747,12 +1784,6 @@ async function handleReceiptUpload(file) {
       msg.className = "text-xs font-mono balance-negative";
       ShareSquad.showToast(err.message, "error");
     }
-  });
-
-  $("#logoutBtn")?.addEventListener("click", () => {
-    ShareSquad.removeToken();
-    ShareSquad.removeStoredGroupId();
-    window.location.href = "/login.html";
   });
 
   // Mobile FAB: jump to Add/Scan tab and open manual entry

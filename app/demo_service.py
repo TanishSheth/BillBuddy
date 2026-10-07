@@ -22,7 +22,8 @@ from .split_logic import calculate_splits
 # Every released application version gets a fresh private template. New demos
 # and "Reset demo" therefore always show the current product fixture, while an
 # in-progress visitor sandbox is never silently overwritten.
-TEMPLATE_VERSION = f"sharesquad-product-demo-{APP_VERSION}"
+# Keep this under the demo_templates.version column width (80).
+TEMPLATE_VERSION = f"ss-demo-{APP_VERSION}"
 SANDBOX_TTL_HOURS = 2
 _PEOPLE = ("Alex", "Jordan", "Casey", "Morgan", "Riley")
 # store, total, category, payer, participants, bill_date_offset_days, currency, fx_to_group

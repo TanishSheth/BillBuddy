@@ -40,7 +40,7 @@ function payload() {
 function render(split) {
   editing = null; showCreate(false); $("#detailTitle").textContent = split.title; $("#detailMeta").textContent = `${ShareSquad.formatDate(split.bill_date)} · ${split.category} · ${split.split_type.toLowerCase()} split`; $("#detailStatus").textContent = split.status === "SETTLED" ? "Settled" : "Open"; $("#detailPayer").innerHTML = `${ShareSquad.escapeHtml(split.payer_name)} paid · their share ${$money(split.payer_share_amount, split.currency)}`; $("#detailTotal").innerHTML = $money(split.total_amount, split.currency);
   const edit = $("#editQuickSplit"); edit.classList.toggle("hidden", !split.is_owner); edit.onclick = () => openEdit(split);
-  const remove = $("#deleteQuickSplit"); remove.classList.toggle("hidden", !split.is_owner); remove.onclick = async () => { if (!await ShareSquad.confirmDialog({ title: `Delete “${split.title}”?`, message: "This private split will be removed. You can undo for a few seconds.", confirmLabel: "Delete split" })) return; const detail = $("#detailPane"); const create = $("#createPane"); ShareSquad.runWithUndo({ message: `Split “${split.title}” deleted`, onHide: () => { detail?.classList.add("hidden"); }, onUndo: () => { detail?.classList.remove("hidden"); }, onCommit: async () => { await ShareSquad.api(`/quick-splits/${split.id}`, { method: "DELETE" }); location.href = "/index.html"; } }); };
+  const remove = $("#deleteQuickSplit"); remove.classList.toggle("hidden", !split.is_owner); remove.onclick = async () => { if (!await ShareSquad.confirmDialog({ title: `Delete “${split.title}”?`, message: "This private split will be removed. You can undo for a few seconds.", confirmLabel: "Delete split" })) return; const detail = $("#detailPane"); ShareSquad.runWithUndo({ message: `Split “${split.title}” deleted`, onHide: () => { detail?.classList.add("hidden"); showCreate(true); $("#qsMsg").textContent = "Split deleted. Create another below, or go back to Expenses."; $("#qsMsg").className = "text-xs font-mono text-ink/60"; }, onUndo: () => { detail?.classList.remove("hidden"); showCreate(false); $("#qsMsg").textContent = ""; }, onCommit: async () => { await ShareSquad.api(`/quick-splits/${split.id}`, { method: "DELETE" }); history.replaceState({}, "", "/quick-split.html"); editing = null; ShareSquad.showToast("Quick split deleted", "success"); } }); };
   const list = $("#participantList"); list.innerHTML = split.participants.map((p) => { const label = p.display_name || ShareSquad.maskEmail(p.email); const remaining = Number(p.remaining_amount ?? p.share_amount); const paid = Number(p.paid_amount || 0); const canRecord = remaining > 0.004; const button = canRecord && (p.is_me || split.is_payer) ? `<button class="bb-btn-primary !py-1.5 !px-3 text-[10px] mark-paid" data-id="${p.id}">${p.is_me ? "Mark remaining paid" : "Mark remaining received"}</button>` : `<span class="text-[10px] font-mono text-ink/50">Paid</span>`; const progress = paid > 0 && remaining > 0 ? ` · ${$money(paid, split.currency)} paid, ${$money(remaining, split.currency)} remaining` : remaining > 0 ? ` · ${$money(remaining, split.currency)} remaining` : " · Paid"; return `<div class="member-row"><div><div class="font-semibold text-sm">${ShareSquad.escapeHtml(label)}${p.is_me ? " (you)" : ""}</div><div class="text-xs text-ink/60">Share ${$money(p.share_amount, split.currency)}${progress}</div></div>${button}</div>`; }).join("");
   list.querySelectorAll(".mark-paid").forEach((b) => b.onclick = async () => render(await ShareSquad.api(`/quick-splits/${split.id}/participants/${b.dataset.id}/mark-paid`, { method: "POST" })));
   if (split.is_payer) { $("#sharePanel").classList.remove("hidden"); const person = split.participants[0]; $("#shareLink").value = `${location.origin}/quick-join.html?code=${encodeURIComponent(split.invite_code)}&slot=${encodeURIComponent(person.invite_token || "")}`; }
@@ -67,7 +67,39 @@ $("#qsEmails")?.addEventListener("input", () => renderValues());
 $("#qsAmount")?.addEventListener("input", () => renderValues());
 $("#qsCurrency")?.addEventListener("change", () => renderValues());
 $$("#qsSplitType .split-type-pill").forEach((b) => b.onclick = () => chooseType(b.dataset.type));
-$("#quickSplitForm")?.addEventListener("submit", async (event) => { event.preventDefault(); const msg = $("#qsMsg"); try { const split = editing ? await ShareSquad.api(`/quick-splits/${editing.id}`, { method: "PUT", body: JSON.stringify(payload()) }) : await ShareSquad.api("/quick-splits", { method: "POST", body: JSON.stringify(payload()) }); history.replaceState({}, "", `/quick-split.html?id=${split.id}`); render(split); ShareSquad.showToast("Quick split saved", "success"); } catch (err) { msg.textContent = err.message; msg.className = "text-xs font-mono balance-negative"; } });
+$("#quickSplitForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const msg = $("#qsMsg");
+  const submitBtn = event.target.querySelector("button[type='submit']");
+  try {
+    const body = payload();
+    if (!body.title || !(body.total_amount > 0) || !body.bill_date) {
+      msg.textContent = "Enter a title, amount, and date.";
+      msg.className = "text-xs font-mono balance-negative";
+      msg.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (!body.participants.length) {
+      msg.textContent = "Choose who to split with (email, link, or group person).";
+      msg.className = "text-xs font-mono balance-negative";
+      msg.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    if (submitBtn) submitBtn.disabled = true;
+    const split = editing
+      ? await ShareSquad.api(`/quick-splits/${editing.id}`, { method: "PUT", body: JSON.stringify(body) })
+      : await ShareSquad.api("/quick-splits", { method: "POST", body: JSON.stringify(body) });
+    history.replaceState({}, "", `/quick-split.html?id=${split.id}`);
+    render(split);
+    ShareSquad.showToast("Quick split saved", "success");
+  } catch (err) {
+    msg.textContent = err.message;
+    msg.className = "text-xs font-mono balance-negative";
+    msg.scrollIntoView({ behavior: "smooth", block: "center" });
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+  }
+});
 $("#copyShareLink")?.addEventListener("click", async () => { await navigator.clipboard.writeText($("#shareLink").value); ShareSquad.showToast("Private invite link copied", "success"); });
 $("#createGroupFromSplit")?.addEventListener("click", () => { location.href = "/?createGroup=1"; });
 (async () => { if (!ShareSquad.getToken()) { location.href = "/login.html"; return; } ShareSquad.fillAllCurrencySelects(); ShareSquad.bindAllCategorySelects(); if ($("#qsDate")) { $("#qsDate").max = todayISO(); $("#qsDate").value = todayISO(); } await loadGroupPeople(); toggleInviteMode(); await load(); })();

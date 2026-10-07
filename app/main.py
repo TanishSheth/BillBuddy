@@ -9,6 +9,7 @@ import asyncio
 import threading
 import io
 import json
+from contextvars import ContextVar
 from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal
 from calendar import monthrange
@@ -19,19 +20,21 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, 
 from fastapi.responses import FileResponse, Response, StreamingResponse, RedirectResponse
 from PIL import Image, ImageOps
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, or_, update
-from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, update, text
+from sqlalchemy.orm import Session, selectinload
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from . import models, schemas
 from .config import (
     APP_VERSION,
+    ASYNC_OCR,
     BASE_URL,
     DATA_DIR,
     DISABLE_SCHEDULER,
     IS_DEVELOPMENT,
     REPORTS_DIR,
+    RUN_SCHEDULER,
     SECRET_KEY,
     STATIC_DIR,
     TMP_UPLOADS_DIR,
@@ -68,6 +71,16 @@ from .emailer import (
     send_password_reset_email,
 )
 from .demo_service import create_sandbox, purge_expired_sandboxes, reset_sandbox, sandbox_for_account
+from . import redis_support
+from .storage import get_storage
+from .scan_worker import (
+    content_fingerprint,
+    enqueue_scan_job,
+    kick_scan_worker,
+    process_scan_job,
+    purge_old_tmp_uploads,
+    start_background_poller,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -77,24 +90,37 @@ logging.getLogger("fontTools.subset").setLevel(logging.WARNING)
 logging.getLogger("weasyprint").setLevel(logging.WARNING)
 BUSINESS_TIMEZONE = ZoneInfo(os.environ.get("APP_TIMEZONE", "America/New_York"))
 
+# Block disposable/placeholder domains in production only — QA and local demos
+# commonly use @example.com fixtures.
 BLOCKED_INVITE_DOMAINS = {
     "example.com", "example.org", "example.net", "test.com", "localhost", "invalid",
+} if not IS_DEVELOPMENT else set()
+
+# Category filter aliases: UI labels vs legacy/slug storage.
+_CATEGORY_ALIASES = {
+    "Food & Dining": {"Food & Dining", "Food", "Dining"},
+    "Food": {"Food & Dining", "Food", "Dining"},
+    "General": {"General", "General / Other", "Other"},
+    "General / Other": {"General", "General / Other", "Other"},
 }
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/jpg"}
 
-# Simple in-memory rate limiter for auth endpoints: { "ip:endpoint": [timestamps] }
-_RATE_LIMIT_BUCKET: Dict[str, List[float]] = {}
-
-# Per-process live update subscribers. The existing version polling remains as
-# a fallback for disconnected clients and multi-process deployments.
+# Per-process live update subscribers. Redis pub/sub fans out across workers;
+# version polling remains as a fallback for disconnected clients.
 _GROUP_EVENT_SUBSCRIBERS: Dict[int, List[tuple[asyncio.AbstractEventLoop, asyncio.Queue]]] = {}
 _GROUP_EVENT_LOCK = threading.Lock()
+_BALANCE_MEMO: ContextVar[Optional[dict]] = ContextVar("balance_memo", default=None)
+_TIMED_PATH_PREFIXES = (
+    "/api/friends/",
+    "/api/groups/",
+    "/api/personal/receipts/",
+    "/api/scans",
+)
 
 
-def notify_group_change(group_id: int, kind: str = "updated") -> None:
-    """Tell open group pages to refresh after a committed change."""
+def _fanout_group_event(group_id: int, kind: str) -> None:
     with _GROUP_EVENT_LOCK:
         subscribers = list(_GROUP_EVENT_SUBSCRIBERS.get(group_id, []))
     for loop, queue in subscribers:
@@ -104,6 +130,26 @@ def notify_group_change(group_id: int, kind: str = "updated") -> None:
             loop.call_soon_threadsafe(queue.put_nowait, kind)
         except RuntimeError:
             pass
+
+
+def notify_group_change(group_id: int, kind: str = "updated") -> None:
+    """Tell open group pages to refresh after a committed change."""
+    payload = {"group_id": group_id, "kind": kind}
+    if redis_support.get_redis() is not None:
+        # Fan-out happens in each worker via the Redis subscription handler.
+        redis_support.publish(f"group-events:{group_id}", payload)
+    else:
+        _fanout_group_event(group_id, kind)
+
+
+def _on_redis_group_event(body: str) -> None:
+    try:
+        data = json.loads(body)
+        group_id = int(data.get("group_id"))
+        kind = str(data.get("kind") or "updated")
+    except Exception:
+        return
+    _fanout_group_event(group_id, kind)
 
 
 def _record_activity(
@@ -178,16 +224,11 @@ def check_rate_limit(request: Request, limit: int = 15, window_seconds: int = 60
     client_ip = request.client.host if request.client else "unknown"
     path = request.url.path
     key = f"{client_ip}:{path}"
-    now = time.time()
-    
-    bucket = _RATE_LIMIT_BUCKET.setdefault(key, [])
-    bucket[:] = [t for t in bucket if now - t < window_seconds]
-    if len(bucket) >= limit:
+    if redis_support.rate_limit_hit(key, limit, window_seconds):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many attempts. Please wait a minute before trying again."
         )
-    bucket.append(now)
 
 
 def _public_base_url(request: Request) -> str:
@@ -318,6 +359,9 @@ def _ensure_schema():
         ("quick_splits", "payer_share_amount", "NUMERIC(10,2) DEFAULT 0"),
         ("quick_splits", "payer_paid_amount", "NUMERIC(10,2)"),
         ("quick_splits", "created_by_account_id", "INTEGER"),
+        ("quick_splits", "edited_after_payment", "BOOLEAN DEFAULT FALSE"),
+        ("quick_splits", "edit_history_json", "TEXT"),
+        ("quick_splits", "adjustment_of_split_id", "INTEGER"),
         ("quick_split_participants", "split_value", "NUMERIC(10,2)"),
         ("quick_split_participants", "paid_amount", "NUMERIC(10,2) NOT NULL DEFAULT 0"),
         ("quick_split_participants", "invite_token", "VARCHAR(64)"),
@@ -333,6 +377,20 @@ def _ensure_schema():
             logger.info("Added missing column %s.%s", table, column)
         except Exception as err:
             logger.warning("Could not add %s.%s: %s", table, column, err)
+
+    # APP_VERSION-based demo keys outgrew the original VARCHAR(40).
+    try:
+        if dialect == "postgresql" and table_exists("demo_templates"):
+            row = _query(
+                "SELECT character_maximum_length FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'demo_templates' AND column_name = 'version'"
+            )
+            if row and row[0][0] is not None and int(row[0][0]) < 80:
+                _ddl("ALTER TABLE demo_templates ALTER COLUMN version TYPE VARCHAR(80)")
+                logger.info("Widened demo_templates.version to VARCHAR(80)")
+    except Exception as err:
+        logger.warning("Could not widen demo_templates.version: %s", err)
 
     try:
         if table_exists("pending_uploads"):
@@ -416,6 +474,89 @@ def _ensure_schema():
     except Exception as err:
         logger.warning("Could not repair quick_split_participants schema: %s", err)
 
+    # Scale indexes (safe to re-run; IF NOT EXISTS on Postgres / ignore on SQLite).
+    index_statements = [
+        "CREATE INDEX IF NOT EXISTS ix_expenses_period_id ON expenses (period_id)",
+        "CREATE INDEX IF NOT EXISTS ix_expense_splits_expense_id ON expense_splits (expense_id)",
+        "CREATE INDEX IF NOT EXISTS ix_expense_splits_member_id ON expense_splits (member_id)",
+        "CREATE INDEX IF NOT EXISTS ix_monthly_periods_group_id ON monthly_periods (group_id)",
+        "CREATE INDEX IF NOT EXISTS ix_group_members_group_id ON group_members (group_id)",
+        "CREATE INDEX IF NOT EXISTS ix_group_members_account_id ON group_members (account_id)",
+        "CREATE INDEX IF NOT EXISTS ix_quick_split_participants_quick_split_id ON quick_split_participants (quick_split_id)",
+        "CREATE INDEX IF NOT EXISTS ix_notifications_account_read_created ON notifications (account_id, read_at, created_at)",
+    ]
+    for sql in index_statements:
+        try:
+            _ddl(sql)
+        except Exception as err:
+            logger.warning("Could not ensure index (%s): %s", sql, err)
+
+    _backfill_expense_fx_rates()
+
+
+def _fx_rate_between(from_curr: str, to_curr: str) -> Decimal:
+    """Units of to_curr per 1 from_curr for any supported pair. Same currency → 1."""
+    src = (from_curr or "USD").strip().upper() or "USD"
+    dest = (to_curr or "USD").strip().upper() or "USD"
+    if src == dest:
+        return Decimal("1.0")
+    try:
+        rate = float(get_conversion_rate(src, dest))
+    except Exception:
+        logger.exception("FX lookup failed for %s→%s", src, dest)
+        return Decimal("1.0")
+    if rate <= 0:
+        return Decimal("1.0")
+    return Decimal(str(rate))
+
+
+def _stored_fx_looks_unset(rate: float, expense_currency: str, group_currency: str) -> bool:
+    """True when a cross-currency row still has the pre-D7 default of 1.0."""
+    src = (expense_currency or "USD").strip().upper() or "USD"
+    dest = (group_currency or "USD").strip().upper() or "USD"
+    if src == dest:
+        return False
+    return rate <= 0 or abs(rate - 1.0) < 0.000001
+
+
+def _backfill_expense_fx_rates() -> None:
+    """Fix pre-D7 rows that kept the default 1.0 rate for any cross-currency pair."""
+    try:
+        db = SessionLocal()
+    except Exception:
+        return
+    try:
+        rows = (
+            db.query(models.Expense, models.Group)
+            .join(models.MonthlyPeriod, models.Expense.period_id == models.MonthlyPeriod.id)
+            .join(models.Group, models.MonthlyPeriod.group_id == models.Group.id)
+            .all()
+        )
+        updated = 0
+        for expense, group in rows:
+            exp_ccy = (expense.currency or "USD").strip().upper() or "USD"
+            grp_ccy = (group.currency or "USD").strip().upper() or "USD"
+            rate = float(expense.fx_rate_to_group or 0) or 1.0
+            if exp_ccy == grp_ccy:
+                if abs(rate - 1.0) > 0.000001:
+                    expense.fx_rate_to_group = Decimal("1.0")
+                    updated += 1
+                continue
+            if _stored_fx_looks_unset(rate, exp_ccy, grp_ccy):
+                expense.fx_rate_to_group = _fx_rate_between(exp_ccy, grp_ccy)
+                updated += 1
+        if updated:
+            db.commit()
+            logger.info("Backfilled fx_rate_to_group on %s expenses", updated)
+    except Exception as err:
+        logger.warning("Expense FX backfill skipped: %s", err)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
 
 _ensure_schema()
 
@@ -432,12 +573,19 @@ app = FastAPI(
 @app.middleware("http")
 async def disable_static_cache(request: Request, call_next):
     """Avoid stale HTML/JS/CSS after deploys and strip server identification headers."""
+    started = time.perf_counter()
     response = await call_next(request)
     path = request.url.path
     if path == "/" or path.endswith((".html", ".js", ".css")):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
+    # Hashed Vite assets may be cached; this app serves classic static files.
+    if any(path.startswith(prefix) for prefix in _TIMED_PATH_PREFIXES):
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        response.headers["X-Response-Time-ms"] = f"{elapsed_ms:.1f}"
+        if elapsed_ms >= 500:
+            logger.info("slow_request path=%s method=%s ms=%.1f status=%s", path, request.method, elapsed_ms, response.status_code)
     # Remove headers that reveal the server tech stack.
     if "server" in response.headers:
         del response.headers["server"]
@@ -448,13 +596,38 @@ async def disable_static_cache(request: Request, call_next):
 
 @app.get("/api/health")
 def health():
+    from .ocr_extractor import tesseract_status
+
+    tess = tesseract_status()
     return {
         "ok": True,
         "app": "ShareSquad",
         "version": APP_VERSION,
         "environment": "development" if IS_DEVELOPMENT else "production",
         "pdf_reports": pdf_reports_available(),
+        "async_ocr": ASYNC_OCR,
+        "redis": bool(redis_support.get_redis()),
+        "storage": get_storage().__class__.__name__,
+        "tesseract": tess,
+        "ocr_ready": bool(tess.get("available")),
     }
+
+
+@app.get("/healthz")
+def healthz():
+    """Liveness: process is up."""
+    return {"ok": True}
+
+
+@app.get("/readyz")
+def readyz():
+    """Readiness: database accepts connections."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"ok": True}
+    except Exception as err:
+        raise HTTPException(503, f"Database not ready: {err}") from err
 
 
 @app.get("/", include_in_schema=False)
@@ -885,11 +1058,16 @@ def _repair_all_group_payment_snapshots(db: Session) -> None:
 def build_balances_and_settlements(
     db: Session, group_id: int, period: models.MonthlyPeriod, settlement_mode: str = "smart"
 ):
-    group = db.query(models.Group).get(group_id)
-    base_currency = group.currency if group and group.currency else "USD"
     mode = (settlement_mode or "smart").strip().lower()
     if mode not in ("smart", "simplified"):
         mode = "smart"
+    memo = _BALANCE_MEMO.get()
+    memo_key = (group_id, period.id, mode)
+    if memo is not None and memo_key in memo:
+        return memo[memo_key]
+
+    group = db.query(models.Group).get(group_id)
+    base_currency = group.currency if group and group.currency else "USD"
 
     # Once a payment has been recorded, the original participants and their
     # expenses are the accounting record behind that payment. Reopening the
@@ -900,6 +1078,10 @@ def build_balances_and_settlements(
     active_member_ids = {member["id"] for member in members}
     expenses = (
         db.query(models.Expense)
+        .options(
+            selectinload(models.Expense.payers),
+            selectinload(models.Expense.splits),
+        )
         .filter_by(period_id=period.id)
         .order_by(models.Expense.bill_date.asc(), models.Expense.id.asc())
         .all()
@@ -974,7 +1156,10 @@ def build_balances_and_settlements(
             "exchange_rate": fx_rate,
         })
 
-    return balances, settlements, expenses
+    result = (balances, settlements, expenses)
+    if memo is not None:
+        memo[memo_key] = result
+    return result
 
 
 def _period_report_inputs(db: Session, group: models.Group, period: models.MonthlyPeriod):
@@ -1328,46 +1513,91 @@ def _purge_stale_read_notifications(db: Optional[Session] = None) -> int:
 
 
 account_cleanup_scheduler = BackgroundScheduler()
+_SCHEDULER_LOCK_FH = None
+
+
+def _acquire_scheduler_lock() -> bool:
+    """Return True if this process should own APScheduler (one per machine/volume)."""
+    global _SCHEDULER_LOCK_FH
+    lock_path = os.path.join(DATA_DIR, "scheduler.lock")
+    os.makedirs(DATA_DIR, exist_ok=True)
+    try:
+        fh = open(lock_path, "a+")
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                fh.close()
+                return False
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                fh.close()
+                return False
+        fh.write(str(os.getpid()))
+        fh.flush()
+        _SCHEDULER_LOCK_FH = fh
+        return True
+    except Exception as err:
+        logger.warning("Could not acquire scheduler lock: %s", err)
+        return False
 
 
 @app.on_event("startup")
 def start_account_deletion_cleanup() -> None:
+    redis_support.subscribe("group-events:*", _on_redis_group_event)
+    start_background_poller(resolve_vlm_config)
+
+    # Lightweight always-on repair/cleanup that is safe on every worker.
     _purge_expired_account_deletions()
-    _purge_stale_read_notifications()
     db = SessionLocal()
     try:
         purge_expired_sandboxes(db)
         _repair_all_group_payment_snapshots(db)
     finally:
         db.close()
-    # Catch up after downtime: open the current calendar month for every group.
-    # Month-end does not lock periods as settled — digests are emailed separately.
-    _rollover_monthly_periods()
-    # Production catch-up: if the server was offline during delivery, retry the
-    # just-finished month's digest email. Skip on local run.ps1 so startup is
-    # not blocked by regenerating digest PDFs for every account on every restart.
-    if not IS_DEVELOPMENT:
-        today = _business_today()
-        previous_month = date(today.year - (today.month == 1), 12 if today.month == 1 else today.month - 1, 1)
-        _deliver_monthly_digests(_period_key_for(previous_month))
-    if not DISABLE_SCHEDULER and not account_cleanup_scheduler.running:
-        account_cleanup_scheduler.add_job(_purge_expired_account_deletions, "interval", hours=24, id="account-deletion-cleanup", replace_existing=True)
-        account_cleanup_scheduler.add_job(_purge_stale_read_notifications, "interval", hours=6, id="read-notification-cleanup", replace_existing=True)
-        account_cleanup_scheduler.add_job(
-            lambda: _purge_demo_sandboxes_job(), "interval", minutes=30,
-            id="demo-sandbox-cleanup", replace_existing=True,
-        )
-        account_cleanup_scheduler.add_job(
-            _rollover_monthly_periods,
-            CronTrigger(hour=0, minute=0, timezone=BUSINESS_TIMEZONE),
-            id="monthly-period-rollover", replace_existing=True,
-        )
-        account_cleanup_scheduler.add_job(
-            lambda: _deliver_monthly_digests(_period_key_for(date(_business_today().year - (_business_today().month == 1), 12 if _business_today().month == 1 else _business_today().month - 1, 1))),
-            CronTrigger(hour=0, minute=15, timezone=BUSINESS_TIMEZONE),
-            id="monthly-digest-delivery", replace_existing=True,
-        )
-        account_cleanup_scheduler.start()
+
+    # Exactly one process owns scheduled digests/rollover/email (RUN_SCHEDULER=1).
+    # A filesystem lock prevents duplicate schedulers when WEB_CONCURRENCY>1.
+    if RUN_SCHEDULER and not DISABLE_SCHEDULER and _acquire_scheduler_lock():
+        _purge_stale_read_notifications()
+        _rollover_monthly_periods()
+        # Digest catch-up only from the scheduler owner — never on every worker.
+        if not IS_DEVELOPMENT:
+            today = _business_today()
+            previous_month = date(today.year - (today.month == 1), 12 if today.month == 1 else today.month - 1, 1)
+            _deliver_monthly_digests(_period_key_for(previous_month))
+        if not account_cleanup_scheduler.running:
+            account_cleanup_scheduler.add_job(_purge_expired_account_deletions, "interval", hours=24, id="account-deletion-cleanup", replace_existing=True)
+            account_cleanup_scheduler.add_job(_purge_stale_read_notifications, "interval", hours=6, id="read-notification-cleanup", replace_existing=True)
+            account_cleanup_scheduler.add_job(
+                lambda: _purge_demo_sandboxes_job(), "interval", minutes=30,
+                id="demo-sandbox-cleanup", replace_existing=True,
+            )
+            account_cleanup_scheduler.add_job(
+                purge_old_tmp_uploads, "interval", hours=6,
+                id="tmp-upload-cleanup", replace_existing=True,
+            )
+            account_cleanup_scheduler.add_job(
+                _rollover_monthly_periods,
+                CronTrigger(hour=0, minute=0, timezone=BUSINESS_TIMEZONE),
+                id="monthly-period-rollover", replace_existing=True,
+            )
+            account_cleanup_scheduler.add_job(
+                lambda: _deliver_monthly_digests(_period_key_for(date(_business_today().year - (_business_today().month == 1), 12 if _business_today().month == 1 else _business_today().month - 1, 1))),
+                CronTrigger(hour=0, minute=15, timezone=BUSINESS_TIMEZONE),
+                id="monthly-digest-delivery", replace_existing=True,
+            )
+            account_cleanup_scheduler.start()
+            logger.info("Scheduler owner started (RUN_SCHEDULER=1)")
+    else:
+        logger.info("Scheduler not started on this process (RUN_SCHEDULER=%s DISABLE=%s)", RUN_SCHEDULER, DISABLE_SCHEDULER)
 
 
 @app.on_event("shutdown")
@@ -1664,11 +1894,14 @@ def forgot_password(
     dev_url = reset_url if IS_DEVELOPMENT else None
 
     if is_email_configured():
-        send_password_reset_email(
-            to_email=account.email,
-            reset_url=reset_url,
-            display_name=account.display_name,
-        )
+        try:
+            send_password_reset_email(
+                to_email=account.email,
+                reset_url=reset_url,
+                display_name=account.display_name,
+            )
+        except Exception:
+            logger.exception("Password reset email failed for %s", account.email)
 
     return schemas.MessageResponse(
         message="If an account exists with that email, a password reset link has been sent.",
@@ -1767,6 +2000,19 @@ def _can_manage_quick_split(split: models.QuickSplit, account: models.Account) -
 def _quick_split_out(split: models.QuickSplit, account: models.Account) -> schemas.QuickSplitOut:
     is_payer = split.payer_account_id == account.id
     is_owner = _can_manage_quick_split(split, account)
+    history = []
+    try:
+        history = json.loads(split.edit_history_json or "[]")
+        if not isinstance(history, list):
+            history = []
+    except Exception:
+        history = []
+    last_adj = None
+    if history:
+        try:
+            last_adj = float(history[-1].get("delta"))
+        except Exception:
+            last_adj = None
     return schemas.QuickSplitOut(
         id=split.id,
         title=split.title,
@@ -1786,6 +2032,10 @@ def _quick_split_out(split: models.QuickSplit, account: models.Account) -> schem
         created_at=split.created_at,
         is_payer=is_payer,
         is_owner=is_owner,
+        edited_after_payment=bool(getattr(split, "edited_after_payment", False)),
+        edit_history=history,
+        adjustment_of_split_id=getattr(split, "adjustment_of_split_id", None),
+        last_adjustment_amount=last_adj,
         participants=[
             schemas.QuickSplitParticipantOut(
                 id=p.id,
@@ -1875,7 +2125,7 @@ def _require_quick_split_access(split_id: int, account: models.Account, db: Sess
 
 
 def _quick_split_is_payment_locked(db: Session, split: models.QuickSplit) -> bool:
-    """Whether a split was included in a completed monthly payment snapshot."""
+    """Legacy helper: month was fully settled (kept for callers; edits now use adjustments)."""
     if not split.created_at:
         return False
     for participant in split.participants:
@@ -1889,6 +2139,170 @@ def _quick_split_is_payment_locked(db: Session, split: models.QuickSplit) -> boo
         if settlement and (settlement.status == "SETTLED" or (settlement.settled_at and split.created_at <= settlement.settled_at)):
             return True
     return False
+
+
+def _quick_split_was_paid(db: Session, split: models.QuickSplit) -> bool:
+    """True when cash already moved for this private bill (pair payment or monthly settle)."""
+    if any(p.payment_status == "CONFIRMED" for p in (split.participants or [])):
+        return True
+    if _quick_split_is_payment_locked(db, split):
+        return True
+    month_key = split.bill_date.strftime("%Y-%m")
+    currency = _normalize_currency(split.currency, "USD")
+    for participant in split.participants or []:
+        partner_id = participant.account_id
+        if not partner_id or partner_id == split.payer_account_id:
+            continue
+        one, two = _friend_pair(split.payer_account_id, partner_id)
+        if _pair_has_direct_split_payment(db, one, two, month_key, split.payer_account_id, currency, split.id):
+            return True
+        if _pair_has_direct_split_payment(db, one, two, month_key, partner_id, currency, split.id):
+            return True
+    return False
+
+
+def _notify_accounts(db: Session, account_ids: list[int], message: str, link: str = "") -> None:
+    seen = set()
+    for account_id in account_ids:
+        if not account_id or account_id in seen:
+            continue
+        seen.add(account_id)
+        db.add(models.Notification(account_id=account_id, group_id=None, message=message[:300], link=link or None))
+
+
+def _friend_share_amount(split: models.QuickSplit, friend_account_id: int) -> Decimal:
+    for participant in split.participants or []:
+        if participant.account_id == friend_account_id:
+            return Decimal(str(participant.share_amount or 0)).quantize(Decimal("0.01"))
+    return Decimal("0.00")
+
+
+def _append_quick_split_edit_history(split: models.QuickSplit, entry: dict) -> None:
+    try:
+        history = json.loads(split.edit_history_json or "[]")
+        if not isinstance(history, list):
+            history = []
+    except Exception:
+        history = []
+    history.append(entry)
+    split.edit_history_json = json.dumps(history[-20:])
+    split.edited_after_payment = True
+
+
+def _create_paid_bill_adjustment(
+    db: Session,
+    *,
+    source: models.QuickSplit,
+    friend_id: int,
+    delta: Decimal,
+    editor: models.Account,
+) -> models.QuickSplit:
+    """Put only the difference into the current month; leave settled months closed."""
+    amount = abs(delta).quantize(Decimal("0.01"))
+    today = _business_today()
+    if delta > 0:
+        # Friend owes more → original payer "paid" the extra on their behalf.
+        payer_id = source.payer_account_id
+        other_id = friend_id
+    else:
+        # Friend was overcharged → credit them by reversing the delta.
+        payer_id = friend_id
+        other_id = source.payer_account_id
+    other = db.query(models.Account).get(other_id)
+    adj = models.QuickSplit(
+        title=f"Adjustment · {source.title}"[:150],
+        total_amount=amount,
+        currency=_normalize_currency(source.currency, "USD"),
+        bill_date=today,
+        category=source.category or "General",
+        split_type="EXACT",
+        payer_share_amount=Decimal("0.00"),
+        created_by_account_id=editor.id,
+        payer_account_id=payer_id,
+        invite_code=secrets.token_urlsafe(12),
+        status="OPEN",
+        edited_after_payment=False,
+        edit_history_json=None,
+        adjustment_of_split_id=source.id,
+    )
+    db.add(adj)
+    db.flush()
+    db.add(
+        models.QuickSplitParticipant(
+            quick_split_id=adj.id,
+            email=(other.email if other else f"adj-{adj.id}@invite.local"),
+            account_id=other_id,
+            display_name=other.display_name if other else "Friend",
+            share_amount=amount,
+            split_value=amount,
+            payment_status="PENDING",
+            invite_token=secrets.token_urlsafe(12),
+        )
+    )
+    return adj
+
+
+def _offset_paid_edit_in_past_month(
+    db: Session,
+    *,
+    source: models.QuickSplit,
+    friend_id: int,
+    delta: Decimal,
+    editor_id: int,
+) -> None:
+    """Cancel an in-place share change in a past month so only the adjustment counts."""
+    amount = abs(delta).quantize(Decimal("0.01"))
+    if amount <= 0 or not source.payer_account_id or not friend_id:
+        return
+    month_key = source.bill_date.strftime("%Y-%m")
+    currency = _normalize_currency(source.currency, "USD")
+    if delta > 0:
+        # Friend share rose → neutralize with a same-month payment from friend → payer.
+        payer_id, recipient_id = friend_id, source.payer_account_id
+    else:
+        payer_id, recipient_id = source.payer_account_id, friend_id
+    _record_direct_pair_payment(
+        db, payer_id, recipient_id, amount, currency, month_key, editor_id,
+    )
+
+
+def _scrub_quick_split_payment_refs(db: Session, split: models.QuickSplit) -> None:
+    """Detach a deleted bill's id from pair payments so reused SQLite ids stay clean."""
+    if not split.id or not split.payer_account_id:
+        return
+    partner_ids = [
+        p.account_id for p in (split.participants or [])
+        if p.account_id and p.account_id != split.payer_account_id
+    ]
+    for partner_id in partner_ids:
+        one, two = _friend_pair(split.payer_account_id, partner_id)
+        for payment in db.query(models.PairPayment).filter_by(
+            account_one_id=one, account_two_id=two,
+        ).all():
+            try:
+                allocations = json.loads(payment.allocations_json or "[]")
+            except Exception:
+                continue
+            if not isinstance(allocations, list):
+                continue
+            changed = False
+            rewritten = []
+            for allocation in allocations:
+                if not isinstance(allocation, dict):
+                    rewritten.append(allocation)
+                    continue
+                if allocation.get("quick_split_id") == split.id:
+                    cleaned = {
+                        key: value for key, value in allocation.items()
+                        if key not in {"quick_split_id", "participant_id"}
+                    }
+                    cleaned["deleted_quick_split"] = True
+                    rewritten.append(cleaned)
+                    changed = True
+                else:
+                    rewritten.append(allocation)
+            if changed:
+                payment.allocations_json = json.dumps(rewritten)
 
 
 @app.get("/api/quick-splits", response_model=list[schemas.QuickSplitOut])
@@ -1954,6 +2368,9 @@ def create_quick_split(
         category=payload.category or "General", created_by_account_id=account.id,
         payer_account_id=payer_account.id,
         split_type=(payload.split_type or "EQUAL").upper(),
+        edited_after_payment=False,
+        edit_history_json=None,
+        adjustment_of_split_id=None,
     )
     _assign_shared_payment(split, payload.payer_paid_amount)
     db.add(split)
@@ -1998,12 +2415,25 @@ def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account
     split = _require_quick_split_access(split_id, account, db)
     if not _can_manage_quick_split(split, account):
         raise HTTPException(403, "You cannot edit this split")
-    if _quick_split_is_payment_locked(db, split):
-        raise HTTPException(409, "This bill was included in a completed payment and can no longer be edited")
     if len(payload.participants) != 1:
         raise HTTPException(400, "A one-to-one split needs exactly one other person. Create a group for 3 or more people.")
     if payload.bill_date > date.today():
         raise HTTPException(400, "A bill date cannot be in the future")
+
+    was_paid = _quick_split_was_paid(db, split)
+    month_was_settled = _quick_split_is_payment_locked(db, split)
+    bill_month = split.bill_date.strftime("%Y-%m")
+    current_month = _business_today().strftime("%Y-%m")
+    # Past-month paid bills (combined payment or monthly settle) move only the
+    # delta into the current month via an adjustment row.
+    use_adjustment = was_paid and (month_was_settled or bill_month < current_month)
+    old_total = Decimal(str(split.total_amount or 0)).quantize(Decimal("0.01"))
+    old_title = split.title
+    friend_id = next(
+        (p.account_id for p in (split.participants or []) if p.account_id and p.account_id != split.payer_account_id),
+        None,
+    )
+    old_friend_share = _friend_share_amount(split, friend_id) if friend_id else Decimal("0.00")
 
     payer_account = account
     if payload.payer_account_id and payload.payer_account_id != account.id:
@@ -2038,7 +2468,9 @@ def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account
     split.title = payload.title.strip()
     split.total_amount = Decimal(str(payload.total_amount)).quantize(Decimal("0.01"))
     split.currency = _normalize_currency(payload.currency, "USD")
-    split.bill_date = payload.bill_date
+    # Paid/settled or past-month paid bills keep their original month; delta lands today.
+    if not use_adjustment:
+        split.bill_date = payload.bill_date
     split.category = payload.category or "General"
     split.split_type = (payload.split_type or "EQUAL").upper()
     split.payer_account_id = payer_account.id
@@ -2068,12 +2500,51 @@ def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account
     db.expire(split, ["participants"])
     participant_values = {p.id: p.split_value for p in split.participants if p.email in kept}
     _apply_quick_split_values(split, payload.payer_value, participant_values)
-    for participant in split.participants:
-        if participant.account_id and participant.account_id != split.payer_account_id:
-            _reopen_friend_settlement(db, split.payer_account_id, participant.account_id, split.bill_date)
-            _reopen_friend_settlement_for_bill_change(
-                db, split.payer_account_id, participant.account_id, split.bill_date, split.created_at,
-            )
+
+    friend_id = next(
+        (p.account_id for p in (split.participants or []) if p.account_id and p.account_id != split.payer_account_id),
+        friend_id,
+    )
+    new_friend_share = _friend_share_amount(split, friend_id) if friend_id else Decimal("0.00")
+    delta = (new_friend_share - old_friend_share).quantize(Decimal("0.01"))
+
+    if was_paid and friend_id and abs(delta) >= Decimal("0.005"):
+        if use_adjustment:
+            _create_paid_bill_adjustment(db, source=split, friend_id=friend_id, delta=delta, editor=account)
+            # Past month still counts in consolidated sources (unlike a SETTLED
+            # monthly settlement). Neutralize the in-place share change there so
+            # only the current-month adjustment moves money.
+            if not month_was_settled and bill_month < current_month:
+                _offset_paid_edit_in_past_month(
+                    db, source=split, friend_id=friend_id, delta=delta, editor_id=account.id,
+                )
+        # Current-month paid (not settled): in-place share change moves balance by delta only.
+        _append_quick_split_edit_history(split, {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "editor_id": account.id,
+            "editor_name": account.display_name,
+            "old_total": float(old_total),
+            "new_total": float(Decimal(str(payload.total_amount)).quantize(Decimal("0.01"))),
+            "old_friend_share": float(old_friend_share),
+            "new_friend_share": float(new_friend_share),
+            "delta": float(delta),
+            "title": old_title,
+        })
+        direction = "more" if delta > 0 else "less"
+        msg = (
+            f"{account.display_name} edited “{old_title}” after it was paid: "
+            f"{split.currency} {float(old_total):.2f} → {float(Decimal(str(payload.total_amount))):.2f}. "
+            f"Balance moves by {split.currency} {abs(float(delta)):.2f} ({direction})."
+        )
+        _notify_accounts(db, [split.payer_account_id, friend_id], msg, "/index.html?view=friends")
+    elif not was_paid:
+        for participant in split.participants:
+            if participant.account_id and participant.account_id != split.payer_account_id:
+                _reopen_friend_settlement(db, split.payer_account_id, participant.account_id, split.bill_date)
+                _reopen_friend_settlement_for_bill_change(
+                    db, split.payer_account_id, participant.account_id, split.bill_date, split.created_at,
+                )
+
     db.commit(); db.refresh(split)
     return _quick_split_out(split, account)
 
@@ -2233,8 +2704,8 @@ def delete_quick_split(split_id: int, account: models.Account = Depends(get_curr
     split = _require_quick_split_access(split_id, account, db)
     if not _can_manage_quick_split(split, account):
         raise HTTPException(403, "You cannot delete this split")
-    if _quick_split_is_payment_locked(db, split):
-        raise HTTPException(409, "This bill was included in a completed payment and can no longer be deleted")
+    was_paid = _quick_split_was_paid(db, split)
+    month_was_settled = _quick_split_is_payment_locked(db, split)
     partners = [
         participant.account_id for participant in split.participants
         if participant.account_id and participant.account_id != split.payer_account_id
@@ -2242,12 +2713,44 @@ def delete_quick_split(split_id: int, account: models.Account = Depends(get_curr
     bill_date = split.bill_date
     created_at = split.created_at
     payer_id = split.payer_account_id
-    _preserve_friend_payment_credit_before_delete(db, split)
+    title = split.title
+    currency = _normalize_currency(split.currency, "USD")
+    # Monthly-settled deletes credit via a current-month adjustment only.
+    # Pair-payment deletes keep cash via preserve. Never both — that double-credits.
+    if was_paid and partners and month_was_settled:
+        for partner_id in partners:
+            share = _friend_share_amount(split, partner_id)
+            if share > 0:
+                _create_paid_bill_adjustment(
+                    db, source=split, friend_id=partner_id, delta=-share, editor=account,
+                )
+            _notify_accounts(
+                db,
+                [payer_id, partner_id],
+                f"{account.display_name} deleted “{title}” after it was paid. "
+                f"The paid amount stays as a {currency} credit on your balance.",
+                "/index.html?view=friends",
+            )
+    else:
+        _preserve_friend_payment_credit_before_delete(db, split)
+        if was_paid and partners:
+            for partner_id in partners:
+                _notify_accounts(
+                    db,
+                    [payer_id, partner_id],
+                    f"{account.display_name} deleted “{title}” after it was paid. "
+                    f"The paid amount stays as a {currency} credit on your balance.",
+                    "/index.html?view=friends",
+                )
+    # Drop bill-id links before delete so SQLite autoincrement reuse cannot
+    # revive "paid" / "edited after payment" state on a brand-new bill.
+    _scrub_quick_split_payment_refs(db, split)
     db.delete(split)
     db.flush()
-    for partner_id in partners:
-        if payer_id:
-            _reopen_friend_settlement_for_bill_change(db, payer_id, partner_id, bill_date, created_at)
+    if not was_paid:
+        for partner_id in partners:
+            if payer_id:
+                _reopen_friend_settlement_for_bill_change(db, payer_id, partner_id, bill_date, created_at)
     db.commit()
     return {"ok": True, "message": "Split deleted"}
 
@@ -2279,16 +2782,28 @@ def _friend_month_balance(db: Session, account_id: int, friend_id: int, month_ke
     if settlement and settlement.settled_at:
         query = query.filter(models.QuickSplit.created_at > settlement.settled_at)
     rows = query.all()
-    balance = Decimal("0.00")
-    currency = "USD"
+    # Prefer the currency of this month's private bills — never let a stray
+    # pair-payment currency (or account preferred currency) relabel CAD as GBP.
+    counts: dict[str, int] = {}
+    balance_by_ccy: dict[str, Decimal] = {}
     for split, participant in rows:
-        currency = split.currency or currency
-        balance += _viewer_direct_effect(split, participant, account_id)
-    # Confirmed private payments (including residuals after a paid bill was edited/deleted).
+        ccy = _normalize_currency(split.currency, "USD")
+        counts[ccy] = counts.get(ccy, 0) + 1
+        balance_by_ccy[ccy] = balance_by_ccy.get(ccy, Decimal("0.00")) + _viewer_direct_effect(
+            split, participant, account_id,
+        )
+    if counts:
+        currency = max(counts.items(), key=lambda item: item[1])[0]
+    elif settlement and settlement.currency:
+        currency = _normalize_currency(settlement.currency, "USD")
+    else:
+        currency = "USD"
+    balance = balance_by_ccy.get(currency, Decimal("0.00"))
+    # Confirmed private payments in the month's bill currency only.
     for payment in db.query(models.PairPayment).filter_by(
         account_one_id=one, account_two_id=two, status="CONFIRMED",
+        currency=currency,
     ).all():
-        currency = payment.currency or currency
         for allocation in json.loads(payment.allocations_json or "[]"):
             if allocation.get("kind") != "DIRECT" or allocation.get("month_key") != month_key:
                 continue
@@ -2496,22 +3011,50 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
 
     # One Who-pays-whom edge per shared group period (same plan as the group Balances card).
     # Include groups whose base currency matches, OR periods settled/previewed into this currency.
+    # Batch membership → groups → periods → expense presence to avoid N+1 fan-out.
     group_member_rows = db.query(models.GroupMember).filter(
         models.GroupMember.account_id.in_((account_id, friend_id)),
     ).all()
     members_by_group: dict[int, dict[int, models.GroupMember]] = {}
     for member in group_member_rows:
         members_by_group.setdefault(member.group_id, {})[member.account_id] = member
-    for group_id, members in members_by_group.items():
-        if account_id not in members or friend_id not in members:
-            continue
-        group = db.query(models.Group).get(group_id)
+    shared_group_ids = [
+        group_id for group_id, members in members_by_group.items()
+        if account_id in members and friend_id in members
+    ]
+    if not shared_group_ids:
+        return sources
+    groups_by_id = {
+        group.id: group
+        for group in db.query(models.Group).filter(models.Group.id.in_(shared_group_ids)).all()
+    }
+    periods = (
+        db.query(models.MonthlyPeriod)
+        .filter(models.MonthlyPeriod.group_id.in_(shared_group_ids))
+        .order_by(models.MonthlyPeriod.period_key.asc())
+        .all()
+    )
+    periods_by_group: dict[int, list] = {}
+    for period in periods:
+        periods_by_group.setdefault(period.group_id, []).append(period)
+    open_period_ids = [p.id for p in periods if p.status != "SETTLED"]
+    expense_period_ids: set[int] = set()
+    if open_period_ids:
+        expense_period_ids = {
+            row[0]
+            for row in db.query(models.Expense.period_id)
+            .filter(models.Expense.period_id.in_(open_period_ids))
+            .distinct()
+            .all()
+        }
+    for group_id in shared_group_ids:
+        members = members_by_group[group_id]
+        group = groups_by_id.get(group_id)
         if not group:
             continue
         base_currency = _normalize_currency(group.currency, "USD")
         mine_id, theirs_id = members[account_id].id, members[friend_id].id
-        periods = db.query(models.MonthlyPeriod).filter_by(group_id=group_id).order_by(models.MonthlyPeriod.period_key.asc()).all()
-        for period in periods:
+        for period in periods_by_group.get(group_id, []):
             target_raw = (period.target_currency or "").strip().upper()
             target_currency = _normalize_currency(target_raw) if target_raw else ""
             if base_currency != currency and target_currency != currency:
@@ -2520,8 +3063,7 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
             if not ready:
                 if not members[account_id].is_active or not members[friend_id].is_active:
                     continue
-                has_expense = db.query(models.Expense.id).filter_by(period_id=period.id).first()
-                if not has_expense:
+                if period.id not in expense_period_ids:
                     continue
             source = _pair_settlement_source_for_period(
                 db, group, period, mine_id, theirs_id, currency, settlement_ready=ready,
@@ -2676,20 +3218,26 @@ def _sync_quick_split_friends(db: Session, account_id: int) -> None:
         db.commit()
 
 
-@app.get("/api/friends", response_model=list[schemas.FriendOut])
-def list_friends(account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
-    _sync_group_friends(db, account.id)
-    _sync_quick_split_friends(db, account.id)
+def _list_friend_accounts(db: Session, account_id: int) -> list[models.Account]:
+    _sync_group_friends(db, account_id)
+    _sync_quick_split_friends(db, account_id)
     rows = db.query(models.FriendConnection).filter(
-        or_(models.FriendConnection.account_one_id == account.id, models.FriendConnection.account_two_id == account.id),
+        or_(models.FriendConnection.account_one_id == account_id, models.FriendConnection.account_two_id == account_id),
         models.FriendConnection.status == "ACTIVE",
     ).all()
-    friend_ids = [row.account_two_id if row.account_one_id == account.id else row.account_one_id for row in rows]
+    friend_ids = [row.account_two_id if row.account_one_id == account_id else row.account_one_id for row in rows]
     people = db.query(models.Account).filter(models.Account.id.in_(friend_ids)).all() if friend_ids else []
+    return sorted(people, key=lambda person: person.display_name.lower())
+
+
+@app.get("/api/friends", response_model=list[schemas.FriendOut])
+def list_friends(account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    storage = get_storage()
+    people = _list_friend_accounts(db, account.id)
     return [schemas.FriendOut(
         id=person.id, display_name=person.display_name, email=person.email,
-        has_avatar=bool(person.avatar_path and os.path.exists(person.avatar_path)), source="friend",
-    ) for person in sorted(people, key=lambda person: person.display_name.lower())]
+        has_avatar=bool(person.avatar_path and storage.exists(person.avatar_path)), source="friend",
+    ) for person in people]
 
 
 @app.delete("/api/friends/{friend_id}", response_model=schemas.MessageResponse)
@@ -2729,11 +3277,45 @@ def _friend_settlement_out(row: models.FriendMonthlySettlement) -> schemas.Frien
     )
 
 
+def _repair_friend_settlement_currency(
+    db: Session, account_id: int, friend_id: int, settlement: models.FriendMonthlySettlement,
+) -> bool:
+    """Relabel a settlement when every bill that month shares one currency."""
+    try:
+        start, end = _month_date_bounds(settlement.month_key)
+    except ValueError:
+        return False
+    currencies = {
+        _normalize_currency(row[0], "USD")
+        for row in db.query(models.QuickSplit.currency).join(models.QuickSplitParticipant).filter(
+            models.QuickSplit.bill_date >= start,
+            models.QuickSplit.bill_date < end,
+            or_(
+                (models.QuickSplit.payer_account_id == account_id) & (models.QuickSplitParticipant.account_id == friend_id),
+                (models.QuickSplit.payer_account_id == friend_id) & (models.QuickSplitParticipant.account_id == account_id),
+            ),
+        ).distinct().all()
+    }
+    if len(currencies) != 1:
+        return False
+    bill_currency = next(iter(currencies))
+    if _normalize_currency(settlement.currency, "USD") == bill_currency:
+        return False
+    settlement.currency = bill_currency
+    return True
+
+
 @app.get("/api/friends/{friend_id}/settlements", response_model=list[schemas.FriendSettlementOut])
 def list_friend_settlements(friend_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
     _reconcile_friend_settlements(db, account.id, friend_id)
     one, two = sorted((account.id, friend_id))
     rows = db.query(models.FriendMonthlySettlement).filter_by(account_one_id=one, account_two_id=two).order_by(models.FriendMonthlySettlement.month_key.desc()).all()
+    changed = False
+    for row in rows:
+        if _repair_friend_settlement_currency(db, account.id, friend_id, row):
+            changed = True
+    if changed:
+        db.commit()
     return [_friend_settlement_out(row) for row in rows]
 
 
@@ -3023,6 +3605,26 @@ def get_consolidated_friend_balance(
     return _consolidated_balance_out(db, account, friend_id, currency)
 
 
+@app.get("/api/friends/consolidated-balances-summary", response_model=schemas.FriendsConsolidatedSummaryOut)
+def get_friends_consolidated_balances_summary(
+    account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
+):
+    """One dashboard round-trip for every Friend's open balances (per currency)."""
+    friends = _list_friend_accounts(db, account.id)
+    token = _BALANCE_MEMO.set({})
+    try:
+        results = []
+        for friend in friends:
+            balances = [
+                _consolidated_balance_out(db, account, friend.id, currency)
+                for currency in _friend_balance_currencies(db, account.id, friend.id)
+            ]
+            results.append(schemas.ConsolidatedFriendBalancesOut(friend_id=friend.id, balances=balances))
+    finally:
+        _BALANCE_MEMO.reset(token)
+    return schemas.FriendsConsolidatedSummaryOut(friends=results)
+
+
 @app.get("/api/friends/{friend_id}/consolidated-balances", response_model=schemas.ConsolidatedFriendBalancesOut)
 def get_consolidated_friend_balances(
     friend_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
@@ -3034,10 +3636,14 @@ def get_consolidated_friend_balances(
     connection = db.query(models.FriendConnection).filter_by(account_one_id=one, account_two_id=two, status="ACTIVE").first()
     if not connection:
         raise HTTPException(403, "Add this person as a friend before viewing consolidated balances")
-    balances = [
-        _consolidated_balance_out(db, account, friend_id, currency)
-        for currency in _friend_balance_currencies(db, account.id, friend_id)
-    ]
+    token = _BALANCE_MEMO.set({})
+    try:
+        balances = [
+            _consolidated_balance_out(db, account, friend_id, currency)
+            for currency in _friend_balance_currencies(db, account.id, friend_id)
+        ]
+    finally:
+        _BALANCE_MEMO.reset(token)
     return schemas.ConsolidatedFriendBalancesOut(friend_id=friend_id, balances=balances)
 
 
@@ -3206,6 +3812,13 @@ def confirm_friend_settlement(friend_id: int, payload: schemas.FriendSettlementC
             amount=abs(balance), currency=currency,
         )
         db.add(settlement)
+    else:
+        # Always refresh from live bill currency/amount so a stale PENDING row
+        # (e.g. wrong preferred-currency label) cannot save CAD as GBP.
+        settlement.payer_account_id = payer_id
+        settlement.recipient_account_id = recipient_id
+        settlement.amount = abs(balance)
+        settlement.currency = currency
     if payload.action == "paid":
         if account.id != settlement.payer_account_id:
             raise HTTPException(403, "Only the person who owes can record payment")
@@ -3348,14 +3961,31 @@ def confirm_quick_split_payment(split_id: int, participant_id: int, account: mod
 # ---------------------------------------------------------------------------
 @app.get("/api/groups", response_model=list[schemas.GroupListOut])
 def list_groups(account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
-    memberships = db.query(models.GroupMember).filter_by(account_id=account.id).all()
+    memberships = (
+        db.query(models.GroupMember)
+        .options(selectinload(models.GroupMember.group))
+        .filter_by(account_id=account.id)
+        .all()
+    )
+    active = [m for m in memberships if _member_is_active(m)]
+    group_ids = [m.group_id for m in active]
+    counts: Dict[int, int] = {}
+    if group_ids:
+        rows = (
+            db.query(models.GroupMember.group_id, func.count(models.GroupMember.id))
+            .filter(
+                models.GroupMember.group_id.in_(group_ids),
+                or_(models.GroupMember.is_active.is_(True), models.GroupMember.is_active.is_(None)),
+            )
+            .group_by(models.GroupMember.group_id)
+            .all()
+        )
+        counts = {int(group_id): int(count) for group_id, count in rows}
+    storage = get_storage()
     results = []
-    for m in memberships:
-        if not _member_is_active(m):
-            continue
+    for m in active:
         g = m.group
-        all_members = db.query(models.GroupMember).filter_by(group_id=g.id).all()
-        member_count = sum(1 for x in all_members if _member_is_active(x))
+        cover = getattr(g, "cover_image_path", None)
         results.append(
             schemas.GroupListOut(
                 id=g.id,
@@ -3363,9 +3993,9 @@ def list_groups(account: models.Account = Depends(get_current_account), db: Sess
                 currency=g.currency or "USD",
                 invite_code=g.invite_code,
                 created_at=g.created_at,
-                has_cover=bool(getattr(g, "cover_image_path", None) and os.path.exists(g.cover_image_path or "")),
+                has_cover=bool(cover and storage.exists(cover)),
                 role=m.role,
-                member_count=member_count,
+                member_count=counts.get(g.id, 0),
             )
         )
     return results
@@ -4073,15 +4703,94 @@ def _remember_vendor_correction(
 # ---------------------------------------------------------------------------
 # Receipt Upload & VLM Extraction
 # ---------------------------------------------------------------------------
-@app.post("/api/groups/{group_id}/receipts/upload", response_model=schemas.ExtractionResponse)
+def _scan_job_out(job: models.ScanJob) -> schemas.ScanJobOut:
+    extraction = None
+    if job.result_json:
+        try:
+            extraction = schemas.ReceiptExtraction(**json.loads(job.result_json))
+        except Exception:
+            extraction = None
+    return schemas.ScanJobOut(
+        job_id=job.id,
+        upload_id=job.upload_id,
+        image_url=job.image_url,
+        status=job.status,
+        extraction=extraction,
+        source=job.source,
+        message=_public_scan_message(job.message) if job.message else job.message,
+        error=job.error,
+    )
+
+
+def _queue_receipt_scan(
+    *,
+    db: Session,
+    account: models.Account,
+    group_id: Optional[int],
+    contents: bytes,
+    mime: str,
+    image_url: str,
+    tmp_filename: str,
+    upload_id: str,
+) -> schemas.ScanJobOut | schemas.ExtractionResponse:
+    storage = get_storage()
+    key = f"uploads/tmp/{tmp_filename}"
+    tmp_path = storage.save_bytes(key, contents)
+
+    pending = models.PendingUpload(id=upload_id, group_id=group_id, account_id=account.id, file_path=tmp_path)
+    db.add(pending)
+    db.commit()
+
+    job = enqueue_scan_job(
+        job_id=uuid.uuid4().hex,
+        account_id=account.id,
+        group_id=group_id,
+        upload_id=upload_id,
+        file_path=tmp_path,
+        mime_type=mime,
+        image_url=image_url,
+        fingerprint=content_fingerprint(contents),
+    )
+    vlm_config = resolve_vlm_config(db, account.id, group_id)
+    if ASYNC_OCR:
+        kick_scan_worker(job.id, vlm_config)
+        fresh = db.query(models.ScanJob).filter_by(id=job.id).first() or job
+        return _scan_job_out(fresh)
+
+    process_scan_job(job.id, vlm_config)
+    db.expire_all()
+    fresh = db.query(models.ScanJob).filter_by(id=job.id).first()
+    if not fresh or fresh.status != "succeeded" or not fresh.result_json:
+        raise HTTPException(500, fresh.error if fresh and fresh.error else "Receipt scan failed")
+    extraction = schemas.ReceiptExtraction(**json.loads(fresh.result_json))
+    return schemas.ExtractionResponse(
+        upload_id=upload_id,
+        image_url=image_url,
+        extraction=extraction,
+        source=fresh.source or "ocr",
+        message=_public_scan_message(fresh.message),
+    )
+
+
+@app.get("/api/scans/{job_id}", response_model=schemas.ScanJobOut)
+def get_scan_job(job_id: str, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    job = db.query(models.ScanJob).filter_by(id=job_id, account_id=account.id).first()
+    if not job:
+        raise HTTPException(404, "Scan job not found")
+    return _scan_job_out(job)
+
+
+@app.post("/api/groups/{group_id}/receipts/upload")
 async def upload_receipt(
     group_id: int,
+    request: Request,
     file: UploadFile = File(...),
     account: models.Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ):
     require_group_member(group_id, account, db)
     _require_shareable_group(db, group_id)
+    check_rate_limit(request, limit=20, window_seconds=60)
 
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in [".jpg", ".jpeg", ".png", ".webp", ".heic"]:
@@ -4093,31 +4802,16 @@ async def upload_receipt(
 
     upload_id = uuid.uuid4().hex
     tmp_filename = f"{group_id}_{upload_id}{ext}"
-    tmp_path = os.path.join(TMP_UPLOADS_DIR, tmp_filename)
-
-    with open(tmp_path, "wb") as f:
-        f.write(contents)
-
-    pending = models.PendingUpload(id=upload_id, group_id=group_id, account_id=account.id, file_path=tmp_path)
-    db.add(pending)
-    db.commit()
-
-    mime = file.content_type or "image/jpeg"
-    vlm_config = resolve_vlm_config(db, account.id, group_id)
-    extraction, source, message, fingerprint = extract_receipt_data(
-        contents, mime, vlm_config, learned_vendors=_learned_vendors_for(db, account.id),
-    )
-    message = _public_scan_message(message)
-    _apply_scan_fingerprint(pending, fingerprint, extraction.store_name)
-    db.add(pending)
-    db.commit()
-
-    return schemas.ExtractionResponse(
+    image_url = f"/api/groups/{group_id}/receipts/tmp/{tmp_filename}"
+    return _queue_receipt_scan(
+        db=db,
+        account=account,
+        group_id=group_id,
+        contents=contents,
+        mime=file.content_type or "image/jpeg",
+        image_url=image_url,
+        tmp_filename=tmp_filename,
         upload_id=upload_id,
-        image_url=f"/api/groups/{group_id}/receipts/tmp/{tmp_filename}",
-        extraction=extraction,
-        source=source,
-        message=message,
     )
 
 
@@ -4133,8 +4827,9 @@ def get_tmp_receipt(
     if not filename.startswith(f"{group_id}_"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied to receipt")
 
-    path = os.path.join(TMP_UPLOADS_DIR, filename)
-    if not os.path.exists(path):
+    storage = get_storage()
+    path = storage.open_path(f"uploads/tmp/{filename}") or storage.open_path(os.path.join(TMP_UPLOADS_DIR, filename))
+    if not path:
         raise HTTPException(404, "Receipt not found")
     return FileResponse(path)
 
@@ -4286,16 +4981,21 @@ def create_expense(
     period = get_or_create_period(db, group_id, period_key)
     _unlock_group_period(period)
 
+    expense_currency = _normalize_currency(payload.currency, group.currency or "USD")
+    group_currency = _normalize_currency(group.currency, "USD")
+    fx_rate = _fx_rate_between(expense_currency, group_currency)
+
     expense = models.Expense(
         period_id=period.id,
         store_name=payload.store_name.strip(),
         bill_date=payload.bill_date,
         total_amount=Decimal(str(payload.total_amount)),
-        currency=_normalize_currency(payload.currency, group.currency or "USD"),
+        currency=expense_currency,
         category=payload.category or "General",
         split_type=payload.split_type or "EQUAL",
         payer_member_id=payload.payer_member_id,
         image_path=final_path,
+        fx_rate_to_group=fx_rate,
     )
     db.add(expense)
     db.flush()
@@ -4352,10 +5052,13 @@ def update_expense(
 
     # Keep the month-saved period sticky; editing bill_date must not move the ledger month.
     _unlock_group_period(expense.period)
+    group = db.query(models.Group).get(group_id)
+    group_currency = _normalize_currency(group.currency if group else "USD", "USD")
     expense.store_name = payload.store_name.strip()
     expense.bill_date = payload.bill_date
     expense.total_amount = Decimal(str(payload.total_amount))
     expense.currency = _normalize_currency(payload.currency, expense.currency or "USD")
+    expense.fx_rate_to_group = _fx_rate_between(expense.currency, group_currency)
     expense.category = payload.category or expense.category or "General"
     expense.split_type = payload.split_type or expense.split_type or "EQUAL"
     expense.payer_member_id = _apply_expense_payers(db, expense, payload.total_amount, payload.payer_member_id, payload.payers)
@@ -4439,7 +5142,8 @@ def list_expenses(
     if period_key:
         q = q.filter(models.MonthlyPeriod.period_key == period_key)
     if category and category != "All":
-        q = q.filter(models.Expense.category == category)
+        aliases = _CATEGORY_ALIASES.get(category, {category})
+        q = q.filter(models.Expense.category.in_(list(aliases)))
     if search:
         term = f"%{search.strip()}%"
         q = q.filter(or_(models.Expense.store_name.ilike(term), models.Expense.category.ilike(term)))
@@ -4501,7 +5205,7 @@ def list_group_activity(group_id: int, limit: int = Query(30, ge=1, le=100), acc
 
 @app.get("/api/notifications", response_model=list[schemas.NotificationOut])
 def list_notifications(unread_only: bool = False, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
-    _purge_stale_read_notifications(db)
+    # Stale read purge runs on the scheduler owner — keep the read path SELECT-only.
     base = db.query(models.Notification).filter_by(account_id=account.id)
     if unread_only:
         return (
@@ -4678,15 +5382,39 @@ def get_group_dashboard(group_id: int, period_key: str, account: models.Account 
     if not period:
         return schemas.GroupDashboardOut(total_spent=0, currency=(group.currency if group else "USD"), category_totals={}, member_totals=[], largest_expenses=[])
     balances, _, expenses = build_balances_and_settlements(db, group_id, period)
+    group_currency = (group.currency if group else "USD") or "USD"
+
+    def _in_group_currency(expense: models.Expense) -> float:
+        """Sum Insights in group currency for any expense currency (AUD, EUR, JPY, …)."""
+        amount = float(expense.total_amount or 0)
+        expense_currency = (expense.currency or group_currency or "USD").upper()
+        grp = group_currency.upper()
+        if expense_currency == grp:
+            return amount
+        rate = float(expense.fx_rate_to_group or 0) or 0.0
+        # Live-resolve when an old row still has the unset 1.0 default.
+        if _stored_fx_looks_unset(rate, expense_currency, grp):
+            rate = float(_fx_rate_between(expense_currency, grp))
+        if rate <= 0:
+            rate = 1.0
+        return round(amount * rate, 2)
+
     category_totals: dict[str, float] = {}
+    total_spent = 0.0
+    ranked: list[tuple[float, models.Expense]] = []
     for expense in expenses:
+        converted = _in_group_currency(expense)
+        total_spent += converted
         category = expense.category or "General"
-        category_totals[category] = round(category_totals.get(category, 0) + float(expense.total_amount), 2)
+        category_totals[category] = round(category_totals.get(category, 0) + converted, 2)
+        ranked.append((converted, expense))
+    ranked.sort(key=lambda item: item[0], reverse=True)
     return schemas.GroupDashboardOut(
-        total_spent=round(sum(float(expense.total_amount) for expense in expenses), 2),
-        currency=group.currency or "USD", category_totals=category_totals,
+        total_spent=round(total_spent, 2),
+        currency=group_currency,
+        category_totals=category_totals,
         member_totals=balances,
-        largest_expenses=sorted(expenses, key=lambda expense: float(expense.total_amount), reverse=True)[:5],
+        largest_expenses=[expense for _amount, expense in ranked[:5]],
     )
 
 @app.get("/api/groups/{group_id}/periods", response_model=list[schemas.PeriodOut])
@@ -4981,12 +5709,14 @@ def delete_personal_expense(
     return {"ok": True, "message": "Personal expense deleted"}
 
 
-@app.post("/api/personal/receipts/upload", response_model=schemas.ExtractionResponse)
+@app.post("/api/personal/receipts/upload")
 async def upload_personal_receipt(
+    request: Request,
     file: UploadFile = File(...),
     account: models.Account = Depends(get_current_account),
     db: Session = Depends(get_db),
 ):
+    check_rate_limit(request, limit=20, window_seconds=60)
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in [".jpg", ".jpeg", ".png", ".webp", ".heic"]:
         raise HTTPException(400, "Unsupported image format")
@@ -4997,41 +5727,22 @@ async def upload_personal_receipt(
 
     upload_id = uuid.uuid4().hex
     tmp_filename = f"personal_{account.id}_{upload_id}{ext}"
-    tmp_path = os.path.join(TMP_UPLOADS_DIR, tmp_filename)
-
-    with open(tmp_path, "wb") as f:
-        f.write(contents)
-
-    pending = models.PendingUpload(id=upload_id, account_id=account.id, file_path=tmp_path)
-    db.add(pending)
+    image_url = f"/api/personal/receipts/tmp/{tmp_filename}"
     try:
-        db.commit()
+        return _queue_receipt_scan(
+            db=db,
+            account=account,
+            group_id=None,
+            contents=contents,
+            mime=file.content_type or "image/jpeg",
+            image_url=image_url,
+            tmp_filename=tmp_filename,
+            upload_id=upload_id,
+        )
     except Exception:
-        db.rollback()
-        logger.exception("Could not record personal upload in the database; keeping the temp file")
+        logger.exception("Could not queue personal receipt scan")
         _ensure_schema()
-
-    mime = file.content_type or "image/jpeg"
-    vlm_config = resolve_vlm_config(db, account.id)
-    extraction, source, message, fingerprint = extract_receipt_data(
-        contents, mime, vlm_config, learned_vendors=_learned_vendors_for(db, account.id),
-    )
-    message = _public_scan_message(message)
-    _apply_scan_fingerprint(pending, fingerprint, extraction.store_name)
-    try:
-        db.add(pending)
-        db.commit()
-    except Exception:
-        db.rollback()
-        logger.exception("Could not store OCR fingerprint on personal upload")
-
-    return schemas.ExtractionResponse(
-        upload_id=upload_id,
-        image_url=f"/api/personal/receipts/tmp/{tmp_filename}",
-        extraction=extraction,
-        source=source,
-        message=message,
-    )
+        raise
 
 
 @app.get("/api/personal/receipts/tmp/{filename}")
@@ -5042,8 +5753,9 @@ def get_personal_tmp_receipt(
     if not filename.startswith(f"personal_{account.id}_"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
 
-    path = os.path.join(TMP_UPLOADS_DIR, filename)
-    if not os.path.exists(path):
+    storage = get_storage()
+    path = storage.open_path(f"uploads/tmp/{filename}") or os.path.join(TMP_UPLOADS_DIR, filename)
+    if not (path and os.path.exists(path)):
         raise HTTPException(404, "Receipt not found")
     return FileResponse(path)
 
@@ -5138,7 +5850,7 @@ def get_group_settings(
     db: Session = Depends(get_db),
 ):
     require_group_member(group_id, account, db)
-    settings = get_group_member_settings(db, group_id, account.id)
+    settings = get_group_member_settings(db, account.id, group_id)
     return group_settings_out(settings)
 
 
@@ -5150,7 +5862,7 @@ def update_group_settings_endpoint(
     db: Session = Depends(get_db),
 ):
     require_group_member(group_id, account, db)
-    settings = update_group_settings(db, group_id, account.id, payload)
+    settings = update_group_settings(db, account.id, group_id, payload)
     return group_settings_out(settings)
 
 
@@ -5174,7 +5886,11 @@ _CLEAN_PAGE_FILES = {
 
 
 def _clean_page_response(page: str) -> FileResponse:
-    return FileResponse(os.path.join(STATIC_DIR, _CLEAN_PAGE_FILES[page]))
+    response = FileResponse(os.path.join(STATIC_DIR, _CLEAN_PAGE_FILES[page]))
+    # Login especially must not be served from a stale cache that redirected to "/".
+    if page in {"login", "app"}:
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 def _legacy_page_redirect(request: Request, page: str) -> RedirectResponse:

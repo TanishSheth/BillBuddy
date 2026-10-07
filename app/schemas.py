@@ -211,6 +211,10 @@ class QuickSplitOut(BaseModel):
     created_at: datetime
     is_payer: bool
     is_owner: bool
+    edited_after_payment: bool = False
+    edit_history: List[dict] = []
+    adjustment_of_split_id: Optional[int] = None
+    last_adjustment_amount: Optional[float] = None
     participants: List[QuickSplitParticipantOut]
 
 
@@ -286,6 +290,11 @@ class ConsolidatedFriendBalancesOut(BaseModel):
     balances: List[ConsolidatedFriendBalanceOut]
 
 
+class FriendsConsolidatedSummaryOut(BaseModel):
+    """Batched Friend balances for the dashboard (one round-trip)."""
+    friends: List[ConsolidatedFriendBalancesOut]
+
+
 class FriendGroupContributionOut(BaseModel):
     group_id: int
     group_name: str
@@ -337,6 +346,17 @@ class ExtractionResponse(BaseModel):
     extraction: ReceiptExtraction
     source: str
     message: Optional[str] = None
+
+
+class ScanJobOut(BaseModel):
+    job_id: str
+    upload_id: str
+    image_url: Optional[str] = None
+    status: str
+    extraction: Optional[ReceiptExtraction] = None
+    source: Optional[str] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
 
 
 # ---------- Custom Splits & Expenses ----------

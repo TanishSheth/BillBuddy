@@ -110,7 +110,16 @@ button, input, select, textarea { font: inherit; }
 }
 
 .page-main {
+  /* Reserve space for bottom nav + FAB so controls stay reachable on mobile. */
   padding-bottom: calc(2rem + var(--safe-bottom));
+}
+@media (max-width: 767px) {
+  .page-main {
+    padding-bottom: calc(7.5rem + var(--safe-bottom));
+  }
+  body.has-bottom-nav .page-main {
+    padding-bottom: calc(8.5rem + var(--safe-bottom));
+  }
 }
 
 .app-logo {
@@ -138,6 +147,17 @@ button, input, select, textarea { font: inherit; }
   scrollbar-width: none;
 }
 .tab-nav::-webkit-scrollbar { display: none; }
+
+.tab-more-wrap { display: none; margin-top: 0; }
+.tab-more-select {
+  width: 100%;
+  font-size: 13px;
+  font-weight: 600;
+}
+@media (max-width: 767px) {
+  #mainNav .tab-nav { display: none; }
+  #mainNav .tab-more-wrap { display: block; }
+}
 
 .tab-btn {
   padding: 8px 14px;
@@ -975,7 +995,7 @@ img.protected-image {
 .public-page a { color: var(--brand); text-decoration: underline; text-underline-offset: 3px; }
 .public-page a.bb-btn-primary,
 .public-page a.bb-btn-secondary { text-decoration: none; }
-.public-page a.bb-btn-primary { color: #fff !important; }
+.public-page a.bb-btn-primary { color: var(--on-brand) !important; }
 .public-page a.bb-btn-secondary { color: var(--ink); }
 .legal-page h2 { font-size: 15px; }
 .public-footer { max-width: 1024px; margin: 0 auto; padding: 22px 20px 34px; display: flex; flex-wrap: wrap; gap: 15px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
@@ -1007,6 +1027,45 @@ img.protected-image {
 .app-dialog-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: rgba(15, 23, 42, .42); backdrop-filter: blur(5px); }
 .app-dialog { width: min(100%, 430px); padding: 26px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); box-shadow: 0 24px 70px rgba(15, 23, 42, .24); color: var(--ink); }
 .app-dialog-icon { display: grid; place-items: center; width: 42px; height: 42px; margin-bottom: 15px; border-radius: 50%; background: #ecfdf5; color: #047857; font: 800 22px/1 Inter, sans-serif; }
+.app-dialog-icon.is-danger { background: #fff1f2; color: #be123c; }
+html.theme-dark .app-dialog-icon { background: rgba(6, 78, 59, 0.55); color: #6ee7b7; }
+html.theme-dark .app-dialog-icon.is-danger { background: rgba(127, 29, 29, 0.55); color: #fda4af; }
+
+/* Tone banners — readable in light and dark (never light text on pastel) */
+.tone-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid transparent;
+  font: 600 12px/1.4 'Space Mono', ui-monospace, monospace;
+}
+.tone-banner-success {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #064e3b;
+}
+.tone-banner-success .tone-banner-icon,
+.tone-banner-success .tone-banner-action { color: #047857; }
+.tone-banner-warning {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+html.theme-dark .tone-banner-success {
+  background: rgba(6, 78, 59, 0.55);
+  border-color: rgba(52, 211, 153, 0.45);
+  color: #a7f3d0;
+}
+html.theme-dark .tone-banner-success .tone-banner-icon,
+html.theme-dark .tone-banner-success .tone-banner-action { color: #6ee7b7; }
+html.theme-dark .tone-banner-warning {
+  background: rgba(120, 53, 15, 0.5);
+  border-color: rgba(251, 191, 36, 0.45);
+  color: #fde68a;
+}
 .app-dialog-icon.is-danger { background: #fff1f2; color: #be123c; }
 .app-dialog h2 { margin: 0; color: var(--ink); font: 700 19px/1.25 Inter, sans-serif; }
 .app-dialog p { margin: 9px 0 22px; color: var(--muted); font: 400 14px/1.55 Inter, sans-serif; }
@@ -1497,8 +1556,7 @@ html.theme-dark .border-ink\/5,
 html.theme-dark .border-ink\/10,
 html.theme-dark .border-ink\/30 { border-color: var(--line) !important; }
 html.theme-dark .toast-msg.toast-info { background: #020617 !important; border-color: #475569; color: #F8FAFC !important; }
-html.theme-dark .period-bar,
-html.theme-dark .font-mono { color: inherit; }
+html.theme-dark .period-bar { color: var(--ink); }
 html.theme-dark .balance-positive { color: #4ADE80; }
 html.theme-dark .balance-negative { color: #F87171; }
 html.theme-dark .split-outcome.is-lent { color: #86efac; }
@@ -1600,8 +1658,17 @@ html.theme-light { color-scheme: light; }
 .border-emerald-200, .border-green-700\/20 { border-color: color-mix(in srgb, var(--positive) 45%, var(--line)) !important; }
 .border-amber-200 { border-color: color-mix(in srgb, var(--warning) 45%, var(--line)) !important; }
 .border-red-700\/20 { border-color: color-mix(in srgb, var(--negative) 45%, var(--line)) !important; }
-.bg-emerald-500 { background-color: var(--positive) !important; }
-.bg-red-500 { background-color: var(--negative) !important; }
+/* Filled badges need dark enough fills for white labels in both themes. */
+.bg-emerald-500 { background-color: #15803d !important; }
+.bg-red-500 { background-color: #b91c1c !important; }
+.email-chip-remove {
+  color: var(--brand) !important;
+  font-weight: 800;
+  line-height: 1;
+  opacity: 0.85;
+}
+.email-chip-remove:hover { opacity: 1; color: var(--stamp) !important; }
+html.theme-dark .email-chip-remove { color: #5eead4 !important; }
 .border-l-emerald-500 { border-left-color: var(--positive) !important; }
 .border-l-red-500 { border-left-color: var(--negative) !important; }
 .border-l-slate-300 { border-left-color: var(--line) !important; }

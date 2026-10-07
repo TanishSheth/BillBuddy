@@ -52,6 +52,17 @@ function renderSummary(summary) {
   filterAndRenderExpenses();
 }
 
+function categoryMatchesFilter(expenseCategory, filterCat) {
+  if (!filterCat || filterCat === "All") return true;
+  const aliases = {
+    "Food & Dining": ["Food & Dining", "Food", "Dining"],
+    Food: ["Food & Dining", "Food", "Dining"],
+    General: ["General", "General / Other", "Other"],
+  };
+  const set = aliases[filterCat] || [filterCat];
+  return set.includes(expenseCategory || "General");
+}
+
 function filterAndRenderExpenses() {
   if (!currentSummary) return;
   const filterCat = $("#categoryFilter").value;
@@ -61,10 +72,13 @@ function filterAndRenderExpenses() {
   tbody.innerHTML = "";
   if (mobileList) mobileList.innerHTML = "";
 
-  const filtered = currentSummary.expenses.filter((e) => filterCat === "All" || e.category === filterCat);
+  const filtered = currentSummary.expenses.filter((e) => categoryMatchesFilter(e.category, filterCat));
 
   if (filtered.length === 0) {
     empty.classList.remove("hidden");
+    empty.textContent = filterCat && filterCat !== "All"
+      ? `No expenses in “${filterCat}” for this month.`
+      : "No expenses in this month yet.";
     return;
   }
   empty.classList.add("hidden");
@@ -422,11 +436,6 @@ async function submitExpenseForm(e) {
   });
 
   $("#settingsBtn")?.addEventListener("click", () => { window.location.href = "/settings.html"; });
-  $("#logoutBtn")?.addEventListener("click", () => {
-    ShareSquad.removeToken();
-    ShareSquad.removeStoredGroupId();
-    window.location.href = "/login.html";
-  });
 
   function navigateMainScreen(screen, direction = -1) {
     const destination = screen === "groups" ? "/index.html?view=groups" : "/index.html?view=friends";

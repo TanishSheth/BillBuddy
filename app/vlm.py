@@ -32,6 +32,14 @@ def _missing_scan_fields(extraction: ReceiptExtraction) -> list[str]:
 
 
 def _message_for_extraction(extraction: ReceiptExtraction) -> str | None:
+    from .ocr_extractor import tesseract_status
+
+    tess = tesseract_status()
+    if not tess.get("available"):
+        return (
+            "Receipt scanning needs Tesseract OCR on this server "
+            f"({tess.get('error') or 'not installed'}). Enter the details manually, or ask your host to install tesseract-ocr."
+        )
     missing = _missing_scan_fields(extraction)
     if not missing:
         return None
@@ -100,7 +108,9 @@ def extract_receipt_data(
         image_bytes, learned_vendors=learned_vendors,
     )
 
-    if ocr_confident:
+    # Escalate when OCR missed merchant/total even if confidence flags looked ok.
+    missing = _missing_scan_fields(ocr_result)
+    if ocr_confident and not missing:
         return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
     if not config.api_key:

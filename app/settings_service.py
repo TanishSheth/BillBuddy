@@ -34,6 +34,19 @@ def _defaults_group_settings(
     return row
 
 
+def _as_settings_dict(payload) -> dict:
+    """Accept a Pydantic model or plain dict from the settings API."""
+    if payload is None:
+        return {}
+    if isinstance(payload, dict):
+        return payload
+    if hasattr(payload, "model_dump"):
+        return payload.model_dump(exclude_unset=True)
+    if hasattr(payload, "dict"):
+        return payload.dict(exclude_unset=True)
+    raise TypeError(f"Unsupported settings payload type: {type(payload)!r}")
+
+
 def account_settings_out(row: models.AccountSettings) -> dict:
     return {
         "use_own_vlm": row.use_own_vlm,
@@ -42,6 +55,7 @@ def account_settings_out(row: models.AccountSettings) -> dict:
         "has_api_key": bool(row.vlm_api_key_encrypted),
         "email_monthly_reports": row.email_monthly_reports,
         "compact_list_view": row.compact_list_view,
+        "preferred_currency": (row.preferred_currency or "USD").upper(),
     }
 
 
@@ -65,29 +79,32 @@ def get_group_member_settings(
     return _defaults_group_settings(db, account_id, group_id)
 
 
-def update_account_settings(db: Session, account_id: int, payload: dict) -> models.AccountSettings:
+def update_account_settings(db: Session, account_id: int, payload) -> models.AccountSettings:
+    data = _as_settings_dict(payload)
     row = _defaults_account_settings(db, account_id)
 
-    if "use_own_vlm" in payload:
-        row.use_own_vlm = bool(payload["use_own_vlm"])
-    if "email_monthly_reports" in payload:
-        row.email_monthly_reports = bool(payload["email_monthly_reports"])
-    if "compact_list_view" in payload:
-        row.compact_list_view = bool(payload["compact_list_view"])
+    if "use_own_vlm" in data:
+        row.use_own_vlm = bool(data["use_own_vlm"])
+    if "email_monthly_reports" in data:
+        row.email_monthly_reports = bool(data["email_monthly_reports"])
+    if "compact_list_view" in data:
+        row.compact_list_view = bool(data["compact_list_view"])
+    if "preferred_currency" in data and data["preferred_currency"]:
+        row.preferred_currency = str(data["preferred_currency"]).strip().upper()[:10]
 
-    provider = payload.get("vlm_provider", row.vlm_provider or DEFAULT_PROVIDER)
-    model = payload.get("vlm_model", row.vlm_model or DEFAULT_MODEL)
+    provider = data.get("vlm_provider") or row.vlm_provider or DEFAULT_PROVIDER
+    model = data.get("vlm_model") or row.vlm_model or DEFAULT_MODEL
     if not is_valid_provider_model(provider, model):
         raise ValueError("Invalid provider or model")
     row.vlm_provider = provider
     row.vlm_model = model
 
-    api_key = payload.get("vlm_api_key")
+    api_key = data.get("vlm_api_key")
     if api_key is not None:
         api_key = api_key.strip()
         if api_key:
             row.vlm_api_key_encrypted = encrypt_secret(api_key)
-        elif payload.get("clear_api_key"):
+        elif data.get("clear_api_key"):
             row.vlm_api_key_encrypted = None
 
     db.commit()
@@ -96,28 +113,29 @@ def update_account_settings(db: Session, account_id: int, payload: dict) -> mode
 
 
 def update_group_settings(
-    db: Session, account_id: int, group_id: int, payload: dict
+    db: Session, account_id: int, group_id: int, payload
 ) -> models.GroupMemberSettings:
+    data = _as_settings_dict(payload)
     row = _defaults_group_settings(db, account_id, group_id)
 
-    if "override_global_vlm" in payload:
-        row.override_global_vlm = bool(payload["override_global_vlm"])
-    if "equal_split_default" in payload:
-        row.equal_split_default = bool(payload["equal_split_default"])
+    if "override_global_vlm" in data:
+        row.override_global_vlm = bool(data["override_global_vlm"])
+    if "equal_split_default" in data:
+        row.equal_split_default = bool(data["equal_split_default"])
 
-    provider = payload.get("vlm_provider", row.vlm_provider or DEFAULT_PROVIDER)
-    model = payload.get("vlm_model", row.vlm_model or DEFAULT_MODEL)
+    provider = data.get("vlm_provider") or row.vlm_provider or DEFAULT_PROVIDER
+    model = data.get("vlm_model") or row.vlm_model or DEFAULT_MODEL
     if not is_valid_provider_model(provider, model):
         raise ValueError("Invalid provider or model")
     row.vlm_provider = provider
     row.vlm_model = model
 
-    api_key = payload.get("vlm_api_key")
+    api_key = data.get("vlm_api_key")
     if api_key is not None:
         api_key = api_key.strip()
         if api_key:
             row.vlm_api_key_encrypted = encrypt_secret(api_key)
-        elif payload.get("clear_api_key"):
+        elif data.get("clear_api_key"):
             row.vlm_api_key_encrypted = None
 
     db.commit()
