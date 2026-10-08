@@ -3,9 +3,13 @@
 Sandbox data mirrors the live product rules: expenses belong to the month they
 were saved, older receipt dates show as late bills, Friends is where payments
 are recorded, and months stay editable (digests only — no auto-SETTLED lock).
+
+The fixture spans multiple calendar months so Overall group balances and the
+combined Friends breakdown (one Direct + one line per group) are easy to try.
 """
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import secrets
@@ -26,16 +30,22 @@ from .split_logic import calculate_splits
 TEMPLATE_VERSION = f"ss-demo-{APP_VERSION}"
 SANDBOX_TTL_HOURS = 2
 _PEOPLE = ("Alex", "Jordan", "Casey", "Morgan", "Riley")
-# store, total, category, payer, participants, bill_date_offset_days, currency, fx_to_group
-_EXPENSES = (
-    ("Costco run", 418.70, "Groceries", 4, (0, 1, 2, 3, 4), 0, "USD", 1.0),
-    ("Uber to airport", 54.00, "Travel", 0, (0, 1, 2), -28, "USD", 1.0),  # late bill
-    ("Dinner at Olive Garden", 96.30, "Food", 3, (0, 2, 3), -2, "USD", 1.0),
-    ("Internet bill", 80.00, "Utilities", 1, (0, 1, 2, 4), -5, "USD", 1.0),
-    ("Movie tickets", 32.00, "Fun", 2, (2, 3), -1, "USD", 1.0),
-    ("Airbnb cleaning fee", 125.00, "Travel", 4, (0, 1, 2, 3, 4), -3, "USD", 1.0),
-    ("Delhi street food", 2400.00, "Food", 0, (0, 1), -20, "INR", 0.012),  # late + FX
-)
+
+
+def _month_key(value: date) -> str:
+    return value.strftime("%Y-%m")
+
+
+def _shift_month(value: date, delta: int) -> date:
+    """Return the first day of the month `delta` months away from `value`."""
+    year = value.year + ((value.month - 1 + delta) // 12)
+    month = (value.month - 1 + delta) % 12 + 1
+    return date(year, month, 1)
+
+
+def _clamp_day(year: int, month: int, day: int) -> date:
+    last = calendar.monthrange(year, month)[1]
+    return date(year, month, min(day, last))
 
 
 def _new_account(db: Session, *, email: str, display_name: str) -> models.Account:
@@ -86,6 +96,78 @@ def _add_expense(
     return expense
 
 
+def _ensure_period(db: Session, group_id: int, period_key: str) -> models.MonthlyPeriod:
+    period = db.query(models.MonthlyPeriod).filter_by(group_id=group_id, period_key=period_key).first()
+    if period:
+        return period
+    period = models.MonthlyPeriod(group_id=group_id, period_key=period_key, status="ACTIVE")
+    db.add(period)
+    db.flush()
+    return period
+
+
+def _seed_apartment_template(db: Session, accounts: list[models.Account], members: list[models.GroupMember], group: models.Group) -> None:
+    """Main roommate group with expenses saved across three calendar months."""
+    today = date.today()
+    current = _shift_month(today, 0)
+    prev = _shift_month(today, -1)
+    older = _shift_month(today, -2)
+    now = datetime.utcnow()
+
+    period_current = _ensure_period(db, group.id, _month_key(current))
+    period_prev = _ensure_period(db, group.id, _month_key(prev))
+    period_older = _ensure_period(db, group.id, _month_key(older))
+
+    current_expenses = (
+        ("Costco run", 418.70, "Groceries", 4, (0, 1, 2, 3, 4), _clamp_day(current.year, current.month, min(today.day, 28)), "USD", 1.0),
+        ("Uber to airport", 54.00, "Travel", 0, (0, 1, 2), _clamp_day(prev.year, prev.month, 12), "USD", 1.0),  # late bill
+        ("Dinner at Olive Garden", 96.30, "Food", 3, (0, 2, 3), _clamp_day(current.year, current.month, max(1, today.day - 2)), "USD", 1.0),
+        ("Internet bill", 80.00, "Utilities", 1, (0, 1, 2, 4), _clamp_day(current.year, current.month, max(1, today.day - 5)), "USD", 1.0),
+        ("Movie tickets", 32.00, "Fun", 2, (2, 3), _clamp_day(current.year, current.month, max(1, today.day - 1)), "USD", 1.0),
+        ("Delhi street food", 2400.00, "Food", 0, (0, 1), _clamp_day(older.year, older.month, 18), "INR", 0.012),
+    )
+    prev_expenses = (
+        ("Rent share top-up", 240.00, "Home", 0, (0, 1, 2, 3, 4), _clamp_day(prev.year, prev.month, 3), "USD", 1.0),
+        ("HEB groceries", 186.40, "Groceries", 1, (0, 1, 2), _clamp_day(prev.year, prev.month, 14), "USD", 1.0),
+        ("Electric bill", 112.00, "Utilities", 2, (0, 1, 2, 3, 4), _clamp_day(prev.year, prev.month, 20), "USD", 1.0),
+        ("Thai takeout", 68.50, "Food", 0, (0, 1), _clamp_day(prev.year, prev.month, 22), "USD", 1.0),
+    )
+    older_expenses = (
+        ("IKEA shelf", 149.00, "Home", 0, (0, 1), _clamp_day(older.year, older.month, 8), "USD", 1.0),
+        ("Gas fill-up", 52.00, "Travel", 1, (0, 1, 2), _clamp_day(older.year, older.month, 16), "USD", 1.0),
+        ("Streaming bundle", 45.00, "Fun", 3, (0, 1, 2, 3, 4), _clamp_day(older.year, older.month, 25), "USD", 1.0),
+    )
+
+    for index, (store, total, category, payer_index, participant_indexes, bill_date, currency, fx) in enumerate(current_expenses):
+        _add_expense(
+            db, period_current, members, store=store, total=total, category=category,
+            payer_index=payer_index, participant_indexes=participant_indexes, bill_date=bill_date,
+            currency=currency, fx_rate_to_group=fx,
+            created_at=now - timedelta(hours=len(current_expenses) - index),
+        )
+    for index, row in enumerate(prev_expenses):
+        store, total, category, payer_index, participant_indexes, bill_date, currency, fx = row
+        _add_expense(
+            db, period_prev, members, store=store, total=total, category=category,
+            payer_index=payer_index, participant_indexes=participant_indexes, bill_date=bill_date,
+            currency=currency, fx_rate_to_group=fx,
+            created_at=now - timedelta(days=20, hours=len(prev_expenses) - index),
+        )
+    for index, row in enumerate(older_expenses):
+        store, total, category, payer_index, participant_indexes, bill_date, currency, fx = row
+        _add_expense(
+            db, period_older, members, store=store, total=total, category=category,
+            payer_index=payer_index, participant_indexes=participant_indexes, bill_date=bill_date,
+            currency=currency, fx_rate_to_group=fx,
+            created_at=now - timedelta(days=50, hours=len(older_expenses) - index),
+        )
+    db.add(models.GroupActivity(
+        group_id=group.id, actor_account_id=accounts[0].id,
+        event_type="expense_added", summary="Alex added Costco run",
+        entity_type="expense",
+    ))
+
+
 def ensure_template(db: Session) -> models.DemoTemplate:
     template = db.query(models.DemoTemplate).filter_by(version=TEMPLATE_VERSION).first()
     if template:
@@ -115,30 +197,242 @@ def ensure_template(db: Session) -> models.DemoTemplate:
         db.add(member)
         members.append(member)
     db.flush()
-    # One ACTIVE month = month saved. Older receipt dates live here as late bills.
-    period = models.MonthlyPeriod(group_id=group.id, period_key=date.today().strftime("%Y-%m"), status="ACTIVE")
-    db.add(period)
-    db.flush()
-    now = datetime.utcnow()
-    for index, (store, total, category, payer_index, participant_indexes, day_offset, currency, fx) in enumerate(_EXPENSES):
-        _add_expense(
-            db, period, members, store=store, total=total, category=category,
-            payer_index=payer_index, participant_indexes=participant_indexes,
-            bill_date=date.today() + timedelta(days=day_offset),
-            currency=currency, fx_rate_to_group=fx,
-            # Newest saves first in the ledger (created_at desc).
-            created_at=now - timedelta(hours=len(_EXPENSES) - index),
-        )
-    db.add(models.GroupActivity(
-        group_id=group.id, actor_account_id=accounts[0].id,
-        event_type="expense_added", summary="Alex added Costco run",
-        entity_type="expense",
-    ))
+    _seed_apartment_template(db, accounts, members, group)
     template = models.DemoTemplate(version=TEMPLATE_VERSION, group_id=group.id)
     db.add(template)
     db.commit()
     db.refresh(template)
     return template
+
+
+def _add_direct_split(
+    db: Session,
+    *,
+    owner: models.Account,
+    friend: models.Account,
+    title: str,
+    total: Decimal,
+    bill_date: date,
+    category: str = "Food",
+    paid_amount: Decimal = Decimal("0.00"),
+    payment_status: str = "PENDING",
+    created_at: datetime | None = None,
+) -> models.QuickSplit:
+    half = (total / Decimal("2")).quantize(Decimal("0.01"))
+    split = models.QuickSplit(
+        title=title,
+        total_amount=total,
+        currency="USD",
+        bill_date=bill_date,
+        category=category,
+        split_type="EQUAL",
+        payer_share_amount=half,
+        created_by_account_id=owner.id,
+        payer_account_id=owner.id,
+        status="OPEN",
+        created_at=created_at or datetime.utcnow(),
+    )
+    db.add(split)
+    db.flush()
+    db.add(models.QuickSplitParticipant(
+        quick_split_id=split.id,
+        email=friend.email,
+        account_id=friend.id,
+        display_name=friend.display_name,
+        share_amount=half,
+        split_value=1,
+        paid_amount=paid_amount,
+        payment_status=payment_status,
+        payment_marked_at=datetime.utcnow() - timedelta(days=1) if paid_amount > 0 else None,
+    ))
+    return split
+
+
+def _seed_sandbox_extras(
+    db: Session,
+    *,
+    owner: models.Account,
+    cloned_accounts: list[models.Account],
+    primary_group: models.Group,
+    member_map: dict[int, models.GroupMember],
+    period_map: dict[int, models.MonthlyPeriod],
+    source_group: models.Group,
+) -> None:
+    """Direct splits, second group, and partial payments for the demo visitor."""
+    today = date.today()
+    prev = _shift_month(today, -1)
+    older = _shift_month(today, -2)
+    jordan = cloned_accounts[1]
+    casey = cloned_accounts[2] if len(cloned_accounts) > 2 else None
+
+    # Friend everyone with the demo owner so the Friends list is useful.
+    for other in cloned_accounts[1:]:
+        one, two = sorted((owner.id, other.id))
+        existing = db.query(models.FriendConnection).filter_by(account_one_id=one, account_two_id=two).first()
+        if not existing:
+            db.add(models.FriendConnection(account_one_id=one, account_two_id=two, status="ACTIVE"))
+
+    # --- Direct private bills across months (Jordan) ---
+    coffee = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Coffee and pastries",
+        total=Decimal("18.40"), bill_date=today, category="Food",
+        paid_amount=Decimal("5.00"), payment_status="PARTIAL",
+        created_at=datetime.utcnow() - timedelta(days=1),
+    )
+    walmart = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Walmart run",
+        total=Decimal("75.02"),
+        bill_date=_clamp_day(prev.year, prev.month, 26),
+        category="Groceries",
+        created_at=datetime.utcnow() - timedelta(days=25),
+    )
+    lyft = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Lyft from airport",
+        total=Decimal("42.00"),
+        bill_date=_clamp_day(older.year, older.month, 9),
+        category="Travel",
+        paid_amount=Decimal("10.00"), payment_status="PARTIAL",
+        created_at=datetime.utcnow() - timedelta(days=55),
+    )
+    if casey:
+        _add_direct_split(
+            db, owner=owner, friend=casey, title="Concert tickets",
+            total=Decimal("96.00"),
+            bill_date=_clamp_day(prev.year, prev.month, 11),
+            category="Fun",
+            created_at=datetime.utcnow() - timedelta(days=28),
+        )
+
+    one, two = sorted((owner.id, jordan.id))
+    # Partial direct payments — leave remaining Direct balance across months.
+    db.add(models.PairPayment(
+        account_one_id=one, account_two_id=two,
+        payer_account_id=jordan.id, recipient_account_id=owner.id,
+        amount=Decimal("5.00"), currency="USD", status="CONFIRMED",
+        reported_by_account_id=owner.id,
+        allocations_json=json.dumps([{
+            "kind": "DIRECT", "amount": 5.0, "month_key": _month_key(today),
+            "payment_kind": "PARTIAL", "quick_split_id": coffee.id,
+        }]),
+        confirmed_at=datetime.utcnow() - timedelta(days=1),
+        created_at=datetime.utcnow() - timedelta(days=1),
+    ))
+    db.add(models.PairPayment(
+        account_one_id=one, account_two_id=two,
+        payer_account_id=jordan.id, recipient_account_id=owner.id,
+        amount=Decimal("10.00"), currency="USD", status="CONFIRMED",
+        reported_by_account_id=owner.id,
+        allocations_json=json.dumps([{
+            "kind": "DIRECT", "amount": 10.0, "month_key": _month_key(older),
+            "payment_kind": "PARTIAL", "quick_split_id": lyft.id,
+        }]),
+        confirmed_at=datetime.utcnow() - timedelta(days=40),
+        created_at=datetime.utcnow() - timedelta(days=40),
+    ))
+    # Unpaid Walmart remains fully open in the previous month.
+    _ = walmart
+
+    # --- Second shared group (weekend trip) with two months of bills ---
+    trip = models.Group(name="Weekend Trip · Demo", currency="USD", created_by_id=owner.id)
+    db.add(trip)
+    db.flush()
+    trip_people = [owner, jordan] + ([casey] if casey else [])
+    trip_members: list[models.GroupMember] = []
+    for index, account in enumerate(trip_people):
+        member = models.GroupMember(
+            group_id=trip.id,
+            account_id=account.id,
+            display_name=account.display_name.replace(" · Demo", ""),
+            role="owner" if index == 0 else "member",
+            is_active=True,
+        )
+        db.add(member)
+        trip_members.append(member)
+    db.flush()
+    trip_current = _ensure_period(db, trip.id, _month_key(today))
+    trip_prev = _ensure_period(db, trip.id, _month_key(prev))
+    _add_expense(
+        db, trip_current, trip_members,
+        store="Airbnb deposit", total=210.00, category="Travel",
+        payer_index=0, participant_indexes=tuple(range(len(trip_members))),
+        bill_date=_clamp_day(today.year, today.month, max(1, today.day - 3)),
+        created_at=datetime.utcnow() - timedelta(days=2),
+    )
+    _add_expense(
+        db, trip_current, trip_members,
+        store="Trail snacks", total=36.00, category="Food",
+        payer_index=1, participant_indexes=(0, 1),
+        bill_date=_clamp_day(today.year, today.month, max(1, today.day - 1)),
+        created_at=datetime.utcnow() - timedelta(days=1),
+    )
+    _add_expense(
+        db, trip_prev, trip_members,
+        store="Gas for road trip", total=64.00, category="Travel",
+        payer_index=0, participant_indexes=tuple(range(len(trip_members))),
+        bill_date=_clamp_day(prev.year, prev.month, 18),
+        created_at=datetime.utcnow() - timedelta(days=22),
+    )
+    db.add(models.GroupActivity(
+        group_id=trip.id, actor_account_id=owner.id,
+        event_type="expense_added", summary="Alex added Airbnb deposit",
+        entity_type="expense",
+    ))
+
+    # --- Partial group payment on the oldest apartment period (Jordan → Alex) ---
+    source_older = next(
+        (period for period in source_group.periods if period.period_key == _month_key(older)),
+        None,
+    )
+    if source_older and source_older.id in period_map:
+        sandbox_older = period_map[source_older.id]
+        # Alex is index 0, Jordan index 1 in the apartment clone order.
+        source_members = sorted(source_group.members, key=lambda member: member.id)
+        if len(source_members) >= 2:
+            alex_member = member_map.get(source_members[0].id)
+            jordan_member = member_map.get(source_members[1].id)
+            if alex_member and jordan_member:
+                cutoff = (
+                    db.query(models.Expense)
+                    .filter_by(period_id=sandbox_older.id)
+                    .order_by(models.Expense.id.desc())
+                    .first()
+                )
+                db.add(models.GroupPayment(
+                    period_id=sandbox_older.id,
+                    payer_member_id=jordan_member.id,
+                    recipient_member_id=alex_member.id,
+                    amount=Decimal("20.00"),
+                    currency="USD",
+                    status="CONFIRMED",
+                    expense_cutoff_id=cutoff.id if cutoff else None,
+                    cleared_amount=Decimal("20.00"),
+                    marked_paid_at=datetime.utcnow() - timedelta(days=35),
+                    confirmed_at=datetime.utcnow() - timedelta(days=35),
+                ))
+                db.add(models.PairPayment(
+                    account_one_id=one, account_two_id=two,
+                    payer_account_id=jordan.id, recipient_account_id=owner.id,
+                    amount=Decimal("20.00"), currency="USD", status="CONFIRMED",
+                    reported_by_account_id=owner.id,
+                    allocations_json=json.dumps([{
+                        "kind": "GROUP",
+                        "amount": 20.0,
+                        "month_key": sandbox_older.period_key,
+                        "payment_kind": "PARTIAL",
+                        "period_id": sandbox_older.id,
+                        "group_id": primary_group.id,
+                        "payer_member_id": jordan_member.id,
+                        "recipient_member_id": alex_member.id,
+                    }]),
+                    confirmed_at=datetime.utcnow() - timedelta(days=35),
+                    created_at=datetime.utcnow() - timedelta(days=35),
+                ))
+
+    db.add(models.Notification(
+        account_id=owner.id, group_id=primary_group.id,
+        message="Demo tip: open Friends → Jordan to see one combined Direct total + one line per group across months. Group Balances shows Overall.",
+        link="/friends.html",
+    ))
 
 
 def _copy_template_group(db: Session, template: models.DemoTemplate, sandbox_id: str) -> tuple[models.Account, models.Group, list[models.Account]]:
@@ -173,13 +467,13 @@ def _copy_template_group(db: Session, template: models.DemoTemplate, sandbox_id:
         member_map[source_member.id] = member
     db.flush()
     period_map: dict[int, models.MonthlyPeriod] = {}
-    for source_period in source_group.periods:
+    for source_period in sorted(source_group.periods, key=lambda row: row.period_key):
         # Always ACTIVE — demo matches live product (no auto month-end SETTLED).
         period = models.MonthlyPeriod(group_id=group.id, period_key=source_period.period_key, status="ACTIVE")
         db.add(period)
         db.flush()
         period_map[source_period.id] = period
-    for source_period in source_group.periods:
+    for source_period in sorted(source_group.periods, key=lambda row: row.period_key):
         for source_expense in sorted(source_period.expenses, key=lambda row: row.created_at or datetime.min):
             expense = models.Expense(
                 period_id=period_map[source_period.id].id,
@@ -213,40 +507,18 @@ def _copy_template_group(db: Session, template: models.DemoTemplate, sandbox_id:
     ])
     db.add(models.Notification(
         account_id=owner.id, group_id=group.id,
-        message="Welcome to your ShareSquad demo — same features as a real account, with sample data.",
-        link=f"/group.html?group={group.id}&tab=expenses",
+        message="Welcome to your ShareSquad demo — same features as a real account, with sample data across several months.",
+        link=f"/group.html?group={group.id}&tab=balances",
     ))
-    if len(cloned_accounts) > 1:
-        friend = cloned_accounts[1]
-        one, two = sorted((owner.id, friend.id))
-        db.add(models.FriendConnection(account_one_id=one, account_two_id=two, status="ACTIVE"))
-        split = models.QuickSplit(
-            title="Coffee and pastries", total_amount=Decimal("18.40"), currency="USD", bill_date=date.today(),
-            category="Food", split_type="EQUAL", payer_share_amount=Decimal("9.20"),
-            created_by_account_id=owner.id, payer_account_id=owner.id, status="OPEN",
-        )
-        db.add(split)
-        db.flush()
-        participant = models.QuickSplitParticipant(
-            quick_split_id=split.id, email=friend.email, account_id=friend.id,
-            display_name=friend.display_name, share_amount=Decimal("9.20"), split_value=1,
-            paid_amount=Decimal("5.00"), payment_status="PARTIAL",
-            payment_marked_at=datetime.utcnow() - timedelta(days=1),
-        )
-        db.add(participant)
-        month_key = date.today().strftime("%Y-%m")
-        # Past payment visible on Friends → payment history (same flow as regular users).
-        db.add(models.PairPayment(
-            account_one_id=one, account_two_id=two,
-            payer_account_id=friend.id, recipient_account_id=owner.id,
-            amount=Decimal("5.00"), currency="USD", status="CONFIRMED",
-            reported_by_account_id=owner.id,
-            allocations_json=json.dumps([{
-                "kind": "DIRECT", "amount": 5.0, "month_key": month_key, "payment_kind": "PARTIAL",
-            }]),
-            confirmed_at=datetime.utcnow() - timedelta(days=1),
-            created_at=datetime.utcnow() - timedelta(days=1),
-        ))
+    _seed_sandbox_extras(
+        db,
+        owner=owner,
+        cloned_accounts=cloned_accounts,
+        primary_group=group,
+        member_map=member_map,
+        period_map=period_map,
+        source_group=source_group,
+    )
     return owner, group, cloned_accounts
 
 

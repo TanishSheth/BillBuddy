@@ -1162,6 +1162,95 @@ def build_balances_and_settlements(
     return result
 
 
+def build_group_balances_all_time(
+    db: Session, group_id: int, settlement_mode: str = "smart",
+) -> tuple[list[dict], list[dict]]:
+    """Overall member nets + Who pays whom across every period (any duration).
+
+    Each period's confirmed GroupPayments are applied first via the existing
+    period builder, then nets are summed and settlements are recomputed once.
+    """
+    mode = (settlement_mode or "smart").strip().lower()
+    if mode not in ("smart", "simplified"):
+        mode = "smart"
+    group = db.query(models.Group).get(group_id)
+    base_currency = (group.currency if group and group.currency else "USD") or "USD"
+    periods = (
+        db.query(models.MonthlyPeriod)
+        .filter_by(group_id=group_id)
+        .order_by(models.MonthlyPeriod.period_key.asc())
+        .all()
+    )
+    if not periods:
+        members = _members_as_dicts(db, group_id)
+        raw = compute_balances(members, [])
+        balances = [{
+            **value,
+            "currency": base_currency,
+            "converted_total_paid": None,
+            "converted_total_share_owed": None,
+            "converted_net_balance": None,
+            "converted_currency": None,
+        } for value in raw.values()]
+        return balances, []
+
+    nets: dict[int, Decimal] = {}
+    paid: dict[int, Decimal] = {}
+    owed: dict[int, Decimal] = {}
+    settlement_paid: dict[int, Decimal] = {}
+    settlement_received: dict[int, Decimal] = {}
+    names: dict[int, str] = {}
+    all_expense_dicts: list[dict] = []
+
+    for period in periods:
+        balances, _settlements, expenses = build_balances_and_settlements(
+            db, group_id, period, settlement_mode=mode,
+        )
+        all_expense_dicts.extend(_expenses_as_dicts(expenses, base_currency, base_currency))
+        for row in balances:
+            mid = int(row["member_id"])
+            names[mid] = row.get("name") or names.get(mid) or f"Member {mid}"
+            nets[mid] = nets.get(mid, Decimal("0.00")) + Decimal(str(row.get("net_balance") or 0))
+            paid[mid] = paid.get(mid, Decimal("0.00")) + Decimal(str(row.get("total_paid") or 0))
+            owed[mid] = owed.get(mid, Decimal("0.00")) + Decimal(str(row.get("total_share_owed") or 0))
+            settlement_paid[mid] = settlement_paid.get(mid, Decimal("0.00")) + Decimal(str(row.get("settlement_paid") or 0))
+            settlement_received[mid] = settlement_received.get(mid, Decimal("0.00")) + Decimal(
+                str(row.get("settlement_received") or 0)
+            )
+
+    raw_balances: dict[int, dict] = {}
+    for mid, net in nets.items():
+        raw_balances[mid] = {
+            "member_id": mid,
+            "name": names.get(mid) or f"Member {mid}",
+            "total_paid": float(paid.get(mid, Decimal("0.00")).quantize(Decimal("0.01"))),
+            "total_share_owed": float(owed.get(mid, Decimal("0.00")).quantize(Decimal("0.01"))),
+            "net_balance": float(net.quantize(Decimal("0.01"))),
+            "settlement_paid": float(settlement_paid.get(mid, Decimal("0.00")).quantize(Decimal("0.01"))),
+            "settlement_received": float(settlement_received.get(mid, Decimal("0.00")).quantize(Decimal("0.01"))),
+            "currency": base_currency,
+            "converted_total_paid": None,
+            "converted_total_share_owed": None,
+            "converted_net_balance": None,
+            "converted_currency": None,
+        }
+
+    members_for_graph = [{"id": mid, "name": raw_balances[mid]["name"]} for mid in raw_balances]
+    if mode == "simplified":
+        raw_settlements = simplify_debts(raw_balances)
+    else:
+        raw_settlements = graph_constrained_settlements(members_for_graph, all_expense_dicts, raw_balances)
+
+    settlements = [{
+        **row,
+        "currency": base_currency,
+        "converted_amount": None,
+        "converted_currency": None,
+        "exchange_rate": None,
+    } for row in raw_settlements]
+    return list(raw_balances.values()), settlements
+
+
 def _period_report_inputs(db: Session, group: models.Group, period: models.MonthlyPeriod):
     balances, settlements, expenses = build_balances_and_settlements(db, group.id, period)
     members_by_id = {member.id: member.display_name for member in db.query(models.GroupMember).filter_by(group_id=group.id).all()}
@@ -3112,9 +3201,82 @@ def _pair_expense_amount(my_id: int, their_id: int, shares: dict[int, Decimal], 
 
 
 def _consolidated_friend_balance(db: Session, account_id: int, friend_id: int, currency: str) -> tuple[Decimal, list[dict]]:
+    """Return live balance and atomic (per-month / per-period) sources for payment allocation."""
     sources = _consolidated_friend_sources(db, account_id, friend_id, currency)
     balance = sum((Decimal(str(source["amount"])) for source in sources), Decimal("0.00"))
     return balance.quantize(Decimal("0.01")), sources
+
+
+def _source_out_fields(source: dict) -> dict:
+    return {
+        key: value
+        for key, value in source.items()
+        if key in {"kind", "label", "amount", "currency", "period_key", "group_id", "settlement_ready"}
+    }
+
+
+def _aggregate_friend_display_sources(atomic_sources: list[dict]) -> list[dict]:
+    """Fold N months/periods into one Direct line + one line per shared group.
+
+    Payment allocation keeps using atomic sources; this list is display-only.
+    """
+    direct_total = Decimal("0.00")
+    direct_currency = None
+    direct_ready = True
+    group_totals: dict[int, dict] = {}
+
+    for source in atomic_sources:
+        amount = Decimal(str(source.get("amount") or 0))
+        if abs(amount) < Decimal("0.005"):
+            continue
+        currency = _normalize_currency(source.get("currency"), "USD")
+        if source.get("kind") == "DIRECT":
+            direct_total += amount
+            direct_currency = direct_currency or currency
+            direct_ready = direct_ready and bool(source.get("settlement_ready", True))
+            continue
+        if source.get("kind") != "GROUP":
+            continue
+        group_id = source.get("group_id")
+        if group_id is None:
+            continue
+        entry = group_totals.get(group_id)
+        if not entry:
+            label = str(source.get("label") or "Group").split(" · ")[0].strip() or "Group"
+            entry = {
+                "kind": "GROUP",
+                "label": label,
+                "amount": Decimal("0.00"),
+                "currency": currency,
+                "period_key": None,
+                "group_id": group_id,
+                "settlement_ready": True,
+            }
+            group_totals[group_id] = entry
+        entry["amount"] += amount
+        entry["settlement_ready"] = bool(entry["settlement_ready"] and source.get("settlement_ready", True))
+
+    display: list[dict] = []
+    if abs(direct_total) >= Decimal("0.005"):
+        display.append({
+            "kind": "DIRECT",
+            "label": "Direct splits",
+            "amount": float(direct_total.quantize(Decimal("0.01"))),
+            "currency": direct_currency or "USD",
+            "period_key": None,
+            "group_id": None,
+            "settlement_ready": direct_ready,
+        })
+    for group_id in sorted(group_totals.keys()):
+        entry = group_totals[group_id]
+        amount = entry["amount"].quantize(Decimal("0.01"))
+        if abs(amount) < Decimal("0.005"):
+            continue
+        display.append({
+            **entry,
+            "amount": float(amount),
+        })
+    return display
 
 
 def _friend_balance_currencies(db: Session, account_id: int, friend_id: int) -> list[str]:
@@ -3167,7 +3329,8 @@ def _consolidated_balance_out(
     # Paid Friend cash must also mark the covered private bills so the ledger
     # can move them into Paid private bills instead of leaving them open.
     _repair_paid_direct_bills_for_pair(db, one, two, normalized_currency)
-    balance, sources = _consolidated_friend_balance(db, account.id, friend_id, normalized_currency)
+    balance, atomic_sources = _consolidated_friend_balance(db, account.id, friend_id, normalized_currency)
+    display_sources = _aggregate_friend_display_sources(atomic_sources)
     # Friend payments are allowed for the live Who-pays-whom result even while
     # its group period is open.  Recording one also creates the matching group
     # payment, so the group and Friend views stay in sync.
@@ -3180,7 +3343,8 @@ def _consolidated_balance_out(
     return schemas.ConsolidatedFriendBalanceOut(
         friend_id=friend_id, balance=float(balance), settleable_balance=float(settleable_balance), currency=normalized_currency,
         payer_account_id=payer_id, recipient_account_id=recipient_id,
-        sources=[schemas.ConsolidatedSourceOut(**{key: value for key, value in source.items() if key in {"kind", "label", "amount", "currency", "period_key", "group_id", "settlement_ready"}}) for source in sources],
+        sources=[schemas.ConsolidatedSourceOut(**_source_out_fields(source)) for source in display_sources],
+        atomic_sources=[schemas.ConsolidatedSourceOut(**_source_out_fields(source)) for source in atomic_sources],
         payments=[_pair_payment_out(payment) for payment in payments],
     )
 
@@ -5437,6 +5601,31 @@ def list_periods(
         .all()
     )
     return periods
+
+
+@app.get("/api/groups/{group_id}/balances", response_model=list[schemas.BalanceOut])
+def get_group_balances_all_time(
+    group_id: int,
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """Overall balances across every month for the Balances & Settlement tab."""
+    require_group_member(group_id, account, db)
+    balances, _ = build_group_balances_all_time(db, group_id, settlement_mode="smart")
+    return balances
+
+
+@app.get("/api/groups/{group_id}/settlements", response_model=list[schemas.SettlementOut])
+def get_group_settlements_all_time(
+    group_id: int,
+    mode: str = Query("smart", pattern="^(smart|simplified)$"),
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """Overall Who pays whom across every month for the Balances & Settlement tab."""
+    require_group_member(group_id, account, db)
+    _, settlements = build_group_balances_all_time(db, group_id, settlement_mode=mode)
+    return settlements
 
 
 @app.get("/api/groups/{group_id}/periods/{period_key}/balances", response_model=list[schemas.BalanceOut])

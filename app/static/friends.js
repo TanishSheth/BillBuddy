@@ -1,6 +1,6 @@
 document.querySelectorAll('a[href="/"]').forEach((link) => { link.href = "/index.html"; });
 try { sessionStorage.setItem("sharesquad_expense_view", "friends"); } catch (_) {}
-let me; let friends = []; let activeFriend = null; let activeLedger = "current"; let editingSplitId = null;
+let me; let friends = []; let activeFriend = null; let editingSplitId = null;
 // Opened from Expenses → Friends cards (?friend=). Back returns there, not Manage friends.
 let openedFromBalances = Number.isFinite(Number(new URLSearchParams(location.search).get("friend"))) && Number(new URLSearchParams(location.search).get("friend")) > 0;
 const money = (value, currency) => ShareSquad.formatMoney(Math.abs(value), currency);
@@ -288,10 +288,6 @@ function renderValues() {
   }
 }
 
-function monthName(month) {
-  return new Date(`${month}-01T00:00:00`).toLocaleDateString(undefined, { month: "long", year: "numeric" });
-}
-
 function canEditBill(split, _settled = false) {
   // Paid bills stay editable; the API applies only the difference (F5).
   return !!split?.is_owner;
@@ -422,19 +418,30 @@ async function deleteBill(row) {
   });
 }
 
-function groupLedgerBlocks(friend, groupRows, selectedMonth) {
-  const settlementByGroup = new Map((friend.consolidated?.sources || [])
-    .filter((source) => source.kind === "GROUP" && source.period_key === selectedMonth)
-    .map((source) => [Number(source.group_id), source]));
-  const groups = new Map();
-  groupRows.forEach((row) => {
+function overallGroupSettlements(friend) {
+  /** One open row per shared group: remaining across every unpaid month. Settled groups omitted. */
+  const totals = friend.consolidatedBalances?.balances || (friend.consolidated ? [friend.consolidated] : []);
+  const contributionCount = new Map();
+  (friend.groupContributions || []).forEach((row) => {
     const id = Number(row.group_id);
-    const group = groups.get(id) || { groupId: id, name: row.group_name, count: 0, date: row.bill_date };
-    group.count += 1;
-    if (String(row.bill_date) > String(group.date)) group.date = row.bill_date;
-    groups.set(id, group);
+    contributionCount.set(id, (contributionCount.get(id) || 0) + 1);
   });
-  return [...groups.values()].map((group) => ({ ...group, settlement: settlementByGroup.get(group.groupId) || null }));
+  const blocks = [];
+  totals.forEach((total) => {
+    (total.sources || [])
+      .filter((source) => source.kind === "GROUP" && source.group_id != null && Math.abs(Number(source.amount || 0)) >= 0.005)
+      .forEach((source) => {
+        const groupId = Number(source.group_id);
+        blocks.push({
+          groupId,
+          name: source.label || "Group",
+          count: contributionCount.get(groupId) || 0,
+          amount: Number(source.amount || 0),
+          currency: source.currency || total.currency || "USD",
+        });
+      });
+  });
+  return blocks.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount) || String(a.name).localeCompare(String(b.name)));
 }
 
 function signedMoney(amount, currency) {
@@ -473,41 +480,35 @@ function directLedgerRow(row, friend) {
 }
 
 function renderLedger(friend) {
-  const currentMonth = new Date().toISOString().slice(0, 7);
-  const selectedMonth = activeLedger === "current" ? currentMonth : $("#historyMonth").value;
-  const rows = friend.rows.filter((row) => String(row.split.bill_date).slice(0, 7) === selectedMonth);
-  const groupRows = (friend.groupContributions || []).filter((row) => String(row.bill_date).slice(0, 7) === selectedMonth);
-  const groupBlocks = groupLedgerBlocks(friend, groupRows, selectedMonth);
-  const directNetByCurrency = new Map();
+  const groupBlocks = overallGroupSettlements(friend);
+  const rows = friend.rows || [];
+  const directSummary = [];
   (friend.consolidatedBalances?.balances || (friend.consolidated ? [friend.consolidated] : [])).forEach((total) => {
-    (total.sources || []).filter((source) => source.kind === "DIRECT" && source.period_key === selectedMonth).forEach((source) => {
-      const currency = source.currency || total.currency || "USD";
-      directNetByCurrency.set(currency, (directNetByCurrency.get(currency) || 0) + Number(source.amount || 0));
+    (total.sources || []).filter((source) => source.kind === "DIRECT" && Math.abs(Number(source.amount || 0)) >= 0.005).forEach((source) => {
+      directSummary.push({ currency: source.currency || total.currency || "USD", amount: Number(source.amount || 0) });
     });
   });
-  const directSummary = [...directNetByCurrency.entries()].filter(([, amount]) => Math.abs(amount) >= 0.005).map(([currency, amount]) => ({ currency, amount }));
   const openRows = rows.filter((row) => !isDirectBillSettled(row, friend)).sort((a, b) => String(b.split.bill_date).localeCompare(String(a.split.bill_date)));
   const paidRows = rows.filter((row) => isDirectBillSettled(row, friend)).sort((a, b) => String(b.split.bill_date).localeCompare(String(a.split.bill_date)));
-  $("#ledgerTitle").textContent = activeLedger === "current" ? `This month · ${monthName(currentMonth)}` : `History · ${monthName(selectedMonth)}`;
-  $("#historyMonth").classList.toggle("hidden", activeLedger !== "history");
-  [["#currentBillsTab", activeLedger === "current"], ["#historyBillsTab", activeLedger === "history"]].forEach(([selector, isActive]) => {
-    const tab = $(selector);
-    tab?.classList.toggle("active", isActive);
-  });
-  const groupHtml = groupBlocks.length ? `<section class="space-y-2"><div class="flex items-center justify-between gap-3"><p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Group settlements</p><span class="text-[10px] text-ink/50">${groupBlocks.length} group${groupBlocks.length === 1 ? "" : "s"}</span></div>${groupBlocks.sort((a, b) => String(b.date).localeCompare(String(a.date))).map((group) => {
-    const amount = Number(group.settlement?.amount || 0);
-    const currency = group.settlement?.currency || "USD";
-    const status = amount > 0 ? "They owe you" : amount < 0 ? "You owe them" : "Settled up";
-    const amountText = amount ? `${amount > 0 ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(amount), currency)}` : "—";
-    const amountTone = amount > 0 ? "text-green-700" : amount < 0 ? "text-red-700" : "text-ink/60";
-    return `<button type="button" class="member-row group-ledger-row w-full text-left" data-group-id="${group.groupId}"><div><p class="font-semibold text-sm">Group settlement · ${ShareSquad.escapeHtml(group.name)}</p><p class="text-xs text-ink/55">${group.count} shared expense${group.count === 1 ? "" : "s"} · View group expenses</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${amountTone}">${amountText}</p><p class="text-[10px] text-ink/50">${status}</p></div></button>`;
+  if ($("#ledgerTitle")) $("#ledgerTitle").textContent = "Overall remaining";
+  const groupHtml = groupBlocks.length ? `<section class="space-y-2"><div class="flex items-center justify-between gap-3"><p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Group settlements</p><span class="text-[10px] text-ink/50">${groupBlocks.length} open group${groupBlocks.length === 1 ? "" : "s"}</span></div>${groupBlocks.map((group) => {
+    const amount = Number(group.amount || 0);
+    const currency = group.currency || "USD";
+    const status = amount > 0 ? "They owe you" : "You owe them";
+    const amountText = `${amount > 0 ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(amount), currency)}`;
+    const amountTone = amount > 0 ? "text-green-700" : "text-red-700";
+    const expenseNote = group.count
+      ? `${group.count} shared expense${group.count === 1 ? "" : "s"} across all months · View group`
+      : "Overall Who pays whom · View group";
+    return `<button type="button" class="member-row group-ledger-row w-full text-left" data-group-id="${group.groupId}"><div><p class="font-semibold text-sm">Group settlement · ${ShareSquad.escapeHtml(group.name)}</p><p class="text-xs text-ink/55">${expenseNote}</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${amountTone}">${amountText}</p><p class="text-[10px] text-ink/50">${status}</p></div></button>`;
   }).join("")}</section>` : "";
-  const directHeader = rows.length ? `<div class="flex items-center justify-between gap-3"><p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Private bills</p><span class="text-[10px] font-mono ${directSummary.length && directSummary.every((item) => item.amount > 0) ? "text-green-700" : directSummary.length && directSummary.every((item) => item.amount < 0) ? "text-red-700" : "text-ink/50"}">${directSummary.length ? directSummary.map((item) => signedMoney(item.amount, item.currency)).join(" · ") : "Settled"}</span></div>` : "";
-  const privateHtml = rows.length ? `<section class="space-y-2 ${groupHtml ? "pt-4 mt-4 border-t border-ink/10" : ""}">${directHeader}${openRows.map((row) => directLedgerRow(row, friend)).join("")}${paidRows.length ? `<details class="pt-2"><summary class="cursor-pointer text-xs font-semibold text-ink/60">Paid private bills · ${paidRows.length}</summary><div class="space-y-2 mt-2">${paidRows.map((row) => directLedgerRow(row, friend)).join("")}</div></details>` : ""}</section>` : "";
-  $("#friendLedger").innerHTML = groupHtml || privateHtml ? `${groupHtml}${privateHtml}` : '<p class="text-sm text-ink/55 py-3">No group settlements or private bills in this month.</p>';
+  const hasPrivate = openRows.length || paidRows.length;
+  const directHeader = hasPrivate ? `<div class="flex items-center justify-between gap-3"><p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Private bills</p><span class="text-[10px] font-mono ${directSummary.length && directSummary.every((item) => item.amount > 0) ? "text-green-700" : directSummary.length && directSummary.every((item) => item.amount < 0) ? "text-red-700" : "text-ink/50"}">${directSummary.length ? directSummary.map((item) => signedMoney(item.amount, item.currency)).join(" · ") : "Settled"}</span></div>` : "";
+  const privateHtml = hasPrivate ? `<section class="space-y-2 ${groupHtml ? "pt-4 mt-4 border-t border-ink/10" : ""}">${directHeader}${openRows.map((row) => directLedgerRow(row, friend)).join("")}${paidRows.length ? `<details class="pt-2"><summary class="cursor-pointer text-xs font-semibold text-ink/60">Paid private bills · ${paidRows.length}</summary><div class="space-y-2 mt-2">${paidRows.map((row) => directLedgerRow(row, friend)).join("")}</div></details>` : ""}</section>` : "";
+  $("#friendLedger").innerHTML = groupHtml || privateHtml ? `${groupHtml}${privateHtml}` : '<p class="text-sm text-ink/55 py-3">No open group settlements or private bills with this person.</p>';
   $("#friendLedger").querySelectorAll(".group-ledger-row").forEach((button) => button.addEventListener("click", () => {
     ShareSquad.setStoredGroupId(button.dataset.groupId);
-    window.location.href = `/group.html?group=${encodeURIComponent(button.dataset.groupId)}&tab=expenses`;
+    window.location.href = `/group.html?group=${encodeURIComponent(button.dataset.groupId)}&tab=balances`;
   }));
   $("#friendLedger").querySelectorAll(".edit-friend-bill").forEach((button) => button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -519,7 +520,7 @@ function renderLedger(friend) {
     const row = friend.rows.find((item) => String(item.split.id) === String(button.dataset.splitId));
     if (row) deleteBill(row);
   }));
-  $("#monthlySettlement").innerHTML = `<p class="text-[10px] text-ink/55">Groups show one final Who-pays-whom result. Private bills stay separate; paid bills are kept in their own collapsible history.</p>`;
+  $("#monthlySettlement").innerHTML = `<p class="text-[10px] text-ink/55">Each group shows the overall remaining Who pays whom (every unpaid month combined). Settled groups are hidden. Private bills stay separate.</p>`;
 }
 
 function renderConsolidated(friend) {
@@ -531,10 +532,10 @@ function renderConsolidated(friend) {
     .filter((total) => Math.abs(Number(total.balance || 0)) >= 0.005 || (total.payments || []).length);
   if (!totals.length) { breakdown.innerHTML = ""; payments.innerHTML = '<p class="text-xs text-ink/55">No balance to settle with this person.</p>'; return; }
   const multiple = totals.length > 1;
-  breakdown.innerHTML = `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/50 mb-2">Balance breakdown</p><p class="text-[10px] text-ink/55 mb-3">Balances are separated by currency. Total = group Who pays whom (for this pair) + private direct bills; shared group expenses in the ledger are view-only.</p>${totals.map((total) => {
+  breakdown.innerHTML = `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/50 mb-2">Balance breakdown</p><p class="text-[10px] text-ink/55 mb-3">Balances are separated by currency. Remaining = one Direct total (all unpaid months) + one total per shared group (all unpaid months). Shared group expenses in the ledger are view-only.</p>${totals.map((total) => {
     const sources = total.sources || [];
     return `<section class="${multiple ? "pt-3 mt-3 border-t border-ink/10" : ""}">${multiple ? `<p class="text-xs font-mono font-bold text-brand mb-2">${ShareSquad.escapeHtml(total.currency)} balance</p>` : ""}<div class="space-y-2">${sources.length ? sources.map((source) => {
-      const label = source.kind === "GROUP" ? String(source.label || "").split(" · ")[0] : source.label;
+      const label = source.label || (source.kind === "GROUP" ? "Group" : "Direct splits");
       return `<div class="flex justify-between gap-3 text-xs"><span>${ShareSquad.escapeHtml(label)}</span><span class="font-mono ${source.amount > 0 ? "text-green-700" : "text-red-700"}">${source.amount > 0 ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(source.amount), source.currency)}</span></div>`;
     }).join("") : '<p class="text-xs text-ink/55">No open balance in this currency.</p>'}</div></section>`;
   }).join("")}`;
@@ -543,7 +544,7 @@ function renderConsolidated(friend) {
     const iOwe = settleable < 0; const currency = ShareSquad.escapeHtml(total.currency);
     const deferredAmount = balance - settleable;
     const openGroups = [...new Map((total.sources || []).filter((source) => source.kind === "GROUP" && source.settlement_ready === false && source.group_id).map((source) => [source.group_id, String(source.label || "Group").split(" · ")[0]])).entries()];
-    const groupAction = openGroups.length ? `<div class="mt-3 flex flex-wrap items-center gap-2"><span class="text-xs text-ink/55">${Math.abs(deferredAmount) >= 0.005 ? `${ShareSquad.formatMoney(Math.abs(deferredAmount), total.currency)} remains in an open group period.` : "Recording this payment also updates the current group balance."}</span>${openGroups.map(([groupId, groupName]) => `<button type="button" class="open-group-settlement bb-btn-secondary !py-1 !px-2 text-[10px]" data-group-id="${groupId}">Open ${ShareSquad.escapeHtml(groupName)} balances</button>`).join("")}</div>` : "";
+    const groupAction = openGroups.length ? `<div class="mt-3 flex flex-wrap items-center gap-2"><span class="text-xs text-ink/55">${Math.abs(deferredAmount) >= 0.005 ? `${ShareSquad.formatMoney(Math.abs(deferredAmount), total.currency)} remains in an open group period.` : "Recording this payment also updates the overall group balance."}</span>${openGroups.map(([groupId, groupName]) => `<button type="button" class="open-group-settlement bb-btn-secondary !py-1 !px-2 text-[10px]" data-group-id="${groupId}">Open ${ShareSquad.escapeHtml(groupName)} balances</button>`).join("")}</div>` : (settleable ? `<p class="mt-3 text-xs text-ink/55">Recording this payment also updates the overall group balance.</p>` : "");
     const waitMsg = !balance ? '<p class="text-xs text-ink/55">No balance to settle in this currency.</p>' : "";
     const pending = (total.payments || []).filter((payment) => payment.status === "PENDING");
     const history = (total.payments || []).length ? `<details class="mt-3 pt-3 border-t border-ink/10"><summary class="cursor-pointer text-[10px] font-mono uppercase tracking-widest text-ink/50">${currency} payment history · ${(total.payments || []).length}</summary><div class="space-y-2 mt-3">${total.payments.map((payment) => {
@@ -573,15 +574,6 @@ function renderConsolidated(friend) {
 }
 
 function setupHistory(friend) {
-  const months = [...new Set([
-    ...friend.rows.map((row) => String(row.split.bill_date).slice(0, 7)),
-    ...(friend.groupContributions || []).map((row) => String(row.bill_date).slice(0, 7)),
-  ])].sort().reverse();
-  const currentMonth = new Date().toISOString().slice(0, 7);
-  const previousMonth = months.find((month) => month !== currentMonth) || months[0] || currentMonth;
-  $("#historyMonth").innerHTML = months.map((month) => `<option value="${month}">${monthName(month)}</option>`).join("");
-  $("#historyMonth").value = previousMonth;
-  activeLedger = "current";
   renderLedger(friend);
 }
 
@@ -725,9 +717,6 @@ $("#backFriends").onclick = () => {
   $("#friendsListPane").classList.remove("hidden");
   history.replaceState({}, "", "/friends.html");
 };
-$("#currentBillsTab").onclick = () => { activeLedger = "current"; if (activeFriend) renderLedger(activeFriend); };
-$("#historyBillsTab").onclick = () => { activeLedger = "history"; if (activeFriend) renderLedger(activeFriend); };
-$("#historyMonth").onchange = () => { if (activeFriend) renderLedger(activeFriend); };
 $("#openAddBill").onclick = () => { const panel = $("#friendExpensePanel"); if (panel.classList.contains("hidden")) return; resetExpenseForm(); panel.scrollIntoView({ behavior: "smooth", block: "start" }); setTimeout(() => $("#friendExpenseTitle").focus(), 350); };
 $("#cancelFriendExpenseEdit")?.addEventListener("click", () => resetExpenseForm());
 $("#friendExpenseType").onchange = renderValues;

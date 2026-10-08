@@ -464,7 +464,7 @@ async function api(path, opts = {}) {
   }
 }
 
-// Currency formatters. Symbols render in .currency-sym (not Space Mono, which lacks ₹).
+// Currency formatters. Symbols render in .currency-sym (Inter tabular nums).
 const CURRENCIES = [
   { code: "USD", symbol: "$", name: "US Dollar" },
   { code: "INR", symbol: "₹", name: "Indian Rupee" },

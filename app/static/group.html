@@ -1,4 +1,4 @@
-ï»¿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -7,10 +7,10 @@
 <script>(function(){try{var k="sharesquad_theme",p=localStorage.getItem(k)||"system",d=p==="dark"||(p!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("theme-dark",d);document.documentElement.classList.toggle("theme-light",!d);document.documentElement.dataset.theme=d?"dark":"light";var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",d?"#0B1220":"#F8FAFC");}catch(e){}})();</script>
 <title>ShareSquad &mdash; Group Ledger</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20261007insightMonth">
+<link rel="stylesheet" href="/styles.css?v=20261008cabinet">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -92,7 +92,7 @@
       </div>
 
       <div class="how-it-works mb-5">
-        <p id="groupPageHelp"><strong>Balances & settlement:</strong> See who pays whom for this month and settle any open balances.</p>
+        <p id="groupPageHelp"><strong>Balances & settlement:</strong> Overall who owes whom across every month. Record payments on Friends.</p>
       </div>
 
       <!-- Add / Scan Expense Tab -->
@@ -124,12 +124,12 @@
               <img id="previewImg" class="w-full rounded border border-ink/10 receipt-preview" alt="Receipt preview" />
               <div id="scanProgress" class="scan-progress hidden" aria-live="polite" aria-busy="true">
                 <div class="scan-progress-ring"></div>
-                <p class="scan-progress-label">Reading receiptâ€¦</p>
+                <p class="scan-progress-label">Reading receipt…</p>
               </div>
             </div>
             <div id="uploadStatus" class="hidden scan-status-bar mt-3">
               <div class="scan-progress-ring scan-progress-ring-sm"></div>
-              <span>Reading receiptâ€¦ this can take a few seconds</span>
+              <span>Reading receipt… this can take a few seconds</span>
             </div>
           </div>
 
@@ -275,9 +275,9 @@
 
         <div class="bb-card mb-4">
           <h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Who pays whom</h3>
-          <p class="text-[10px] text-ink/55 mb-3">Built from who paid each bill. Record payments on Friends â€” amounts here update when a payment is saved. Shared expenses also appear on Friends for viewing only (not double-counted).</p>
+          <p class="text-[10px] text-ink/55 mb-3">Overall across every month, built from who paid each bill. Record payments on Friends — amounts here update when a payment is saved. Shared expenses also appear on Friends for viewing only (not double-counted).</p>
           <div id="settlementList" class="space-y-2 font-mono text-sm"></div>
-          <p id="settlementEmpty" class="hidden text-ink/40 text-sm font-mono py-4">Everyone's settled up â€” no transfers needed.</p>
+          <p id="settlementEmpty" class="hidden text-ink/40 text-sm font-mono py-4">Everyone's settled up — no transfers needed.</p>
           <div id="paymentPendingNotice" class="hidden tone-banner tone-banner-warning mt-3"></div>
           <div id="paymentHistory" class="mt-4 pt-3 border-t border-ink/10 space-y-2"></div>
         </div>
@@ -307,7 +307,7 @@
           <div class="report-row">
             <div class="flex-1 min-w-0">
               <h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-1">Monthly report</h3>
-              <p class="text-sm text-ink/60">Download a PDF of this monthâ€™s expenses, balances, and who should pay whom.</p>
+              <p class="text-sm text-ink/60">Download a PDF of this month’s expenses, balances, and who should pay whom.</p>
             </div>
             <div class="report-actions flex flex-wrap items-center gap-2">
               <button id="convertCurrencyBtn" type="button" class="bb-btn-secondary w-full sm:w-auto !py-2 !px-3 text-[11px] flex items-center justify-center gap-1.5 text-brand border-brand/30 hover:bg-brand/5">
@@ -399,7 +399,7 @@
             <input type="number" id="customRateInput" step="any" min="0.000001" class="bb-input font-bold" placeholder="e.g. 83.50" required />
             <span id="rateSuffix" class="text-xs text-ink/70">INR</span>
           </div>
-          <p id="rateSourceHint" class="text-[10px] text-ink/40 mt-1">This locks 1 group-currency unit to the settlement currency (e.g. 1 USD = 1.36 CAD). Other receipts (INR, EUR, â€¦) convert through that rate. Same-currency amounts are not converted twice.</p>
+          <p id="rateSourceHint" class="text-[10px] text-ink/40 mt-1">This locks 1 group-currency unit to the settlement currency (e.g. 1 USD = 1.36 CAD). Other receipts (INR, EUR, …) convert through that rate. Same-currency amounts are not converted twice.</p>
         </div>
 
         <p id="currencyModalMsg" class="text-xs font-mono"></p>
@@ -481,8 +481,8 @@
     Add expense
   </button>
 
-  <script src="/api.js?v=20261007signOutLabel"></script>
-  <script src="/group.js?v=20261007signOutTabs"></script>
+  <script src="/api.js?v=20261008combinedBalances"></script>
+  <script src="/group.js?v=20261008combinedBalances"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

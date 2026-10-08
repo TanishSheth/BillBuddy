@@ -275,7 +275,10 @@ class ConsolidatedFriendBalanceOut(BaseModel):
     currency: str
     payer_account_id: Optional[int] = None
     recipient_account_id: Optional[int] = None
+    # Display lines: one Direct + one per shared group (any number of months).
     sources: List[ConsolidatedSourceOut]
+    # Month/period detail for History ledger; payments still allocate against these server-side.
+    atomic_sources: List[ConsolidatedSourceOut] = []
     payments: List[PairPaymentOut]
 
 

@@ -101,7 +101,7 @@ function syncExpenseCurrencyUI() {
 const GROUP_PAGE_HELP = {
   upload: "<strong>Add / Scan:</strong> Upload a receipt or enter a bill, choose who paid and who shares it, then save it to this month.",
   expenses: "<strong>Expenses:</strong> Newest saves on top. The date column is the receipt date. Filter by the month you added a bill, category, member, or search.",
-  balances: "<strong>Balances & settlement:</strong> Who pays whom for bills saved in the current calendar month (including older receipt dates added late). Record payments on Friends.",
+  balances: "<strong>Balances & settlement:</strong> Overall who owes whom across every month in this group. Record payments on Friends — amounts here update when a payment is saved.",
   insights: "<strong>Insights:</strong> Pick a month to see total spending, top category, and largest bills saved that month.",
   activity: "<strong>Activity:</strong> Follow group changes, expenses, comments, and payment updates in time order.",
   reports: "<strong>PDF Reports:</strong> Generate or download a PDF for the current calendar month, and reopen past PDFs below.",
@@ -701,7 +701,7 @@ function renderBalanceStrip(balances) {
       <span class="balance-chip-amt">${tone === "settled" ? "✓" : (tone === "owed" ? "+" : "−")}${tone === "settled" ? "" : amount}</span>
     </div>`;
   }).join("");
-  strip.innerHTML = `<div class="balance-strip-label">This month</div><div class="balance-strip-grid">${chips}</div>`;
+  strip.innerHTML = `<div class="balance-strip-label">Overall</div><div class="balance-strip-grid">${chips}</div>`;
   strip.classList.remove("hidden");
 }
 
@@ -1049,10 +1049,9 @@ async function saveExpense() {
 // Balances & Currency Auto-Conversion
 // ---------------------------------------------------------------------------
 async function loadBalances() {
-  const [balances, settlements, payments] = await Promise.all([
-    ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/balances`),
-    ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/settlements?mode=smart`),
-    ShareSquad.api(`/groups/${gid()}/periods/${state.currentPeriod}/payments`),
+  const [balances, settlements] = await Promise.all([
+    ShareSquad.api(`/groups/${gid()}/balances`),
+    ShareSquad.api(`/groups/${gid()}/settlements?mode=smart`),
   ]);
   renderBalanceStrip(balances);
 
@@ -1105,7 +1104,7 @@ async function loadBalances() {
     banner?.classList.add("hidden");
   }
 
-  await loadPaymentHistory(payments);
+  await loadPaymentHistory();
 }
 
 async function loadPaymentHistory(_existingPayments = null) {
@@ -1116,9 +1115,7 @@ async function loadPaymentHistory(_existingPayments = null) {
     pendingNotice.classList.add("hidden");
     pendingNotice.textContent = "";
   }
-  list.innerHTML = isCurrentPeriodSettled()
-    ? '<p class="text-[11px] font-mono text-ink/55">This month was locked earlier. The owner can unlock it to edit; recorded payments stay applied.</p>'
-    : "";
+  list.innerHTML = '<p class="text-[11px] font-mono text-ink/55">Overall balances include every month. Record payments on Friends; month reports and expenses stay on their own tabs.</p>';
 }
 
 async function applySettlementCurrency(code, customRate = null) {
