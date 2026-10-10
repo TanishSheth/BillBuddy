@@ -1,5 +1,5 @@
 @import url("https://api.fontshare.com/v2/css?f[]=cabinet-grotesk@500;700;800&display=swap");
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans:wght@400;700&family=Noto+Sans+Arabic:wght@400;700&family=Noto+Sans+Thai:wght@400;700&display=swap");
 
 :root {
   --font-sans: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -31,12 +31,15 @@
 
 * { box-sizing: border-box; }
 
-/* Money and currency glyphs (incl. ₹) use Inter tabular nums. */
+/* Money and currency glyphs (incl. ₹, ฿, د.إ) — avoid mono fonts that lack them. */
 .currency-sym,
 select.bb-input,
+select[data-currency-select],
 .amount,
-.balance-table {
-  font-family: var(--font-sans);
+.balance-table,
+.balance-chip-amt,
+.insight-value {
+  font-family: "Noto Sans", "Noto Sans Arabic", "Noto Sans Thai", var(--font-sans), "Segoe UI", Tahoma, sans-serif !important;
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
 }
@@ -1410,7 +1413,7 @@ html.theme-dark .category-pie-empty { fill: #1e293b; }
   gap: 8px;
   padding: 7px 10px;
   border-radius: 7px;
-  font: 600 11px/1.2 Inter, sans-serif;
+  font: 600 11px/1.2 "Noto Sans", "Noto Sans Arabic", "Noto Sans Thai", Inter, sans-serif;
   margin-top: 6px;
   transition: background .2s ease, color .2s ease;
 }

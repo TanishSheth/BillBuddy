@@ -1,4 +1,4 @@
-﻿"""Environment and deployment configuration."""
+"""Environment and deployment configuration."""
 import os
 
 from dotenv import load_dotenv
@@ -17,7 +17,7 @@ def _normalize_database_url(url: str) -> str:
     return url
 
 
-APP_VERSION = os.environ.get("APP_VERSION", "20261008cabinet")
+APP_VERSION = os.environ.get("APP_VERSION", "20261010moneyGlyphs")
 ENVIRONMENT = os.environ.get("BILLBUDDY_ENV", "development").strip().lower()
 IS_DEVELOPMENT = ENVIRONMENT == "development"
 DISABLE_SCHEDULER = _is_truthy(os.environ.get("DISABLE_SCHEDULER"))

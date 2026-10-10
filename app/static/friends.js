@@ -238,10 +238,10 @@ function renderValues() {
   if (notice) notice.textContent = total ? `Paid ${cents(mine + theirs).toFixed(2)} of ${total.toFixed(2)}.` : "Enter the cash each of you paid. The two amounts must add up to the bill.";
   const shareNotice = $("#friendShareNotice");
   if (shareNotice) {
-    const money = ShareSquad.formatMoneyText(total, $("#friendExpenseCurrency").value || "USD");
+    const money = ShareSquad.formatMoney(total, $("#friendExpenseCurrency").value || "USD");
     const setOutcome = (message, tone = "is-neutral") => {
-      shareNotice.className = `text-[11px] font-mono mt-2 split-outcome ${tone}`;
-      shareNotice.textContent = message;
+      shareNotice.className = `text-[11px] mt-2 split-outcome ${tone}`;
+      shareNotice.innerHTML = message;
     };
     const splitType = $("#friendExpenseType").value;
     const payerValue = Number($("#friendPayerValue").value) || 0;
@@ -266,8 +266,8 @@ function renderValues() {
       }
       const myNet = myPaid - myOwedShare;
       if (Math.abs(myNet) < 0.005) setOutcome("You are settled: each of you paid your own share.");
-      else if (myNet > 0) setOutcome(`${name} owes you ${ShareSquad.formatMoneyText(myNet, $("#friendExpenseCurrency").value || "USD")}.`, "is-lent");
-      else setOutcome(`You owe ${name} ${ShareSquad.formatMoneyText(Math.abs(myNet), $("#friendExpenseCurrency").value || "USD")}.`, "is-owed");
+      else if (myNet > 0) setOutcome(`${ShareSquad.escapeHtml(name)} owes you ${ShareSquad.formatMoney(myNet, $("#friendExpenseCurrency").value || "USD")}.`, "is-lent");
+      else setOutcome(`You owe ${ShareSquad.escapeHtml(name)} ${ShareSquad.formatMoney(Math.abs(myNet), $("#friendExpenseCurrency").value || "USD")}.`, "is-owed");
     };
     if (!shareMe && !shareFriend) setOutcome("Choose at least one person.");
     else if (onePersonCovers) {
@@ -275,16 +275,16 @@ function renderValues() {
       const payer = paidBy === "friend" ? name : "you";
       const personLabel = person === "you" ? "You" : name;
       if (paidBy === "both") bothPaidOutcome(shareMe ? total : 0, shareFriend ? total : 0);
-      else if (person === payer) setOutcome(`${personLabel} paid and covers the full ${money}.`);
-      else if (person === "you") setOutcome(`You owe ${name} the full ${money}.`, "is-owed");
-      else setOutcome(`${name} owes you the full ${money}.`, "is-lent");
+      else if (person === payer) setOutcome(`${ShareSquad.escapeHtml(personLabel)} paid and covers the full ${money}.`);
+      else if (person === "you") setOutcome(`You owe ${ShareSquad.escapeHtml(name)} the full ${money}.`, "is-owed");
+      else setOutcome(`${ShareSquad.escapeHtml(name)} owes you the full ${money}.`, "is-lent");
     } else if (paidBy === "both") {
       bothPaidOutcome(myShare, friendShare);
     } else if (paidBy === "me" && total) {
-      setOutcome(`${name} owes you ${ShareSquad.formatMoneyText(friendShare, $("#friendExpenseCurrency").value || "USD")}.`, "is-lent");
+      setOutcome(`${ShareSquad.escapeHtml(name)} owes you ${ShareSquad.formatMoney(friendShare, $("#friendExpenseCurrency").value || "USD")}.`, "is-lent");
     } else if (paidBy === "friend" && total) {
-      setOutcome(`You owe ${name} ${ShareSquad.formatMoneyText(myShare, $("#friendExpenseCurrency").value || "USD")}.`, "is-owed");
-    } else setOutcome(`You and ${name} share this cost. Enter the cash amounts and split to see the final result.`);
+      setOutcome(`You owe ${ShareSquad.escapeHtml(name)} ${ShareSquad.formatMoney(myShare, $("#friendExpenseCurrency").value || "USD")}.`, "is-owed");
+    } else setOutcome(`You and ${ShareSquad.escapeHtml(name)} share this cost. Enter the cash amounts and split to see the final result.`);
   }
 }
 

@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#F6F3EC">
 <script>(function(){try{var k="sharesquad_theme",p=localStorage.getItem(k)||"system",d=p==="dark"||(p!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("theme-dark",d);document.documentElement.classList.toggle("theme-light",!d);document.documentElement.dataset.theme=d?"dark":"light";var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",d?"#0B1220":"#F8FAFC");}catch(e){}})();</script>
-<title>ShareSquad — Sign In</title>
+<title>ShareSquad â€” Sign In</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
-<link rel="stylesheet" href="/styles.css?v=20261008cabinet">
+<link rel="stylesheet" href="/styles.css?v=20261010moneyGlyphs">
 </head>
 <body class="bb-bg text-ink min-h-screen flex items-center justify-center px-5 py-12">
 
@@ -39,8 +39,8 @@
             <label class="bb-label">Password</label>
             <button type="button" id="forgotPasswordBtn" class="auth-toggle text-[10px] normal-case tracking-normal">Forgot password?</button>
           </div>
-          <input id="password" type="password" class="bb-input" placeholder="••••••••" autocomplete="current-password" />
-          <p id="passwordHint" class="hidden text-[10px] text-ink/55 mt-1.5 leading-snug">At least 8 characters, 1 uppercase letter, 2 numbers, and 1 special character (!@#$…).</p>
+          <input id="password" type="password" class="bb-input" placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢" autocomplete="current-password" />
+          <p id="passwordHint" class="hidden text-[10px] text-ink/55 mt-1.5 leading-snug">At least 8 characters, 1 uppercase letter, 2 numbers, and 1 special character (!@#$â€¦).</p>
         </div>
         <p id="authMsg" class="text-xs font-mono"></p>
         <button type="submit" id="submitBtn" class="bb-btn-primary w-full">Sign In</button>

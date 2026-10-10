@@ -568,18 +568,18 @@ function renderSplitOptions() {
     const payerId = Number($("#f_payer").value);
     const payer = activeMembers().find((member) => Number(member.id) === payerId);
     const perPerson = selected.length ? totalAmt / selected.length : 0;
-    notice.className = "text-[11px] font-mono mb-2 split-outcome is-neutral";
+    notice.className = "text-[11px] mb-2 split-outcome is-neutral";
     if (!totalAmt || !selected.length || state.payMode === "multi") {
       notice.textContent = "Choose who shares this cost. The outcome updates before you save.";
     } else if (selected.length === 1 && Number(selected[0].id) !== payerId) {
       const tone = payerId === Number(state.myMemberId) ? "is-lent" : Number(selected[0].id) === Number(state.myMemberId) ? "is-owed" : "is-neutral";
-      notice.className = `text-[11px] font-mono mb-2 split-outcome ${tone}`;
-      notice.textContent = `${selected[0].display_name} owes ${payer?.display_name || "the payer"} the full ${ShareSquad.formatMoneyText(totalAmt, curr)}.`;
+      notice.className = `text-[11px] mb-2 split-outcome ${tone}`;
+      notice.innerHTML = `${ShareSquad.escapeHtml(selected[0].display_name)} owes ${ShareSquad.escapeHtml(payer?.display_name || "the payer")} the full ${ShareSquad.formatMoney(totalAmt, curr)}.`;
     } else if (selected.length > 1) {
       const other = selected.find((member) => Number(member.id) !== payerId);
       const tone = payerId === Number(state.myMemberId) ? "is-lent" : Number(other?.id) === Number(state.myMemberId) ? "is-owed" : "is-neutral";
-      notice.className = `text-[11px] font-mono mb-2 split-outcome ${tone}`;
-      notice.textContent = `${other?.display_name || "Each selected member"} owes ${payer?.display_name || "the payer"} ${ShareSquad.formatMoneyText(perPerson, curr)} each.`;
+      notice.className = `text-[11px] mb-2 split-outcome ${tone}`;
+      notice.innerHTML = `${ShareSquad.escapeHtml(other?.display_name || "Each selected member")} owes ${ShareSquad.escapeHtml(payer?.display_name || "the payer")} ${ShareSquad.formatMoney(perPerson, curr)} each.`;
     } else notice.textContent = "The payer also covers this full cost.";
     const chipsWrap = document.createElement("div");
     chipsWrap.className = "flex flex-wrap gap-2";
@@ -660,13 +660,13 @@ function updateSplitNotice() {
     const sumAmt = activeValues.reduce((a, b) => a + Number(b), 0);
     const diff = (totalAmt - sumAmt).toFixed(2);
     const ok = Math.abs(sumAmt - totalAmt) < 0.01;
-    notice.textContent = ok
-      ? `Total: ${ShareSquad.formatMoneyText(sumAmt, curr)} (Matches bill total)`
-      : `Total: ${ShareSquad.formatMoneyText(sumAmt, curr)} (${ShareSquad.formatMoneyText(Math.abs(diff), curr)} ${Number(diff) >= 0 ? "remaining" : "over"})`;
+    notice.innerHTML = ok
+      ? `Total: ${ShareSquad.formatMoney(sumAmt, curr)} (Matches bill total)`
+      : `Total: ${ShareSquad.formatMoney(sumAmt, curr)} (${ShareSquad.formatMoney(Math.abs(diff), curr)} ${Number(diff) >= 0 ? "remaining" : "over"})`;
     notice.className = `split-total-bar ${ok ? "ok" : sumAmt > totalAmt ? "over" : "under"}`;
   } else if (state.splitType === "SHARES") {
     const totalShares = activeValues.reduce((a, b) => a + Number(b), 0);
-    notice.textContent = `Total shares: ${totalShares}. Each share ≈ ${ShareSquad.formatMoneyText(totalAmt / (totalShares || 1), curr)}`;
+    notice.innerHTML = `Total shares: ${totalShares}. Each share ≈ ${ShareSquad.formatMoney(totalAmt / (totalShares || 1), curr)}`;
     notice.className = "split-total-bar ok";
   } else {
     notice.textContent = "";
@@ -694,11 +694,12 @@ function renderBalanceStrip(balances) {
     const curr = b.converted_currency || b.currency || groupCurrency();
     const tone = net > 0.009 ? "owed" : net < -0.009 ? "owe" : "settled";
     const label = net > 0.009 ? "is owed" : net < -0.009 ? "owes" : "settled";
-    const amount = Math.abs(net) < 0.005 ? ShareSquad.formatMoneyText(0, curr) : ShareSquad.formatMoneyText(Math.abs(net), curr);
+    const amountText = Math.abs(net) < 0.005 ? ShareSquad.formatMoneyText(0, curr) : ShareSquad.formatMoneyText(Math.abs(net), curr);
+    const amountHtml = Math.abs(net) < 0.005 ? ShareSquad.formatMoney(0, curr) : ShareSquad.formatMoney(Math.abs(net), curr);
     const mine = Number(b.member_id) === Number(state.myMemberId) ? " is-me" : "";
-    return `<div class="balance-chip ${tone}${mine}" title="${ShareSquad.escapeHtml(b.name)} ${label} ${amount}">
+    return `<div class="balance-chip ${tone}${mine}" title="${ShareSquad.escapeHtml(b.name)} ${label} ${amountText}">
       <span class="balance-chip-name">${ShareSquad.escapeHtml(b.name)}</span>
-      <span class="balance-chip-amt">${tone === "settled" ? "✓" : (tone === "owed" ? "+" : "−")}${tone === "settled" ? "" : amount}</span>
+      <span class="balance-chip-amt">${tone === "settled" ? "✓" : (tone === "owed" ? "+" : "−")}${tone === "settled" ? "" : amountHtml}</span>
     </div>`;
   }).join("");
   strip.innerHTML = `<div class="balance-strip-label">Overall</div><div class="balance-strip-grid">${chips}</div>`;
