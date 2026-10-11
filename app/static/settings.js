@@ -135,7 +135,9 @@ async function loadGeneralSettings() {
   renderModelSelect(modelSel, settings.vlm_provider, settings.vlm_model);
 
   const statusEl = $("#generalKeyStatus");
-  statusEl.textContent = settings.has_api_key ? "✓ An API key is currently saved on server." : "No API key configured.";
+  statusEl.textContent = settings.has_api_key
+    ? "✓ An API key is currently saved on server."
+    : "No usable API key — paste your Gemini key again and Save (required after server secret changes).";
 
   toggleGeneralVlmFields();
 }

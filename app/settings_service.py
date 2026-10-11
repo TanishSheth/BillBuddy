@@ -1,4 +1,5 @@
 """Resolve and persist user / group VLM settings."""
+import logging
 import os
 
 from sqlalchemy.orm import Session
@@ -6,6 +7,8 @@ from sqlalchemy.orm import Session
 from . import models
 from .crypto_utils import decrypt_secret, encrypt_secret
 from .vlm_providers import DEFAULT_MODEL, DEFAULT_PROVIDER, is_valid_provider_model
+
+logger = logging.getLogger(__name__)
 
 
 def _defaults_account_settings(db: Session, account_id: int) -> models.AccountSettings:
@@ -47,12 +50,25 @@ def _as_settings_dict(payload) -> dict:
     raise TypeError(f"Unsupported settings payload type: {type(payload)!r}")
 
 
+def _usable_api_key(encrypted: str | None) -> str | None:
+    """Return plaintext key only when Fernet decrypt succeeds."""
+    if not encrypted:
+        return None
+    key = decrypt_secret(encrypted)
+    if key:
+        return key
+    # Blob present but SECRET_KEY changed (common after cloud re-deploy / new .env).
+    logger.warning("Stored VLM API key could not be decrypted — re-paste the key in Settings")
+    return None
+
+
 def account_settings_out(row: models.AccountSettings) -> dict:
+    usable = _usable_api_key(row.vlm_api_key_encrypted)
     return {
         "use_own_vlm": row.use_own_vlm,
         "vlm_provider": row.vlm_provider or DEFAULT_PROVIDER,
         "vlm_model": row.vlm_model or DEFAULT_MODEL,
-        "has_api_key": bool(row.vlm_api_key_encrypted),
+        "has_api_key": bool(usable),
         "email_monthly_reports": row.email_monthly_reports,
         "compact_list_view": row.compact_list_view,
         "preferred_currency": (row.preferred_currency or "USD").upper(),
@@ -60,11 +76,12 @@ def account_settings_out(row: models.AccountSettings) -> dict:
 
 
 def group_settings_out(row: models.GroupMemberSettings) -> dict:
+    usable = _usable_api_key(row.vlm_api_key_encrypted)
     return {
         "override_global_vlm": row.override_global_vlm,
         "vlm_provider": row.vlm_provider or DEFAULT_PROVIDER,
         "vlm_model": row.vlm_model or DEFAULT_MODEL,
-        "has_api_key": bool(row.vlm_api_key_encrypted),
+        "has_api_key": bool(usable),
         "equal_split_default": row.equal_split_default,
     }
 
@@ -104,6 +121,8 @@ def update_account_settings(db: Session, account_id: int, payload) -> models.Acc
         api_key = api_key.strip()
         if api_key:
             row.vlm_api_key_encrypted = encrypt_secret(api_key)
+            # Saving a key means the user intends to use it for scans.
+            row.use_own_vlm = True
         elif data.get("clear_api_key"):
             row.vlm_api_key_encrypted = None
 
@@ -159,7 +178,7 @@ def resolve_vlm_config(
         group_row = get_group_member_settings(db, account_id, group_id)
 
         if group_row.override_global_vlm:
-            api_key = decrypt_secret(group_row.vlm_api_key_encrypted)
+            api_key = _usable_api_key(group_row.vlm_api_key_encrypted)
             if api_key:
                 return ResolvedVlmConfig(
                     group_row.vlm_provider or DEFAULT_PROVIDER,
@@ -168,14 +187,21 @@ def resolve_vlm_config(
                     "group",
                 )
 
+    # Prefer a decryptable personal key whenever "use my own AI" is on.
+    # If the checkbox is off but a key still decrypts, keep respecting the toggle.
     if account_row.use_own_vlm:
-        api_key = decrypt_secret(account_row.vlm_api_key_encrypted)
+        api_key = _usable_api_key(account_row.vlm_api_key_encrypted)
         if api_key:
             return ResolvedVlmConfig(
                 account_row.vlm_provider or DEFAULT_PROVIDER,
                 account_row.vlm_model or DEFAULT_MODEL,
                 api_key,
                 "account",
+            )
+        if account_row.vlm_api_key_encrypted:
+            logger.warning(
+                "Account %s has use_own_vlm on but the saved Gemini/API key cannot be decrypted — re-save the key",
+                account_id,
             )
 
     server_key = (

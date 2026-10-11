@@ -619,6 +619,7 @@ _ANCHOR_RE = re.compile(
 )
 _DATE_HINT_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-](?:\d{4}|\d{2})\b")
 _MONEY_HINT_RE = re.compile(r"\d+\.\d{2}")
+_VOWELS = set("aeiouy")
 
 
 def _variant_score(text: str, mean_conf: float, token_count: int) -> float:
@@ -638,6 +639,57 @@ def _variant_score(text: str, mean_conf: float, token_count: int) -> float:
     )
 
 
+def _ocr_lacks_receipt_structure(text: str) -> bool:
+    """True when OCR found almost no receipt vocabulary (often upside-down scans)."""
+    blob = text or ""
+    if not blob.strip():
+        return True
+    return len(_ANCHOR_RE.findall(blob)) == 0 and len(_DATE_HINT_RE.findall(blob)) == 0
+
+
+def looks_garbled_merchant(name: str) -> bool:
+    """Detect upside-down / nonsense merchant strings that should not block Gemini."""
+    cleaned = (name or "").strip()
+    if not cleaned or cleaned.lower().startswith("unknown"):
+        return False
+    # Thermal upside-down OCR often invents digit-letter soup or broken camelCase.
+    if re.search(r"[A-Za-z]+\d+[A-Za-z]+", cleaned):
+        return True
+    if re.search(r"[A-Z]{3,}[a-z]{2,}[A-Z]", cleaned):
+        return True
+    tokens = re.findall(r"[A-Za-z]{4,}", cleaned)
+    if not tokens:
+        return True
+    bad = 0
+    for tok in tokens:
+        low = tok.lower()
+        vowels = sum(c in _VOWELS for c in low)
+        if vowels == 0 and len(low) >= 5:
+            bad += 2
+        elif len(low) >= 7 and vowels / len(low) < 0.18:
+            bad += 1
+    return bad >= 2 or (len(tokens) >= 3 and bad >= 1)
+
+
+def _score_variants(variants: list) -> tuple:
+    """Run PSM passes on prepared gray/binary variants; return best 7-tuple."""
+    best = ("", -1.0, [], [], [], [], -1.0)
+    for name, variant in variants:
+        for psm in _TESSERACT_PSMS:
+            text, conf, lines, ntok, lefts, heights, line_boxes = _tesseract_pass(variant, psm)
+            score = _variant_score(text, conf, ntok)
+            logger.info("OCR variant %s (%s) mean confidence %.1f score %.1f", name, psm, conf, score)
+            if score > best[6]:
+                best = (text, conf, lines, lefts, heights, line_boxes, score)
+        if "bin" in name or name == "binary":
+            text, conf, lines, ntok, lefts, heights, line_boxes = _tesseract_local_line_pass(variant)
+            score = _variant_score(text, conf, ntok)
+            logger.info("OCR variant %s (local PSM 7) mean confidence %.1f score %.1f", name, conf, score)
+            if score > best[6]:
+                best = (text, conf, lines, lefts, heights, line_boxes, score)
+    return best
+
+
 def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list[int], list[dict]]:
     """Return OCR text, confidence, line text, and token-level receipt geometry."""
     empty = ("", 0.0, [], [], [], [])
@@ -648,23 +700,23 @@ def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list
 
     if CV2_AVAILABLE:
         try:
-            best = ("", -1.0, [], [], [], [], -1.0)
-            for name, variant in _prepare_variants(image_bytes):
-                for psm in _TESSERACT_PSMS:
-                    text, conf, lines, ntok, lefts, heights, line_boxes = _tesseract_pass(variant, psm)
-                    score = _variant_score(text, conf, ntok)
-                    logger.info("OCR variant %s (%s) mean confidence %.1f score %.1f", name, psm, conf, score)
-                    if score > best[6]:
-                        best = (text, conf, lines, lefts, heights, line_boxes, score)
-                # The binary image is best suited to contour extraction. This
-                # adds a PSM-7 local-line candidate rather than replacing the
-                # full-page PSM-11 read used for ordinary, flat receipts.
-                if "bin" in name or name == "binary":
-                    text, conf, lines, ntok, lefts, heights, line_boxes = _tesseract_local_line_pass(variant)
-                    score = _variant_score(text, conf, ntok)
-                    logger.info("OCR variant %s (local PSM 7) mean confidence %.1f score %.1f", name, conf, score)
-                    if score > best[6]:
-                        best = (text, conf, lines, lefts, heights, line_boxes, score)
+            variants = _prepare_variants(image_bytes)
+            best = _score_variants(variants)
+            # OSD often misses 180° on thermal paper; if we have no TOTAL/TAX/date
+            # anchors, force a flip and keep whichever read looks more like a receipt.
+            if best[6] >= 0 and _ocr_lacks_receipt_structure(best[0]):
+                flipped = [
+                    (f"{name}_180", cv2.rotate(img, cv2.ROTATE_180))
+                    for name, img in variants
+                ]
+                flipped_best = _score_variants(flipped)
+                if flipped_best[6] > best[6]:
+                    logger.info(
+                        "OCR kept 180° flip (score %.1f > %.1f) — original lacked receipt anchors",
+                        flipped_best[6],
+                        best[6],
+                    )
+                    best = flipped_best
             if best[6] >= 0:
                 return best[0], max(best[1], 0.0), best[2], best[3], best[4], best[5]
         except Exception as exc:
@@ -692,6 +744,8 @@ def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list
 def _looks_implausible(extraction: ReceiptExtraction) -> bool:
     store = (extraction.store_name or "").strip().lower()
     if not store or store.startswith("unknown"):
+        return True
+    if looks_garbled_merchant(extraction.store_name or ""):
         return True
     try:
         total = float(extraction.total_amount or 0)
@@ -1841,6 +1895,8 @@ def _plausible_header_line(line: str) -> bool:
         return False
     if re.search(r"\d{3,}", cleaned):
         return False
+    if looks_garbled_merchant(cleaned):
+        return False
     if _ADDRESSY_RE.search(cleaned):
         return False
     if _norm_label_text(cleaned) in _GENERIC_HEADER_PHRASES:
@@ -1981,12 +2037,17 @@ def extract_receipt_data_ocr(
                 cached_category = (vendor.get("category") or "").strip() or None
                 break
 
+    resolved_store = store_name or "Unknown store"
+    if looks_garbled_merchant(resolved_store):
+        # Do not surface upside-down gibberish as a "real" merchant name.
+        resolved_store = "Unknown store"
+        store_confident = False
     extraction = ReceiptExtraction(
-        store_name=store_name or "Unknown store",
+        store_name=resolved_store,
         bill_date=bill_date or datetime.now().strftime("%Y-%m-%d"),
         total_amount=total_amount or 0.0,
         currency=currency,
-        category=cached_category or _guess_category(text, store_name),
+        category=cached_category or _guess_category(text, resolved_store),
         currency_confidence=currency_confidence,
     )
     fingerprint["guessed_name"] = extraction.store_name
@@ -1997,5 +2058,6 @@ def extract_receipt_data_ocr(
         and bool(text.strip())
         and mean_conf >= _MIN_TESSERACT_CONF
         and not _looks_implausible(extraction)
+        and not _ocr_lacks_receipt_structure(text)
     )
     return extraction, all_confident, fingerprint

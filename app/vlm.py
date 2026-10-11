@@ -17,9 +17,11 @@ logger = logging.getLogger(__name__)
 
 
 def _missing_scan_fields(extraction: ReceiptExtraction) -> list[str]:
+    from .ocr_extractor import looks_garbled_merchant
+
     missing: list[str] = []
     store = (extraction.store_name or "").strip().lower()
-    if not store or store.startswith("unknown"):
+    if not store or store.startswith("unknown") or looks_garbled_merchant(extraction.store_name or ""):
         missing.append("merchant")
     if not (extraction.bill_date or "").strip():
         missing.append("date")
@@ -114,9 +116,22 @@ def extract_receipt_data(
         return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
     if not config.api_key:
+        logger.warning(
+            "OCR needs AI fallback (missing=%s, confident=%s) but no API key resolved (source=%s)",
+            missing,
+            ocr_confident,
+            getattr(config, "source", "?"),
+        )
         return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
     try:
+        logger.info(
+            "Escalating receipt scan to VLM (%s/%s, source=%s, missing=%s)",
+            config.provider,
+            config.model,
+            getattr(config, "source", "?"),
+            missing,
+        )
         if config.provider == "google":
             data = _extract_google(image_bytes, mime_type, config.api_key, config.model)
         elif config.provider == "openai":
@@ -143,7 +158,9 @@ def extract_receipt_data(
         return result, "vlm", _message_for_extraction(result), fingerprint
     except Exception as exc:
         logger.exception("VLM extraction failed (%s/%s): %s", config.provider, config.model, exc)
-        return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
+        msg = _message_for_extraction(ocr_result)
+        fail = f"AI scan failed ({config.provider}). Using local OCR — check the fields."
+        return ocr_result, "ocr", f"{fail} {msg}".strip() if msg else fail, fingerprint
 
 
 def _parse_json_response(text: str) -> dict:
