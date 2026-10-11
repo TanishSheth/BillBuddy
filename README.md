@@ -9,6 +9,8 @@ Source: **https://github.com/TanishSheth/BillBuddy** (repo name is still BillBud
 
 How to run it, deploy it, and update it without losing data: **[OPERATIONS.md](OPERATIONS.md)**.
 
+How to download or browse the **live Oracle Postgres** data from your PC: **[CLOUD_DATA.md](CLOUD_DATA.md)** (local personal guide — gitignored; keep a copy on your machine).
+
 ## What you can do
 
 | Area | What it does |

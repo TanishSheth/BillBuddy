@@ -62,7 +62,13 @@ from .settings_service import (
 )
 from .split_logic import calculate_splits, compute_balances, graph_constrained_settlements, simplify_debts
 from .fx_service import get_exchange_rates, get_conversion_rate, convert_amount, SUPPORTED_CURRENCIES
-from .pdf_gen import generate_monthly_pdf, generate_personal_pdf, generate_monthly_digest_pdf, pdf_reports_available
+from .pdf_gen import (
+    ensure_fontconfig,
+    generate_monthly_pdf,
+    generate_personal_pdf,
+    generate_monthly_digest_pdf,
+    pdf_reports_available,
+)
 from .emailer import (
     is_email_configured,
     send_invite_email,
@@ -88,6 +94,8 @@ logger = logging.getLogger(__name__)
 logging.getLogger("fontTools").setLevel(logging.WARNING)
 logging.getLogger("fontTools.subset").setLevel(logging.WARNING)
 logging.getLogger("weasyprint").setLevel(logging.WARNING)
+# Must run before any WeasyPrint import so Fontconfig finds fonts.conf.
+ensure_fontconfig()
 BUSINESS_TIMEZONE = ZoneInfo(os.environ.get("APP_TIMEZONE", "America/New_York"))
 
 # Block disposable/placeholder domains in production only — QA and local demos

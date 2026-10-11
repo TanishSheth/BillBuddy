@@ -15,10 +15,20 @@ HOST = "0.0.0.0"
 PORT = 8001
 
 
+def _ensure_fontconfig_env(env: dict) -> None:
+    """Avoid WeasyPrint Fontconfig spam when Tesseract's DLL is on PATH."""
+    conf = APP_DIR / "fontconfig" / "fonts.conf"
+    if not conf.is_file():
+        return
+    env.setdefault("FONTCONFIG_FILE", str(conf))
+    env.setdefault("FONTCONFIG_PATH", str(conf.parent))
+
+
 def start_server() -> subprocess.Popen:
     env = os.environ.copy()
     env["BILLBUDDY_ENV"] = "development"
     env["SHARESQUAD_ENV"] = "development"
+    _ensure_fontconfig_env(env)
     return subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app", f"--host={HOST}", f"--port={PORT}"],
         cwd=ROOT,

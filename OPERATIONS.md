@@ -239,6 +239,8 @@ gzip -f ~/sharesquad-backup.sql
 
 Restoring is a separate, careful step; do not restore over production unless you intend to replace the live DB.
 
+For the full Windows walkthrough (SSH tunnel into Cursor, `scp` download, table browser, shut-down checklist), see the personal guide **`CLOUD_DATA.md`** in this folder (gitignored — not in GitHub).
+
 ---
 
 ## 9. Logs and “the website looks old”

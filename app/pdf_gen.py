@@ -2,19 +2,51 @@ import base64
 import mimetypes
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from jinja2 import Environment, FileSystemLoader
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+_FONTCONFIG_DIR = Path(__file__).resolve().parent / "fontconfig"
+_FONTCONFIG_FILE = _FONTCONFIG_DIR / "fonts.conf"
 _env = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
 
 _PDF_AVAILABLE: bool | None = None
+_FONTCONFIG_READY = False
+
+
+def ensure_fontconfig() -> None:
+    """Point Fontconfig at a local fonts.conf before WeasyPrint loads.
+
+    On Windows, Tesseract often puts libfontconfig-1.dll on PATH without a
+    matching etc/fonts config, which prints:
+      Fontconfig error: Cannot load default config file: No such file: (null)
+    """
+    global _FONTCONFIG_READY
+    if _FONTCONFIG_READY:
+        return
+    if not _FONTCONFIG_FILE.is_file():
+        _FONTCONFIG_READY = True
+        return
+    # Only set when unset so operators can override via environment.
+    os.environ.setdefault("FONTCONFIG_FILE", str(_FONTCONFIG_FILE))
+    os.environ.setdefault("FONTCONFIG_PATH", str(_FONTCONFIG_DIR))
+    cache_dir = Path.home() / "AppData" / "Local" / "fontconfig"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    _FONTCONFIG_READY = True
+
+
+ensure_fontconfig()
 
 
 def pdf_reports_available() -> bool:
     global _PDF_AVAILABLE
     if _PDF_AVAILABLE is None:
+        ensure_fontconfig()
         try:
             from weasyprint import HTML  # noqa: F401
             _PDF_AVAILABLE = True

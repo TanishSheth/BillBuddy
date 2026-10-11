@@ -12,5 +12,6 @@ api/*
 .DS_Store
 *.log
 
-# Personal notes — never push (DB access / secrets workflow)
+# Personal notes — never push (DB access / secrets / host details)
 LOCAL_DB_ACCESS.md
+CLOUD_DATA.md
