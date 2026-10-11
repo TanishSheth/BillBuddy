@@ -1,10 +1,12 @@
 FROM python:3.12-slim-bookworm
 
-# WeasyPrint libs + newer Tesseract from notesalexp (Bookworm apt is stuck on 5.3.x).
+# WeasyPrint libs + Tesseract 5.5 from notesalexp (Debian Bookworm apt is 5.3.x).
+# Correct channel is tesseract-ocr5/bookworm — not tesseract-ocr/bookworm.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
+    apt-transport-https \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
     libgdk-pixbuf2.0-0 \
@@ -16,10 +18,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://notesalexp.org/debian/alexp_key.asc \
        | gpg --dearmor -o /etc/apt/keyrings/notesalexp.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/notesalexp.gpg] https://notesalexp.org/tesseract-ocr/bookworm/ bookworm main" \
+    && echo "deb [signed-by=/etc/apt/keyrings/notesalexp.gpg] https://notesalexp.org/tesseract-ocr5/bookworm/ bookworm main" \
        > /etc/apt/sources.list.d/notesalexp.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends tesseract-ocr \
+    && tesseract --version | head -n 1 | grep -E "tesseract 5\.[5-9]|tesseract [6-9]" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
