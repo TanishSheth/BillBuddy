@@ -617,6 +617,13 @@ _ANCHOR_RE = re.compile(
     r"\b(?:total|subtotal|sub-tot|tax|gst|hst|pst|vat|change|cash|qty|item|amount due|balance)\b",
     re.I,
 )
+# Merchant / chain tokens that almost never appear in upside-down gibberish.
+_MERCHANT_HINT_RE = re.compile(
+    r"\b(?:walmart|wal[\s-]?mart|costco|target|cvs|walgreens|aldi|kroger|"
+    r"safeway|publix|trader\s*joe|whole\s*foods|great\s*value|supercenter|"
+    r"thank\s*you\s*for\s*shopping)\b",
+    re.I,
+)
 _DATE_HINT_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-](?:\d{4}|\d{2})\b")
 _MONEY_HINT_RE = re.compile(r"\d+\.\d{2}")
 _VOWELS = set("aeiouy")
@@ -627,10 +634,12 @@ def _variant_score(text: str, mean_conf: float, token_count: int) -> float:
     if not (text or "").strip():
         return -1.0
     anchors = len(_ANCHOR_RE.findall(text))
+    merchants = len(_MERCHANT_HINT_RE.findall(text))
     dates = len(_DATE_HINT_RE.findall(text))
     money = len(_MONEY_HINT_RE.findall(text))
     return (
         anchors * 14.0
+        + merchants * 18.0
         + dates * 10.0
         + min(money, 15) * 5.0
         + min(len(text), 2500) / 180.0
@@ -644,7 +653,11 @@ def _ocr_lacks_receipt_structure(text: str) -> bool:
     blob = text or ""
     if not blob.strip():
         return True
-    return len(_ANCHOR_RE.findall(blob)) == 0 and len(_DATE_HINT_RE.findall(blob)) == 0
+    return (
+        len(_ANCHOR_RE.findall(blob)) == 0
+        and len(_DATE_HINT_RE.findall(blob)) == 0
+        and len(_MERCHANT_HINT_RE.findall(blob)) == 0
+    )
 
 
 def looks_garbled_merchant(name: str) -> bool:
@@ -702,17 +715,25 @@ def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list
         try:
             variants = _prepare_variants(image_bytes)
             best = _score_variants(variants)
-            # OSD often misses 180° on thermal paper; if we have no TOTAL/TAX/date
-            # anchors, force a flip and keep whichever read looks more like a receipt.
-            if best[6] >= 0 and _ocr_lacks_receipt_structure(best[0]):
+            # Always score a 180° competitor. OSD and per-platform Tesseract disagree
+            # on upside-down thermal paper (Windows x64 vs Linux ARM); picking the
+            # higher receipt-structure score keeps local and cloud closer without AI.
+            if best[6] >= 0:
                 flipped = [
                     (f"{name}_180", cv2.rotate(img, cv2.ROTATE_180))
                     for name, img in variants
                 ]
                 flipped_best = _score_variants(flipped)
-                if flipped_best[6] > best[6]:
+                if flipped_best[6] > best[6] + 0.5:
                     logger.info(
-                        "OCR kept 180° flip (score %.1f > %.1f) — original lacked receipt anchors",
+                        "OCR kept 180° flip (score %.1f > %.1f)",
+                        flipped_best[6],
+                        best[6],
+                    )
+                    best = flipped_best
+                elif _ocr_lacks_receipt_structure(best[0]) and flipped_best[6] >= best[6]:
+                    logger.info(
+                        "OCR kept 180° flip (score %.1f >= %.1f) — upright lacked receipt anchors",
                         flipped_best[6],
                         best[6],
                     )
