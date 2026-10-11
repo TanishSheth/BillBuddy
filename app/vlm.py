@@ -100,9 +100,10 @@ def extract_receipt_data(
 ) -> tuple[ReceiptExtraction, str, str | None, dict]:
     """
     Two-tier extraction:
-      1. Always try local OCR + regex first — free, offline, instant.
-      2. Escalate to a paid VLM if OCR is low-confidence, missing fields,
-         or implausible (unknown store / zero total) AND an API key is set.
+      1. Always run local OCR + regex (fingerprints + offline fallback).
+      2. When an API key is configured, prefer the vision model so Windows
+         and Linux/ARM Tesseract quirks do not produce different saved fields.
+      3. Without a key, keep OCR-only (escalate path unused).
     """
     from .ocr_extractor import extract_receipt_data_ocr
 
@@ -110,26 +111,25 @@ def extract_receipt_data(
         image_bytes, learned_vendors=learned_vendors,
     )
 
-    # Escalate when OCR missed merchant/total even if confidence flags looked ok.
     missing = _missing_scan_fields(ocr_result)
-    if ocr_confident and not missing:
-        return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
     if not config.api_key:
-        logger.warning(
-            "OCR needs AI fallback (missing=%s, confident=%s) but no API key resolved (source=%s)",
-            missing,
-            ocr_confident,
-            getattr(config, "source", "?"),
-        )
+        if not ocr_confident or missing:
+            logger.warning(
+                "OCR weak (missing=%s, confident=%s) and no API key resolved (source=%s)",
+                missing,
+                ocr_confident,
+                getattr(config, "source", "?"),
+            )
         return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
     try:
         logger.info(
-            "Escalating receipt scan to VLM (%s/%s, source=%s, missing=%s)",
+            "Using VLM for receipt scan (%s/%s, source=%s, ocr_confident=%s, missing=%s)",
             config.provider,
             config.model,
             getattr(config, "source", "?"),
+            ocr_confident,
             missing,
         )
         if config.provider == "google":

@@ -1485,9 +1485,13 @@ async function handleReceiptUpload(file) {
         "#f_category": Boolean(ex.category),
       });
       const found = ["Merchant", "Date", "Total", "Category"].filter((label, i) => [ex.store_name, ex.bill_date, ex.total_amount, ex.category][i]);
-      $("#sourceTag").textContent = found.length ? `Scanned · ${found.join(" · ")} found — check before saving` : "Scanned";
+      const engine = String(data.source || "").toLowerCase() === "vlm" ? "AI" : "OCR";
+      $("#sourceTag").textContent = found.length
+        ? `${engine} · ${found.join(" · ")} found — check before saving`
+        : engine;
     } else {
-      $("#sourceTag").textContent = "Scanned";
+      const engine = String(data.source || "").toLowerCase() === "vlm" ? "AI" : "OCR";
+      $("#sourceTag").textContent = engine;
     }
 
     applyDefaultSplit();
