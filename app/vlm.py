@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import re
+import time
 from datetime import date
 
 import httpx
@@ -12,8 +13,24 @@ from pydantic import BaseModel, Field
 
 from .schemas import ReceiptExtraction
 from .settings_service import ResolvedVlmConfig
+from .vlm_providers import google_model_failover_chain
 
 logger = logging.getLogger(__name__)
+
+# Transient Google / HTTP failures: retry then try sibling models.
+_TRANSIENT_STATUS = {408, 429, 500, 502, 503, 504}
+_TRANSIENT_MARKERS = (
+    "unavailable",
+    "high demand",
+    "resource_exhausted",
+    "resource exhausted",
+    "overloaded",
+    "try again",
+    "temporarily",
+    "deadline exceeded",
+)
+_GOOGLE_RETRIES_PER_MODEL = 2
+_GOOGLE_RETRY_SLEEP_SEC = (0.6, 1.4)
 
 
 def _missing_scan_fields(extraction: ReceiptExtraction) -> list[str]:
@@ -73,7 +90,7 @@ class _VlmReceiptSchema(BaseModel):
     bill_date: str
     total_amount: float
     currency: str = Field(default="USD")
-    category: str = Field(default="General")
+    category: str = Field(default="GENERAL")
 
 
 def _to_extraction(data: dict) -> ReceiptExtraction:
@@ -87,7 +104,7 @@ def _to_extraction(data: dict) -> ReceiptExtraction:
         bill_date=bill,
         total_amount=float(amount or 0.0),
         currency=str(data.get("currency") or "USD").strip().upper()[:10] or "USD",
-        category=str(data.get("category") or "General").strip() or "General",
+        category=str(data.get("category") or "GENERAL").strip() or "GENERAL",
         currency_confidence=0,
     )
 
@@ -99,11 +116,11 @@ def extract_receipt_data(
     learned_vendors: list | None = None,
 ) -> tuple[ReceiptExtraction, str, str | None, dict]:
     """
-    Two-tier extraction:
-      1. Always run local OCR + regex (fingerprints + offline fallback).
-      2. When an API key is configured, prefer the vision model so Windows
-         and Linux/ARM Tesseract quirks do not produce different saved fields.
-      3. Without a key, keep OCR-only (escalate path unused).
+    Cascaded extraction:
+      1. Local OCR (PSM 11 + EXIF, with PSM 6 only if that read is weak).
+      2. If OCR is confident and fields look complete → keep OCR (skip VLM).
+      3. If OCR is weak/missing fields and an API key is configured → VLM.
+      4. Without a key, keep OCR-only.
     """
     from .ocr_extractor import extract_receipt_data_ocr
 
@@ -112,20 +129,27 @@ def extract_receipt_data(
     )
 
     missing = _missing_scan_fields(ocr_result)
+    ocr_ok = ocr_confident and not missing
+
+    if ocr_ok:
+        logger.info(
+            "Keeping local OCR result (confident, no missing fields; source=%s)",
+            getattr(config, "source", "?"),
+        )
+        return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
     if not config.api_key:
-        if not ocr_confident or missing:
-            logger.warning(
-                "OCR weak (missing=%s, confident=%s) and no API key resolved (source=%s)",
-                missing,
-                ocr_confident,
-                getattr(config, "source", "?"),
-            )
+        logger.warning(
+            "OCR weak (missing=%s, confident=%s) and no API key resolved (source=%s)",
+            missing,
+            ocr_confident,
+            getattr(config, "source", "?"),
+        )
         return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
     try:
         logger.info(
-            "Using VLM for receipt scan (%s/%s, source=%s, ocr_confident=%s, missing=%s)",
+            "OCR weak — VLM fallback (%s/%s, source=%s, ocr_confident=%s, missing=%s)",
             config.provider,
             config.model,
             getattr(config, "source", "?"),
@@ -170,7 +194,25 @@ def _parse_json_response(text: str) -> dict:
     return json.loads(text)
 
 
-def _extract_google(image_bytes: bytes, mime_type: str, api_key: str, model: str) -> dict:
+def _error_status_code(exc: BaseException) -> int | None:
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _is_transient_vlm_error(exc: BaseException) -> bool:
+    """True for capacity / rate-limit / brief outages worth retrying or failing over."""
+    code = _error_status_code(exc)
+    if code in _TRANSIENT_STATUS:
+        return True
+    blob = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in blob for marker in _TRANSIENT_MARKERS)
+
+
+def _extract_google_once(image_bytes: bytes, mime_type: str, api_key: str, model: str) -> dict:
     from google.genai import types
     from google import genai
 
@@ -187,6 +229,49 @@ def _extract_google(image_bytes: bytes, mime_type: str, api_key: str, model: str
         },
     )
     return json.loads(response.text)
+
+
+def _extract_google(image_bytes: bytes, mime_type: str, api_key: str, model: str) -> dict:
+    """Call Gemini with short retries, then sibling Google models on 503/429."""
+    chain = google_model_failover_chain(model)
+    last_exc: BaseException | None = None
+
+    for mid in chain:
+        for attempt in range(_GOOGLE_RETRIES_PER_MODEL):
+            try:
+                if mid != model or attempt > 0:
+                    logger.info(
+                        "Google VLM attempt model=%s try=%s/%s",
+                        mid,
+                        attempt + 1,
+                        _GOOGLE_RETRIES_PER_MODEL,
+                    )
+                return _extract_google_once(image_bytes, mime_type, api_key, mid)
+            except Exception as exc:
+                last_exc = exc
+                transient = _is_transient_vlm_error(exc)
+                if transient and attempt + 1 < _GOOGLE_RETRIES_PER_MODEL:
+                    delay = _GOOGLE_RETRY_SLEEP_SEC[min(attempt, len(_GOOGLE_RETRY_SLEEP_SEC) - 1)]
+                    logger.warning(
+                        "Google VLM transient error on %s (try %s): %s — retry in %.1fs",
+                        mid,
+                        attempt + 1,
+                        exc,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                if transient and mid != chain[-1]:
+                    logger.warning(
+                        "Google VLM capacity on %s — failing over to next catalog model (%s)",
+                        mid,
+                        exc,
+                    )
+                    break
+                raise
+
+    assert last_exc is not None
+    raise last_exc
 
 
 def _extract_openai_compatible(

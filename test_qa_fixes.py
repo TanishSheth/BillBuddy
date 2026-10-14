@@ -14,6 +14,7 @@ from app.emailer import send_password_reset_email
 from app.main import (
     BLOCKED_INVITE_DOMAINS,
     _CATEGORY_ALIASES,
+    _normalize_category,
     app,
     get_group_dashboard,
 )
@@ -28,6 +29,15 @@ def test_development_allows_example_com_invites():
 def test_category_aliases_include_food_slug():
     assert "Food" in _CATEGORY_ALIASES["Food & Dining"]
     assert "Food & Dining" in _CATEGORY_ALIASES["Food"]
+
+
+def test_normalize_category_uppercases_all_tags():
+    assert _normalize_category("Rent") == "RENT"
+    assert _normalize_category("rent") == "RENT"
+    assert _normalize_category("Food & Dining") == "FOOD & DINING"
+    assert _normalize_category("housing") == "HOUSING"
+    assert _normalize_category("General / Other") == "GENERAL"
+    assert _normalize_category("") == "GENERAL"
 
 
 def test_password_reset_smtp_failure_does_not_raise(monkeypatch):

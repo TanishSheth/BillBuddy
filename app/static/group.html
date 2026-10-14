@@ -107,8 +107,8 @@
               <p class="font-mono text-sm font-bold">Add a receipt photo</p>
               <p class="text-xs text-ink/40 mt-1">Scan a receipt or pick a file. ShareSquad reads merchant, date, and total, then you confirm before saving.</p>
             </div>
-            <input id="fileInputGallery" type="file" class="file-input-sr">
-            <input id="fileInputCamera" type="file" accept="image/*" capture="environment" class="file-input-sr">
+            <input id="fileInputGallery" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.heic,.heif,.tif,.tiff" class="file-input-sr">
+            <input id="fileInputCamera" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.heic,.heif" capture="environment" class="file-input-sr">
             <div id="receiptSourceRow" class="receipt-source-row">
               <label for="fileInputGallery" id="pickGalleryBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
                 <i data-lucide="folder-open" class="w-4 h-4"></i> Choose file
@@ -169,7 +169,7 @@
                     <select id="f_category" class="bb-input" data-category-select></select>
                     <div id="customCategoryWrap" class="hidden mt-2">
                       <label class="bb-label" for="f_category_custom">Custom category</label>
-                      <input id="f_category_custom" class="bb-input" maxlength="50" placeholder="e.g. Pets, Gifts">
+                      <input id="f_category_custom" class="bb-input" maxlength="50" placeholder="e.g. PETS, GIFTS" style="text-transform:uppercase">
                     </div>
                   </div>
                   <div class="sm:col-span-2">
@@ -201,7 +201,16 @@
                 </div>
               </div>
 
-              <button type="button" id="saveExpenseBtn" class="bb-btn-primary w-full mt-5">
+              <label class="settings-toggle mt-5 mb-3">
+                <span>
+                  <span class="settings-toggle-label">Repeat this bill every month</span>
+                  <span class="settings-toggle-hint">Same store, amount, payer, and split will be added automatically each month until you turn this off.</span>
+                </span>
+                <input type="checkbox" id="f_recurring_monthly" />
+                <span class="settings-switch" aria-hidden="true"></span>
+              </label>
+
+              <button type="button" id="saveExpenseBtn" class="bb-btn-primary w-full">
                 <i data-lucide="check" class="w-4 h-4"></i> Save Expense
               </button>
               <button id="cancelEditBtn" type="button" class="bb-btn-secondary w-full mt-2 hidden">Cancel edit</button>
@@ -223,17 +232,17 @@
               </select>
               <input id="expenseSearch" class="bb-input !py-1 !px-2 text-xs font-mono min-w-0 flex-1 sm:w-40" placeholder="Search expenses">
               <select id="groupCategoryFilter" class="bb-input !py-1 !px-2 text-xs font-mono !w-auto" data-category-filter>
-                <option value="All">All Categories</option>
-                <option value="Food & Dining">Food & Dining</option>
-                <option value="Groceries">Groceries</option>
-                <option value="Travel">Travel</option>
-                <option value="Transit">Transit</option>
-                <option value="Housing">Housing</option>
-                <option value="Utilities">Utilities</option>
-                <option value="Entertainment">Entertainment</option>
-                <option value="Shopping">Shopping</option>
-                <option value="Healthcare">Healthcare</option>
-                <option value="General">General / Other</option>
+                <option value="All">ALL CATEGORIES</option>
+                <option value="FOOD & DINING">FOOD & DINING</option>
+                <option value="GROCERIES">GROCERIES</option>
+                <option value="TRAVEL">TRAVEL</option>
+                <option value="TRANSIT">TRANSIT</option>
+                <option value="HOUSING">HOUSING</option>
+                <option value="UTILITIES">UTILITIES</option>
+                <option value="ENTERTAINMENT">ENTERTAINMENT</option>
+                <option value="SHOPPING">SHOPPING</option>
+                <option value="HEALTHCARE">HEALTHCARE</option>
+                <option value="GENERAL">GENERAL / OTHER</option>
               </select>
               <select id="expenseMemberFilter" class="bb-input !py-1 !px-2 text-xs font-mono !w-auto"><option value="" class="member-filter-option ledger-filter-option">All members</option></select>
               <label class="text-[10px] font-mono text-muted whitespace-nowrap"><input id="onlyMyExpenses" type="checkbox"> Involving me</label>
@@ -481,8 +490,8 @@
     Add expense
   </button>
 
-  <script src="/api.js?v=20261008combinedBalances"></script>
-  <script src="/group.js?v=20261011preferVlm"></script>
+  <script src="/api.js?v=20261014sessionRecurring"></script>
+  <script src="/group.js?v=20261014sessionRecurring"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

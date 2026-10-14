@@ -111,17 +111,17 @@
       <div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3">
         <h3 class="font-mono uppercase text-xs tracking-widest text-muted font-bold">Itemized Transactions</h3>
         <select id="categoryFilter" class="bb-input !py-1 !px-2 text-xs font-mono !w-auto">
-          <option value="All">All Categories</option>
-          <option value="Food & Dining">Food & Dining</option>
-          <option value="Groceries">Groceries</option>
-          <option value="Travel">Travel</option>
-          <option value="Transit">Transit</option>
-          <option value="Housing">Housing</option>
-          <option value="Utilities">Utilities</option>
-          <option value="Entertainment">Entertainment</option>
-          <option value="Shopping">Shopping</option>
-          <option value="Healthcare">Healthcare</option>
-          <option value="General">General / Other</option>
+          <option value="All">ALL CATEGORIES</option>
+          <option value="FOOD & DINING">FOOD & DINING</option>
+          <option value="GROCERIES">GROCERIES</option>
+          <option value="TRAVEL">TRAVEL</option>
+          <option value="TRANSIT">TRANSIT</option>
+          <option value="HOUSING">HOUSING</option>
+          <option value="UTILITIES">UTILITIES</option>
+          <option value="ENTERTAINMENT">ENTERTAINMENT</option>
+          <option value="SHOPPING">SHOPPING</option>
+          <option value="HEALTHCARE">HEALTHCARE</option>
+          <option value="GENERAL">GENERAL / OTHER</option>
         </select>
       </div>
 
@@ -161,8 +161,8 @@
         <p class="text-xs font-mono text-ink/70 font-bold">Add a receipt photo</p>
         <p class="text-[10px] text-ink/40 font-mono mt-1">Choose a file or take a photo. Confirm the amount before saving.</p>
       </div>
-      <input type="file" id="receiptGalleryInput" class="file-input-sr" />
-      <input type="file" id="receiptCameraInput" accept="image/*" capture="environment" class="file-input-sr" />
+      <input type="file" id="receiptGalleryInput" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.heic,.heif,.tif,.tiff" class="file-input-sr" />
+      <input type="file" id="receiptCameraInput" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.heic,.heif" capture="environment" class="file-input-sr" />
       <div id="receiptSourceRow" class="receipt-source-row mb-4">
         <label for="receiptGalleryInput" id="pickGalleryBtn" class="bb-btn-secondary !py-2 text-[11px] receipt-source-btn">
           <i data-lucide="folder-open" class="w-4 h-4"></i> Choose file
@@ -210,7 +210,7 @@
             <select id="expenseCategory" class="bb-input" data-category-select></select>
             <div id="customCategoryWrap" class="custom-category-wrap hidden mt-2">
               <label class="bb-label" for="expenseCategoryCustom">Custom category</label>
-              <input id="expenseCategoryCustom" data-category-custom class="bb-input" maxlength="50" placeholder="e.g. Pets, Gifts">
+              <input id="expenseCategoryCustom" data-category-custom class="bb-input" maxlength="50" placeholder="e.g. PETS, GIFTS" style="text-transform:uppercase">
             </div>
           </div>
           <div>

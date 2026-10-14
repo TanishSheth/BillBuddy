@@ -6,7 +6,12 @@ from sqlalchemy.orm import Session
 
 from . import models
 from .crypto_utils import decrypt_secret, encrypt_secret
-from .vlm_providers import DEFAULT_MODEL, DEFAULT_PROVIDER, is_valid_provider_model
+from .vlm_providers import (
+    DEFAULT_MODEL,
+    DEFAULT_PROVIDER,
+    is_valid_provider_model,
+    normalize_model_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +69,11 @@ def _usable_api_key(encrypted: str | None) -> str | None:
 
 def account_settings_out(row: models.AccountSettings) -> dict:
     usable = _usable_api_key(row.vlm_api_key_encrypted)
+    provider = row.vlm_provider or DEFAULT_PROVIDER
     return {
         "use_own_vlm": row.use_own_vlm,
-        "vlm_provider": row.vlm_provider or DEFAULT_PROVIDER,
-        "vlm_model": row.vlm_model or DEFAULT_MODEL,
+        "vlm_provider": provider,
+        "vlm_model": normalize_model_id(provider, row.vlm_model),
         "has_api_key": bool(usable),
         "email_monthly_reports": row.email_monthly_reports,
         "compact_list_view": row.compact_list_view,
@@ -77,10 +83,11 @@ def account_settings_out(row: models.AccountSettings) -> dict:
 
 def group_settings_out(row: models.GroupMemberSettings) -> dict:
     usable = _usable_api_key(row.vlm_api_key_encrypted)
+    provider = row.vlm_provider or DEFAULT_PROVIDER
     return {
         "override_global_vlm": row.override_global_vlm,
-        "vlm_provider": row.vlm_provider or DEFAULT_PROVIDER,
-        "vlm_model": row.vlm_model or DEFAULT_MODEL,
+        "vlm_provider": provider,
+        "vlm_model": normalize_model_id(provider, row.vlm_model),
         "has_api_key": bool(usable),
         "equal_split_default": row.equal_split_default,
     }
@@ -110,7 +117,7 @@ def update_account_settings(db: Session, account_id: int, payload) -> models.Acc
         row.preferred_currency = str(data["preferred_currency"]).strip().upper()[:10]
 
     provider = data.get("vlm_provider") or row.vlm_provider or DEFAULT_PROVIDER
-    model = data.get("vlm_model") or row.vlm_model or DEFAULT_MODEL
+    model = normalize_model_id(provider, data.get("vlm_model") or row.vlm_model or DEFAULT_MODEL)
     if not is_valid_provider_model(provider, model):
         raise ValueError("Invalid provider or model")
     row.vlm_provider = provider
@@ -143,7 +150,7 @@ def update_group_settings(
         row.equal_split_default = bool(data["equal_split_default"])
 
     provider = data.get("vlm_provider") or row.vlm_provider or DEFAULT_PROVIDER
-    model = data.get("vlm_model") or row.vlm_model or DEFAULT_MODEL
+    model = normalize_model_id(provider, data.get("vlm_model") or row.vlm_model or DEFAULT_MODEL)
     if not is_valid_provider_model(provider, model):
         raise ValueError("Invalid provider or model")
     row.vlm_provider = provider
@@ -180,9 +187,14 @@ def resolve_vlm_config(
         if group_row.override_global_vlm:
             api_key = _usable_api_key(group_row.vlm_api_key_encrypted)
             if api_key:
+                provider = group_row.vlm_provider or DEFAULT_PROVIDER
+                model = normalize_model_id(provider, group_row.vlm_model)
+                if group_row.vlm_model != model:
+                    group_row.vlm_model = model
+                    db.commit()
                 return ResolvedVlmConfig(
-                    group_row.vlm_provider or DEFAULT_PROVIDER,
-                    group_row.vlm_model or DEFAULT_MODEL,
+                    provider,
+                    model,
                     api_key,
                     "group",
                 )
@@ -192,9 +204,15 @@ def resolve_vlm_config(
     if account_row.use_own_vlm:
         api_key = _usable_api_key(account_row.vlm_api_key_encrypted)
         if api_key:
+            provider = account_row.vlm_provider or DEFAULT_PROVIDER
+            model = normalize_model_id(provider, account_row.vlm_model)
+            # Persist remaps (e.g. gemini-2.5-flash → 3.8) so Settings stays accurate.
+            if account_row.vlm_model != model:
+                account_row.vlm_model = model
+                db.commit()
             return ResolvedVlmConfig(
-                account_row.vlm_provider or DEFAULT_PROVIDER,
-                account_row.vlm_model or DEFAULT_MODEL,
+                provider,
+                model,
                 api_key,
                 "account",
             )
@@ -210,9 +228,12 @@ def resolve_vlm_config(
     )
     if server_key:
         server_provider = os.environ.get("SERVER_VLM_PROVIDER", "google")
-        server_model = os.environ.get(
-            "SERVER_VLM_MODEL",
-            os.environ.get("GEMINI_MODEL", DEFAULT_MODEL),
+        server_model = normalize_model_id(
+            server_provider,
+            os.environ.get(
+                "SERVER_VLM_MODEL",
+                os.environ.get("GEMINI_MODEL", DEFAULT_MODEL),
+            ),
         )
         return ResolvedVlmConfig(server_provider, server_model, server_key, "server")
 

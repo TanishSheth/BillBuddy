@@ -309,7 +309,7 @@ function resetExpenseForm() {
   $("#friendExpenseForm").reset();
   $("#friendExpenseDate").value = todayISO();
   if (activeFriend) ShareSquad.fillCurrencySelect($("#friendExpenseCurrency"), activeFriend.currency);
-  ShareSquad.fillCategorySelect($("#friendExpenseCategory"), "Food & Dining", { allowCustom: true });
+  ShareSquad.fillCategorySelect($("#friendExpenseCategory"), "FOOD & DINING", { allowCustom: true });
   $("#friendExpenseCategoryCustom").value = "";
   setFriendShareSelected("Me", true);
   setFriendShareSelected("Friend", true);

@@ -55,12 +55,13 @@ function renderSummary(summary) {
 function categoryMatchesFilter(expenseCategory, filterCat) {
   if (!filterCat || filterCat === "All") return true;
   const aliases = {
-    "Food & Dining": ["Food & Dining", "Food", "Dining"],
-    Food: ["Food & Dining", "Food", "Dining"],
-    General: ["General", "General / Other", "Other"],
+    "FOOD & DINING": ["FOOD & DINING", "Food & Dining", "Food", "Dining"],
+    Food: ["FOOD & DINING", "Food & Dining", "Food", "Dining"],
+    GENERAL: ["GENERAL", "General", "General / Other", "Other"],
   };
-  const set = aliases[filterCat] || [filterCat];
-  return set.includes(expenseCategory || "General");
+  const normalizedFilter = ShareSquad.normalizeCategory(filterCat);
+  const set = aliases[normalizedFilter] || [normalizedFilter];
+  return set.includes(ShareSquad.normalizeCategory(expenseCategory || "GENERAL"));
 }
 
 function filterAndRenderExpenses() {
@@ -160,7 +161,7 @@ async function handleExpenseAction(event) {
         currentSummary.total_spent = currentSummary.expenses.reduce((sum, item) => sum + Number(item.total_amount || 0), 0);
         const breakdown = {};
         currentSummary.expenses.forEach((item) => {
-          const cat = item.category || "General";
+          const cat = ShareSquad.normalizeCategory(item.category || "General");
           breakdown[cat] = (breakdown[cat] || 0) + Number(item.total_amount || 0);
         });
         currentSummary.category_breakdown = breakdown;
@@ -207,7 +208,7 @@ function openExpenseModal(expense = null) {
     $("#billDate")._flatpickr?.setDate($("#billDate").value, true);
     ShareSquad.clampDateInputToToday($("#billDate"));
     $("#totalAmount").value = "";
-    ShareSquad.fillCategorySelect($("#expenseCategory"), "Food & Dining", { allowCustom: true });
+    ShareSquad.fillCategorySelect($("#expenseCategory"), "FOOD & DINING", { allowCustom: true });
     if ($("#expenseCategoryCustom")) $("#expenseCategoryCustom").value = "";
     ShareSquad.clearOcrFieldMarks($("#expenseModal") || document);
     ShareSquad.fillCurrencySelect($("#expenseCurrency"), currentSummary?.currency || "USD");

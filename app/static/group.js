@@ -758,7 +758,7 @@ async function loadExpenses() {
     tr.dataset.expenseId = e.id;
     tr.innerHTML = `
       <td class="py-2.5 pr-3 text-ink/70">${e.bill_date}</td>
-      <td class="py-2.5 pr-3 font-bold text-ink">${ShareSquad.escapeHtml(e.store_name)}</td>
+      <td class="py-2.5 pr-3 font-bold text-ink">${ShareSquad.escapeHtml(e.store_name)}${e.recurring_template_id ? ' <span class="bb-chip !text-[9px] !py-0 !px-1.5 align-middle">Monthly</span>' : ""}</td>
       <td class="py-2.5 pr-3"><span ${catMark}>${ShareSquad.escapeHtml(e.category)}</span></td>
       <td class="py-2.5 pr-3 text-ink/80">${payerHtml}</td>
       <td class="py-2.5 pr-3 text-ink/60 text-[11px]">${ShareSquad.escapeHtml(e.split_type || "EQUAL")} (${splitNames})</td>
@@ -780,7 +780,7 @@ async function loadExpenses() {
     card.innerHTML = `
       <div class="card-top">
         <div>
-          <div class="card-store">${ShareSquad.escapeHtml(e.store_name)}</div>
+          <div class="card-store">${ShareSquad.escapeHtml(e.store_name)}${e.recurring_template_id ? ' <span class="bb-chip !text-[9px] !py-0 !px-1.5 align-middle">Monthly</span>' : ""}</div>
           <span ${ShareSquad.categoryMark(e.category, "category-tag mt-1")}>${ShareSquad.escapeHtml(e.category)}</span>
         </div>
         <div class="card-amount text-brand">${ShareSquad.formatMoney(e.total_amount, e.currency || groupCurrency())}</div>
@@ -873,6 +873,9 @@ function startEditExpense(exp) {
 
   renderSplitOptions();
 
+  const recurringToggle = $("#f_recurring_monthly");
+  if (recurringToggle) recurringToggle.checked = Boolean(exp.recurring_active);
+
   $("#cancelEditBtn").classList.remove("hidden");
   switchTab("upload");
 }
@@ -884,6 +887,8 @@ function cancelEdit() {
   $("#previewImg").classList.add("hidden");
   $("#receiptPreviewWrap")?.classList.add("hidden");
   setScanBusy(false);
+  const recurringToggle = $("#f_recurring_monthly");
+  if (recurringToggle) recurringToggle.checked = false;
 }
 
 async function openComments(expenseId) {
@@ -1008,6 +1013,7 @@ async function saveExpense() {
       }
     }
 
+    const recurringMonthly = Boolean($("#f_recurring_monthly")?.checked);
     const payload = {
       upload_id: state.currentUploadId || null,
       store_name: store,
@@ -1022,6 +1028,7 @@ async function saveExpense() {
       split_details: splitDetails.length ? splitDetails : null,
       // Ledger month = when saved (balances + digests). bill_date is the receipt date only.
       period_key: calendarPeriodKey(),
+      recurring_monthly: recurringMonthly,
     };
 
     if (state.editingExpenseId) {
@@ -1029,13 +1036,19 @@ async function saveExpense() {
         method: "PUT",
         body: JSON.stringify(payload),
       });
-      ShareSquad.showToast("Expense updated successfully", "success");
+      ShareSquad.showToast(
+        recurringMonthly ? "Expense updated · repeats every month" : "Expense updated successfully",
+        "success",
+      );
     } else {
       await ShareSquad.api(`/groups/${gid()}/expenses`, {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      ShareSquad.showToast("Expense saved", "success");
+      ShareSquad.showToast(
+        recurringMonthly ? "Expense saved · will repeat every month" : "Expense saved",
+        "success",
+      );
     }
 
     cancelEdit();
@@ -1462,7 +1475,10 @@ async function handleReceiptUpload(file) {
     const data = await ShareSquad.uploadReceipt(`/groups/${gid()}/receipts/upload`, file);
 
     state.currentUploadId = data.upload_id;
+    state.editingExpenseId = null;
     $("#extractionPanel").classList.remove("hidden");
+    $("#extractionPanelTitle").textContent = "Expense Details";
+    if ($("#f_recurring_monthly")) $("#f_recurring_monthly").checked = false;
 
     if (data.extraction) {
       const ex = data.extraction;
@@ -1584,7 +1600,7 @@ async function handleReceiptUpload(file) {
     $("#f_date").value = today;
     $("#f_date")._flatpickr?.setDate(today, true);
     $("#f_amount").value = "";
-    ShareSquad.fillCategorySelect($("#f_category"), "Food & Dining", { allowCustom: true });
+    ShareSquad.fillCategorySelect($("#f_category"), "FOOD & DINING", { allowCustom: true });
     if ($("#f_category_custom")) $("#f_category_custom").value = "";
     ShareSquad.fillCurrencySelect($("#f_currency"), groupCurrency());
     syncExpenseCurrencyUI();
@@ -1593,6 +1609,7 @@ async function handleReceiptUpload(file) {
     renderPayerOptions();
     setPayMode("single");
     renderSplitOptions();
+    if ($("#f_recurring_monthly")) $("#f_recurring_monthly").checked = false;
     if ($("#saveMsg")) $("#saveMsg").textContent = "";
     requestAnimationFrame(() => { $("#extractionPanel").scrollIntoView({ behavior: "smooth", block: "start" }); setTimeout(() => $("#f_store").focus(), 300); });
   });

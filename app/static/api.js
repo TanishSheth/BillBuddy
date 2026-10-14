@@ -457,6 +457,10 @@ async function api(path, opts = {}) {
       throw new Error(msg);
     }
 
+    // Sliding 30-day idle session: server mints a fresh JWT on each authenticated call.
+    const refreshed = res.headers.get("X-Access-Token");
+    if (refreshed) setToken(refreshed);
+
     const ct = res.headers.get("content-type") || "";
     return ct.includes("application/json") ? res.json() : res;
   } catch (err) {
@@ -747,27 +751,47 @@ function bindReceiptCamera(opts) {
 }
 
 const CATEGORIES = [
-  { id: "Food & Dining", slug: "Food", label: "Food & Dining" },
-  { id: "Groceries", slug: "Groceries", label: "Groceries" },
-  { id: "Travel", slug: "Travel", label: "Travel" },
-  { id: "Transit", slug: "Transit", label: "Transit" },
-  { id: "Housing", slug: "Housing", label: "Housing" },
-  { id: "Utilities", slug: "Utilities", label: "Utilities" },
-  { id: "Entertainment", slug: "Entertainment", label: "Entertainment" },
-  { id: "Shopping", slug: "Shopping", label: "Shopping" },
-  { id: "Healthcare", slug: "Healthcare", label: "Healthcare" },
-  { id: "General", slug: "General", label: "General / Other" },
+  { id: "FOOD & DINING", slug: "Food", label: "FOOD & DINING" },
+  { id: "GROCERIES", slug: "Groceries", label: "GROCERIES" },
+  { id: "TRAVEL", slug: "Travel", label: "TRAVEL" },
+  { id: "TRANSIT", slug: "Transit", label: "TRANSIT" },
+  { id: "HOUSING", slug: "Housing", label: "HOUSING" },
+  { id: "UTILITIES", slug: "Utilities", label: "UTILITIES" },
+  { id: "ENTERTAINMENT", slug: "Entertainment", label: "ENTERTAINMENT" },
+  { id: "SHOPPING", slug: "Shopping", label: "SHOPPING" },
+  { id: "HEALTHCARE", slug: "Healthcare", label: "HEALTHCARE" },
+  { id: "GENERAL", slug: "General", label: "GENERAL / OTHER" },
 ];
 const CUSTOM_CATEGORY_VALUE = "__custom__";
 
 function isKnownCategory(name) {
   const value = String(name || "").trim();
-  return CATEGORIES.some((cat) => cat.id === value || cat.label === value);
+  return CATEGORIES.some(
+    (cat) => cat.id.toLowerCase() === value.toLowerCase() || cat.label.toLowerCase() === value.toLowerCase()
+  );
+}
+
+/** Every category tag is stored/shown UPPERCASE so case variants never diverge. */
+function normalizeCategory(name) {
+  const value = String(name || "").trim() || "GENERAL";
+  const known = CATEGORIES.find(
+    (cat) => cat.id.toLowerCase() === value.toLowerCase() || cat.label.toLowerCase() === value.toLowerCase()
+  );
+  if (known) return known.id;
+  const key = value.toLowerCase();
+  if (key === "food" || key === "dining" || key === "food & dining") return "FOOD & DINING";
+  if (key === "other" || key === "general / other") return "GENERAL";
+  return value.toUpperCase().slice(0, 50);
 }
 
 function categorySlug(name) {
-  const value = String(name || "General").trim();
-  const match = CATEGORIES.find((cat) => cat.id === value || cat.label === value || value.startsWith(cat.slug));
+  const value = String(name || "GENERAL").trim();
+  const match = CATEGORIES.find(
+    (cat) =>
+      cat.id.toLowerCase() === value.toLowerCase() ||
+      cat.label.toLowerCase() === value.toLowerCase() ||
+      value.toLowerCase().startsWith(cat.slug.toLowerCase())
+  );
   if (match) return match.slug;
   const cleaned = value.replace(/[^a-zA-Z0-9]+/g, "").slice(0, 12) || "Custom";
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
@@ -797,8 +821,10 @@ function hashHue(value) {
 }
 
 function categoryAccentColor(name) {
-  const value = String(name || "General").trim() || "General";
-  const match = CATEGORIES.find((cat) => cat.id === value || cat.label === value);
+  const value = String(name || "GENERAL").trim() || "GENERAL";
+  const match = CATEGORIES.find(
+    (cat) => cat.id.toLowerCase() === value.toLowerCase() || cat.label.toLowerCase() === value.toLowerCase()
+  );
   if (match) return CATEGORY_ACCENTS[match.slug] || CATEGORY_ACCENTS.General;
   // Stable distinct hue per custom label so Pets / Gifts / etc. don't all share General gray.
   const hue = hashHue(value);
@@ -815,8 +841,10 @@ function categoryTintStyle(name) {
 }
 
 function categoryClass(name) {
-  const value = String(name || "General").trim() || "General";
-  const match = CATEGORIES.find((cat) => cat.id === value || cat.label === value);
+  const value = String(name || "GENERAL").trim() || "GENERAL";
+  const match = CATEGORIES.find(
+    (cat) => cat.id.toLowerCase() === value.toLowerCase() || cat.label.toLowerCase() === value.toLowerCase()
+  );
   if (match) return `cat-${match.slug}`;
   return "cat-Custom";
 }
@@ -875,14 +903,15 @@ function renderCategoryPieChart(categoryRows, totalSpent, currency) {
   </div>`;
 }
 
-function fillCategorySelect(select, selected = "", { includeAll = false, allLabel = "All Categories", allowCustom = !includeAll } = {}) {
+function fillCategorySelect(select, selected = "", { includeAll = false, allLabel = "ALL CATEGORIES", allowCustom = !includeAll } = {}) {
   if (!select) return;
-  const current = selected || select.value || (includeAll ? "All" : "Food & Dining");
+  let current = selected || select.value || (includeAll ? "All" : "FOOD & DINING");
+  if (current && current !== "All") current = normalizeCategory(current);
   const options = includeAll
     ? [{ id: "All", slug: "", label: allLabel }, ...CATEGORIES]
     : [...CATEGORIES];
   if (allowCustom && !includeAll) {
-    options.push({ id: CUSTOM_CATEGORY_VALUE, slug: "General", label: "Custom…" });
+    options.push({ id: CUSTOM_CATEGORY_VALUE, slug: "General", label: "CUSTOM…" });
   }
   const known = options.some((cat) => cat.id === current);
   const useCustom = allowCustom && !includeAll && current && current !== "All" && !isKnownCategory(current);
@@ -942,12 +971,12 @@ function syncCategorySelect(select) {
 }
 
 function resolveCategoryValue(select, customInput) {
-  if (!select) return "General";
+  if (!select) return "GENERAL";
   if (select.value === CUSTOM_CATEGORY_VALUE) {
     const custom = (customInput?.value || "").trim().slice(0, 50);
-    return custom || "General";
+    return normalizeCategory(custom || "GENERAL");
   }
-  return select.value || "General";
+  return normalizeCategory(select.value || "GENERAL");
 }
 
 function bindCategorySelect(select, { includeAll = false, allowCustom = !includeAll } = {}) {
@@ -957,7 +986,17 @@ function bindCategorySelect(select, { includeAll = false, allowCustom = !include
   select.addEventListener("change", () => syncCategorySelect(select));
   const customInput = document.getElementById(select.dataset.customInput || "") || select.parentElement?.querySelector("[data-category-custom], #f_category_custom, #expenseCategoryCustom, #qsCategoryCustom");
   customInput?.addEventListener("input", () => {
-    if (select.value === CUSTOM_CATEGORY_VALUE) syncCategorySelect(select);
+    if (select.value !== CUSTOM_CATEGORY_VALUE) return;
+    const start = customInput.selectionStart;
+    const end = customInput.selectionEnd;
+    const upper = String(customInput.value || "").toUpperCase().slice(0, 50);
+    if (customInput.value !== upper) {
+      customInput.value = upper;
+      if (typeof start === "number" && typeof end === "number") {
+        customInput.setSelectionRange(start, end);
+      }
+    }
+    syncCategorySelect(select);
   });
 }
 
@@ -1157,6 +1196,7 @@ window.ShareSquad = {
   categoryMark,
   renderCategoryPieChart,
   isKnownCategory,
+  normalizeCategory,
   fillCategorySelect,
   syncCategorySelect,
   resolveCategoryValue,

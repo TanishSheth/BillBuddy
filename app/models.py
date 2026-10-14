@@ -51,7 +51,7 @@ class AccountSettings(Base):
     account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), unique=True, nullable=False)
     use_own_vlm = Column(Boolean, default=False)
     vlm_provider = Column(String(50), default="google")
-    vlm_model = Column(String(100), default="gemini-2.5-flash")
+    vlm_model = Column(String(100), default="gemini-3.8-flash")
     vlm_api_key_encrypted = Column(String(500), nullable=True)
     email_monthly_reports = Column(Boolean, default=True)
     compact_list_view = Column("compact_ledger_view", Boolean, default=False)
@@ -139,7 +139,7 @@ class GroupMemberSettings(Base):
     account_id = Column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     override_global_vlm = Column(Boolean, default=False)
     vlm_provider = Column(String(50), default="google")
-    vlm_model = Column(String(100), default="gemini-2.5-flash")
+    vlm_model = Column(String(100), default="gemini-3.8-flash")
     vlm_api_key_encrypted = Column(String(500), nullable=True)
     equal_split_default = Column(Boolean, default=True)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -207,6 +207,8 @@ class Expense(Base):
     fx_rate_to_group = Column(Numeric(12, 6), default=1.0)
     payer_member_id = Column(Integer, ForeignKey("group_members.id", ondelete="CASCADE"))
     image_path = Column(String, nullable=True)
+    # Soft link (no DB FK) so create_all order stays compatible with existing DBs.
+    recurring_template_id = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime, server_default=func.now())
 
     period = relationship("MonthlyPeriod", back_populates="expenses")
@@ -214,6 +216,31 @@ class Expense(Base):
     payers = relationship("ExpensePayer", back_populates="expense", cascade="all, delete-orphan")
     splits = relationship("ExpenseSplit", back_populates="expense", cascade="all, delete-orphan")
     comments = relationship("ExpenseComment", back_populates="expense", cascade="all, delete-orphan")
+
+
+class RecurringExpenseTemplate(Base):
+    """Monthly auto-post template for a group expense (same amount/payer/split)."""
+    __tablename__ = "recurring_expense_templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_by_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
+    active = Column(Boolean, nullable=False, default=True)
+    store_name = Column(String(150), nullable=False)
+    total_amount = Column(Numeric(10, 2), nullable=False)
+    currency = Column(String(10), default="USD")
+    category = Column(String(50), default="General")
+    split_type = Column(String(20), default="EQUAL")
+    payer_member_id = Column(Integer, nullable=False)
+    payers_json = Column(Text, nullable=True)  # JSON list of {member_id, amount} or null
+    splits_json = Column(Text, nullable=False)  # JSON {split_with, split_details}
+    day_of_month = Column(Integer, nullable=False, default=1)
+    next_run_on = Column(Date, nullable=False, index=True)
+    last_posted_period_key = Column(String(7), nullable=True)
+    source_expense_id = Column(Integer, nullable=True)
+    last_expense_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, nullable=True)
 
 
 class ExpensePayer(Base):

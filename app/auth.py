@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -28,6 +28,7 @@ PASSWORD_HINT = (
 )
 
 bearer_scheme = HTTPBearer(auto_error=False)
+ACCESS_TOKEN_HEADER = "X-Access-Token"
 
 
 def validate_password_strength(password: str) -> str | None:
@@ -59,6 +60,7 @@ def create_access_token(account_id: int) -> str:
 
 
 def get_current_account(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> models.Account:
@@ -77,6 +79,8 @@ def get_current_account(
     sandbox = db.query(models.DemoSandbox).filter_by(account_id=account.id).first()
     if sandbox and sandbox.expires_at <= datetime.utcnow():
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This demo sandbox has expired. Start a new demo to continue.")
+    # Sliding session: any authenticated activity resets the 30-day idle clock.
+    request.state.refresh_access_token = create_access_token(account.id)
     return account
 
 

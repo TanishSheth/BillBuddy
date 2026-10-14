@@ -42,6 +42,7 @@ from .config import (
 )
 from .database import engine, get_db, Base, SessionLocal
 from .auth import (
+    ACCESS_TOKEN_HEADER,
     get_current_account,
     hash_password,
     verify_password,
@@ -104,13 +105,46 @@ BLOCKED_INVITE_DOMAINS = {
     "example.com", "example.org", "example.net", "test.com", "localhost", "invalid",
 } if not IS_DEVELOPMENT else set()
 
-# Category filter aliases: UI labels vs legacy/slug storage.
+# Category filter aliases: UI labels vs legacy/slug storage (any case).
 _CATEGORY_ALIASES = {
-    "Food & Dining": {"Food & Dining", "Food", "Dining"},
-    "Food": {"Food & Dining", "Food", "Dining"},
-    "General": {"General", "General / Other", "Other"},
-    "General / Other": {"General", "General / Other", "Other"},
+    "FOOD & DINING": {"FOOD & DINING", "Food & Dining", "Food", "Dining", "FOOD", "DINING"},
+    "Food & Dining": {"FOOD & DINING", "Food & Dining", "Food", "Dining", "FOOD", "DINING"},
+    "Food": {"FOOD & DINING", "Food & Dining", "Food", "Dining", "FOOD", "DINING"},
+    "GENERAL": {"GENERAL", "General", "General / Other", "Other", "GENERAL / OTHER", "OTHER"},
+    "General": {"GENERAL", "General", "General / Other", "Other", "GENERAL / OTHER", "OTHER"},
+    "General / Other": {"GENERAL", "General", "General / Other", "Other", "GENERAL / OTHER", "OTHER"},
 }
+
+# Built-in + custom category tags are stored UPPERCASE so case variants never
+# split charts (Rent/rent, Food & Dining/food & dining).
+_KNOWN_CATEGORIES = (
+    "FOOD & DINING",
+    "GROCERIES",
+    "TRAVEL",
+    "TRANSIT",
+    "HOUSING",
+    "UTILITIES",
+    "ENTERTAINMENT",
+    "SHOPPING",
+    "HEALTHCARE",
+    "GENERAL",
+)
+_KNOWN_CATEGORY_BY_KEY = {name.casefold(): name for name in _KNOWN_CATEGORIES}
+_KNOWN_CATEGORY_BY_KEY.update({
+    "food": "FOOD & DINING",
+    "dining": "FOOD & DINING",
+    "general / other": "GENERAL",
+    "other": "GENERAL",
+})
+
+
+def _normalize_category(value: str | None) -> str:
+    """Canonicalize every category tag to UPPERCASE (known presets + custom)."""
+    text = (value or "").strip() or "GENERAL"
+    known = _KNOWN_CATEGORY_BY_KEY.get(text.casefold())
+    if known:
+        return known
+    return text.upper()[:50]
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/jpg"}
@@ -338,6 +372,7 @@ def _ensure_schema():
         ("expenses", "category", "VARCHAR(50) DEFAULT 'General'"),
         ("expenses", "split_type", "VARCHAR(20) DEFAULT 'EQUAL'"),
         ("expenses", "fx_rate_to_group", "NUMERIC(12,6) DEFAULT 1.0"),
+        ("expenses", "recurring_template_id", "INTEGER"),
         ("expense_splits", "split_value", "NUMERIC(10,2)"),
         ("monthly_periods", "target_currency", "VARCHAR(10)"),
         ("monthly_periods", "settlement_fx_rate", "NUMERIC(12,6)"),
@@ -500,6 +535,53 @@ def _ensure_schema():
             logger.warning("Could not ensure index (%s): %s", sql, err)
 
     _backfill_expense_fx_rates()
+    _backfill_category_case()
+
+
+def _backfill_category_case() -> None:
+    """Uppercase custom category tags and fold case variants (Rent/rent → RENT)."""
+    tables = (
+        models.PersonalExpense,
+        models.Expense,
+        models.QuickSplit,
+        models.AccountVendor,
+        models.RecurringExpenseTemplate,
+    )
+    try:
+        db = SessionLocal()
+    except Exception:
+        return
+    try:
+        updated = 0
+        for model in tables:
+            if not hasattr(model, "category"):
+                continue
+            try:
+                rows = db.query(model).all()
+            except Exception as err:
+                logger.warning("Category backfill skipped for %s: %s", model.__tablename__, err)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                continue
+            for row in rows:
+                raw = getattr(row, "category", None)
+                normalized = _normalize_category(raw)
+                if (raw or "") != normalized:
+                    row.category = normalized
+                    updated += 1
+        if updated:
+            db.commit()
+            logger.info("Normalized category case on %s rows", updated)
+    except Exception as err:
+        logger.warning("Category case backfill skipped: %s", err)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        db.close()
 
 
 def _fx_rate_between(from_curr: str, to_curr: str) -> Decimal:
@@ -588,6 +670,15 @@ async def disable_static_cache(request: Request, call_next):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
+    # Sliding session: attach a refreshed JWT whenever auth ran successfully.
+    refreshed = getattr(request.state, "refresh_access_token", None)
+    if refreshed:
+        response.headers[ACCESS_TOKEN_HEADER] = refreshed
+        expose = response.headers.get("Access-Control-Expose-Headers", "")
+        parts = [p.strip() for p in expose.split(",") if p.strip()]
+        if ACCESS_TOKEN_HEADER not in parts:
+            parts.append(ACCESS_TOKEN_HEADER)
+            response.headers["Access-Control-Expose-Headers"] = ", ".join(parts)
     # Hashed Vite assets may be cached; this app serves classic static files.
     if any(path.startswith(prefix) for prefix in _TIMED_PATH_PREFIXES):
         elapsed_ms = (time.perf_counter() - started) * 1000
@@ -1691,8 +1782,18 @@ def start_account_deletion_cleanup() -> None:
                 CronTrigger(hour=0, minute=15, timezone=BUSINESS_TIMEZONE),
                 id="monthly-digest-delivery", replace_existing=True,
             )
+            account_cleanup_scheduler.add_job(
+                _process_due_recurring_expenses,
+                CronTrigger(hour=0, minute=30, timezone=BUSINESS_TIMEZONE),
+                id="recurring-expense-post", replace_existing=True,
+            )
             account_cleanup_scheduler.start()
             logger.info("Scheduler owner started (RUN_SCHEDULER=1)")
+            # Catch anything due immediately after deploy/restart.
+            try:
+                _process_due_recurring_expenses()
+            except Exception:
+                logger.exception("Initial recurring expense pass failed")
     else:
         logger.info("Scheduler not started on this process (RUN_SCHEDULER=%s DISABLE=%s)", RUN_SCHEDULER, DISABLE_SCHEDULER)
 
@@ -2462,7 +2563,7 @@ def create_quick_split(
     split = models.QuickSplit(
         title=payload.title.strip(), total_amount=total,
         currency=_normalize_currency(payload.currency, "USD"), bill_date=payload.bill_date,
-        category=payload.category or "General", created_by_account_id=account.id,
+        category=_normalize_category(payload.category), created_by_account_id=account.id,
         payer_account_id=payer_account.id,
         split_type=(payload.split_type or "EQUAL").upper(),
         edited_after_payment=False,
@@ -2568,7 +2669,7 @@ def update_quick_split(split_id: int, payload: schemas.QuickSplitUpdate, account
     # Paid/settled or past-month paid bills keep their original month; delta lands today.
     if not use_adjustment:
         split.bill_date = payload.bill_date
-    split.category = payload.category or "General"
+    split.category = _normalize_category(payload.category)
     split.split_type = (payload.split_type or "EQUAL").upper()
     split.payer_account_id = payer_account.id
     _assign_shared_payment(split, payload.payer_paid_amount)
@@ -4806,7 +4907,7 @@ def _upsert_account_vendor(
     if row is None and header_key:
         row = next((r for r in rows if r.header_key == header_key), None)
 
-    cat = (category or "").strip() or "General"
+    cat = _normalize_category(category)
     if row:
         row.name = name
         if hasattr(row, "name_key"):
@@ -4818,7 +4919,7 @@ def _upsert_account_vendor(
         if header_key:
             row.header_key = header_key
         if hasattr(row, "category"):
-            row.category = cat or row.category or "General"
+            row.category = cat
         return
     db.add(
         models.AccountVendor(
@@ -4856,10 +4957,10 @@ def _remember_account_vendor(
         phone=phones[0] if phones else "",
         store_id=store_ids[0] if store_ids else "",
         header_key=header_key,
-        category=(category or "").strip(),
+        category=_normalize_category(category),
     )
     for sid in store_ids[1:]:
-        _upsert_account_vendor(db, account_id, chosen, store_id=sid, category=(category or "").strip())
+        _upsert_account_vendor(db, account_id, chosen, store_id=sid, category=_normalize_category(category))
 
 
 def _remember_vendor_correction(
@@ -5108,6 +5209,295 @@ def _apply_expense_splits_custom(
         )
 
 
+def _next_monthly_run_date(after: date, day_of_month: int) -> date:
+    """Return the next month's occurrence of day_of_month after `after` (clamped)."""
+    year = after.year + (1 if after.month == 12 else 0)
+    month = 1 if after.month == 12 else after.month + 1
+    day = max(1, min(int(day_of_month or 1), monthrange(year, month)[1]))
+    return date(year, month, day)
+
+
+def _serialize_expense_split_snapshot(payload) -> str:
+    split_with = list(payload.split_with or []) if getattr(payload, "split_with", None) else []
+    split_details = []
+    if getattr(payload, "split_details", None):
+        split_details = [
+            {"member_id": int(d.member_id), "value": float(d.value)}
+            for d in payload.split_details
+        ]
+    return json.dumps({"split_with": split_with, "split_details": split_details})
+
+
+def _serialize_expense_payers_snapshot(payload) -> Optional[str]:
+    if not getattr(payload, "payers", None) or len(payload.payers) < 2:
+        return None
+    return json.dumps([
+        {"member_id": int(p.member_id), "amount": float(p.amount)}
+        for p in payload.payers
+    ])
+
+
+def _expense_to_out(db: Session, expense: models.Expense) -> schemas.ExpenseOut:
+    row = schemas.ExpenseOut.model_validate(expense)
+    active = False
+    if expense.recurring_template_id:
+        tmpl = db.query(models.RecurringExpenseTemplate).get(expense.recurring_template_id)
+        active = bool(tmpl and tmpl.active)
+    return row.model_copy(update={"recurring_active": active})
+
+
+def _expenses_to_out(db: Session, expenses: list[models.Expense]) -> list[schemas.ExpenseOut]:
+    ids = {e.recurring_template_id for e in expenses if e.recurring_template_id}
+    active_ids: set[int] = set()
+    if ids:
+        active_ids = {
+            tid
+            for (tid,) in db.query(models.RecurringExpenseTemplate.id).filter(
+                models.RecurringExpenseTemplate.id.in_(ids),
+                models.RecurringExpenseTemplate.active.is_(True),
+            )
+        }
+    out: list[schemas.ExpenseOut] = []
+    for expense in expenses:
+        row = schemas.ExpenseOut.model_validate(expense)
+        out.append(
+            row.model_copy(
+                update={"recurring_active": bool(expense.recurring_template_id in active_ids)}
+            )
+        )
+    return out
+
+
+def _upsert_recurring_template_for_expense(
+    db: Session,
+    *,
+    group_id: int,
+    account: models.Account,
+    expense: models.Expense,
+    payload,
+    enable: bool,
+) -> None:
+    """Create/update/stop a monthly template linked to this expense."""
+    existing = None
+    if expense.recurring_template_id:
+        existing = db.query(models.RecurringExpenseTemplate).get(expense.recurring_template_id)
+    if not existing and expense.id:
+        existing = (
+            db.query(models.RecurringExpenseTemplate)
+            .filter_by(group_id=group_id, source_expense_id=expense.id)
+            .order_by(models.RecurringExpenseTemplate.id.desc())
+            .first()
+        )
+
+    if not enable:
+        if existing and existing.active:
+            existing.active = False
+            existing.updated_at = datetime.utcnow()
+        return
+
+    day = max(1, min(int(expense.bill_date.day), 31))
+    next_run = _next_monthly_run_date(_business_today(), day)
+    payers_json = _serialize_expense_payers_snapshot(payload)
+    splits_json = _serialize_expense_split_snapshot(payload)
+    if existing:
+        existing.active = True
+        existing.store_name = expense.store_name
+        existing.total_amount = expense.total_amount
+        existing.currency = expense.currency
+        existing.category = expense.category
+        existing.split_type = expense.split_type
+        existing.payer_member_id = int(expense.payer_member_id)
+        existing.payers_json = payers_json
+        existing.splits_json = splits_json
+        existing.day_of_month = day
+        existing.next_run_on = next_run
+        existing.source_expense_id = expense.id
+        existing.updated_at = datetime.utcnow()
+        expense.recurring_template_id = existing.id
+        return
+
+    tmpl = models.RecurringExpenseTemplate(
+        group_id=group_id,
+        created_by_account_id=account.id,
+        active=True,
+        store_name=expense.store_name,
+        total_amount=expense.total_amount,
+        currency=expense.currency,
+        category=expense.category,
+        split_type=expense.split_type,
+        payer_member_id=int(expense.payer_member_id),
+        payers_json=payers_json,
+        splits_json=splits_json,
+        day_of_month=day,
+        next_run_on=next_run,
+        source_expense_id=expense.id,
+        last_expense_id=expense.id,
+    )
+    db.add(tmpl)
+    db.flush()
+    expense.recurring_template_id = tmpl.id
+
+
+def _materialize_recurring_template(db: Session, tmpl: models.RecurringExpenseTemplate) -> Optional[models.Expense]:
+    """Create one expense occurrence for a due template. Returns expense or None if skipped."""
+    if not tmpl.active:
+        return None
+    run_on = tmpl.next_run_on
+    period_key = _period_key_for(run_on)
+    if tmpl.last_posted_period_key == period_key:
+        tmpl.next_run_on = _next_monthly_run_date(run_on, tmpl.day_of_month)
+        return None
+
+    already = (
+        db.query(models.Expense)
+        .join(models.MonthlyPeriod)
+        .filter(
+            models.MonthlyPeriod.group_id == tmpl.group_id,
+            models.MonthlyPeriod.period_key == period_key,
+            models.Expense.recurring_template_id == tmpl.id,
+        )
+        .first()
+    )
+    if already:
+        tmpl.last_posted_period_key = period_key
+        tmpl.last_expense_id = already.id
+        tmpl.next_run_on = _next_monthly_run_date(run_on, tmpl.day_of_month)
+        return None
+
+    active_members = {
+        m.id: m
+        for m in db.query(models.GroupMember).filter_by(group_id=tmpl.group_id, is_active=True).all()
+    }
+    if tmpl.payer_member_id not in active_members:
+        logger.warning(
+            "Skipping recurring template %s — payer member %s inactive",
+            tmpl.id,
+            tmpl.payer_member_id,
+        )
+        tmpl.next_run_on = _next_monthly_run_date(run_on, tmpl.day_of_month)
+        return None
+
+    try:
+        split_payload = json.loads(tmpl.splits_json or "{}")
+    except json.JSONDecodeError:
+        split_payload = {}
+    split_with = [int(x) for x in (split_payload.get("split_with") or []) if int(x) in active_members]
+    split_details_raw = split_payload.get("split_details") or []
+    split_details = [
+        schemas.SplitDetailInput(member_id=int(d["member_id"]), value=float(d["value"]))
+        for d in split_details_raw
+        if int(d.get("member_id", 0)) in active_members
+    ]
+    if not split_with and not split_details:
+        logger.warning("Skipping recurring template %s — no active split members", tmpl.id)
+        tmpl.next_run_on = _next_monthly_run_date(run_on, tmpl.day_of_month)
+        return None
+
+    payers = None
+    if tmpl.payers_json:
+        try:
+            raw_payers = json.loads(tmpl.payers_json)
+        except json.JSONDecodeError:
+            raw_payers = []
+        payers = [
+            schemas.ExpensePayerInput(member_id=int(p["member_id"]), amount=float(p["amount"]))
+            for p in raw_payers
+            if int(p.get("member_id", 0)) in active_members and float(p.get("amount", 0)) > 0
+        ]
+        if len(payers) < 2:
+            payers = None
+
+    group = db.query(models.Group).get(tmpl.group_id)
+    if not group:
+        tmpl.active = False
+        return None
+
+    period = get_or_create_period(db, tmpl.group_id, period_key)
+    _unlock_group_period(period)
+    expense_currency = _normalize_currency(tmpl.currency, group.currency or "USD")
+    group_currency = _normalize_currency(group.currency, "USD")
+    fx_rate = _fx_rate_between(expense_currency, group_currency)
+    total = float(tmpl.total_amount)
+
+    expense = models.Expense(
+        period_id=period.id,
+        store_name=tmpl.store_name,
+        bill_date=run_on,
+        total_amount=Decimal(str(total)),
+        currency=expense_currency,
+        category=tmpl.category or "General",
+        split_type=tmpl.split_type or "EQUAL",
+        payer_member_id=tmpl.payer_member_id,
+        image_path=None,
+        fx_rate_to_group=fx_rate,
+        recurring_template_id=tmpl.id,
+    )
+    db.add(expense)
+    db.flush()
+    expense.payer_member_id = _apply_expense_payers(
+        db, expense, total, tmpl.payer_member_id, payers,
+    )
+    _apply_expense_splits_custom(
+        db,
+        expense,
+        total,
+        tmpl.split_type or "EQUAL",
+        split_with or None,
+        split_details or None,
+    )
+
+    tmpl.last_expense_id = expense.id
+    tmpl.last_posted_period_key = period_key
+    tmpl.next_run_on = _next_monthly_run_date(run_on, tmpl.day_of_month)
+    tmpl.updated_at = datetime.utcnow()
+    return expense
+
+
+def _process_due_recurring_expenses() -> None:
+    db = SessionLocal()
+    try:
+        today = _business_today()
+        due = (
+            db.query(models.RecurringExpenseTemplate)
+            .filter(
+                models.RecurringExpenseTemplate.active.is_(True),
+                models.RecurringExpenseTemplate.next_run_on <= today,
+            )
+            .order_by(models.RecurringExpenseTemplate.id.asc())
+            .all()
+        )
+        for tmpl in due:
+            try:
+                # Catch up at most a few missed months per tick.
+                for _ in range(3):
+                    if not tmpl.active or tmpl.next_run_on > today:
+                        break
+                    expense = _materialize_recurring_template(db, tmpl)
+                    if expense:
+                        _record_activity(
+                            db,
+                            tmpl.group_id,
+                            None,
+                            "expense_created",
+                            f"Monthly bill posted: {expense.store_name}",
+                            "expense",
+                            expense.id,
+                        )
+                        _notify_group_members(
+                            db,
+                            tmpl.group_id,
+                            f"Monthly recurring bill added: {expense.store_name}.",
+                            _group_focus_link(tmpl.group_id, "expenses", f"expense-{expense.id}"),
+                        )
+                        notify_group_change(tmpl.group_id, "expense-created")
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Failed recurring template %s", tmpl.id)
+    finally:
+        db.close()
+
+
 @app.post("/api/groups/{group_id}/expenses", response_model=schemas.ExpenseOut)
 def create_expense(
     group_id: int,
@@ -5163,7 +5553,7 @@ def create_expense(
         bill_date=payload.bill_date,
         total_amount=Decimal(str(payload.total_amount)),
         currency=expense_currency,
-        category=payload.category or "General",
+        category=_normalize_category(payload.category),
         split_type=payload.split_type or "EQUAL",
         payer_member_id=payload.payer_member_id,
         image_path=final_path,
@@ -5183,18 +5573,32 @@ def create_expense(
     )
 
     _remember_account_vendor(
-        db, account.id, payload.store_name, pending=pending, category=payload.category,
+        db, account.id, payload.store_name, pending=pending, category=_normalize_category(payload.category),
     )
     if pending:
         db.delete(pending)
 
+    db.flush()
+    if payload.recurring_monthly:
+        _upsert_recurring_template_for_expense(
+            db,
+            group_id=group_id,
+            account=account,
+            expense=expense,
+            payload=payload,
+            enable=True,
+        )
+
     db.commit()
     db.refresh(expense)
     _record_activity(db, group_id, account, "expense_created", f"{account.display_name} added {expense.store_name}", "expense", expense.id)
-    _notify_group_members(db, group_id, f"{account.display_name} added {expense.store_name} to this group.", _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
+    note = f"{account.display_name} added {expense.store_name} to this group."
+    if payload.recurring_monthly:
+        note = f"{account.display_name} added {expense.store_name} (repeats every month)."
+    _notify_group_members(db, group_id, note, _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "expense-created")
-    return expense
+    return _expense_to_out(db, expense)
 
 
 @app.put("/api/groups/{group_id}/expenses/{expense_id}", response_model=schemas.ExpenseOut)
@@ -5231,7 +5635,7 @@ def update_expense(
     expense.total_amount = Decimal(str(payload.total_amount))
     expense.currency = _normalize_currency(payload.currency, expense.currency or "USD")
     expense.fx_rate_to_group = _fx_rate_between(expense.currency, group_currency)
-    expense.category = payload.category or expense.category or "General"
+    expense.category = _normalize_category(payload.category or expense.category)
     expense.split_type = payload.split_type or expense.split_type or "EQUAL"
     expense.payer_member_id = _apply_expense_payers(db, expense, payload.total_amount, payload.payer_member_id, payload.payers)
 
@@ -5246,6 +5650,16 @@ def update_expense(
 
     _remember_account_vendor(db, account.id, expense.store_name, category=expense.category)
 
+    if payload.recurring_monthly is not None:
+        _upsert_recurring_template_for_expense(
+            db,
+            group_id=group_id,
+            account=account,
+            expense=expense,
+            payload=payload,
+            enable=bool(payload.recurring_monthly),
+        )
+
     db.commit()
     db.refresh(expense)
     _record_activity(db, group_id, account, "expense_updated", f"{account.display_name} updated {expense.store_name}", "expense", expense.id)
@@ -5255,7 +5669,7 @@ def update_expense(
         _notify_group_members(db, group_id, f"{account.display_name} updated {expense.store_name}.", _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "expense-updated")
-    return expense
+    return _expense_to_out(db, expense)
 
 
 @app.delete("/api/groups/{group_id}/expenses/{expense_id}")
@@ -5314,7 +5728,9 @@ def list_expenses(
     if period_key:
         q = q.filter(models.MonthlyPeriod.period_key == period_key)
     if category and category != "All":
-        aliases = _CATEGORY_ALIASES.get(category, {category})
+        normalized = _normalize_category(category)
+        aliases = set(_CATEGORY_ALIASES.get(normalized, {normalized}))
+        aliases.add(normalized)
         q = q.filter(models.Expense.category.in_(list(aliases)))
     if search:
         term = f"%{search.strip()}%"
@@ -5333,7 +5749,41 @@ def list_expenses(
         q = q.filter(models.Expense.total_amount <= Decimal(str(max_amount)))
 
     # Newest saves first; bill_date is display-only on the expenses ledger.
-    return q.order_by(models.Expense.created_at.desc(), models.Expense.id.desc()).all()
+    expenses = q.order_by(models.Expense.created_at.desc(), models.Expense.id.desc()).all()
+    return _expenses_to_out(db, expenses)
+
+
+@app.get("/api/groups/{group_id}/recurring-expenses", response_model=list[schemas.RecurringExpenseOut])
+def list_recurring_expenses(
+    group_id: int,
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    require_group_member(group_id, account, db)
+    return (
+        db.query(models.RecurringExpenseTemplate)
+        .filter_by(group_id=group_id, active=True)
+        .order_by(models.RecurringExpenseTemplate.next_run_on.asc(), models.RecurringExpenseTemplate.id.asc())
+        .all()
+    )
+
+
+@app.post("/api/groups/{group_id}/recurring-expenses/{template_id}/stop")
+def stop_recurring_expense(
+    group_id: int,
+    template_id: int,
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    require_group_member(group_id, account, db)
+    tmpl = db.query(models.RecurringExpenseTemplate).get(template_id)
+    if not tmpl or tmpl.group_id != group_id:
+        raise HTTPException(404, "Recurring bill not found")
+    tmpl.active = False
+    tmpl.updated_at = datetime.utcnow()
+    db.commit()
+    notify_group_change(group_id, "recurring-stopped")
+    return {"ok": True, "message": "Monthly repeat turned off"}
 
 
 def _group_expense_or_404(db: Session, group_id: int, expense_id: int) -> models.Expense:
@@ -5577,7 +6027,7 @@ def get_group_dashboard(group_id: int, period_key: str, account: models.Account 
     for expense in expenses:
         converted = _in_group_currency(expense)
         total_spent += converted
-        category = expense.category or "General"
+        category = _normalize_category(expense.category)
         category_totals[category] = round(category_totals.get(category, 0) + converted, 2)
         ranked.append((converted, expense))
     ranked.sort(key=lambda item: item[0], reverse=True)
@@ -5820,7 +6270,7 @@ def get_personal_summary(
         converted, _rate = convert_amount(e.total_amount, src, curr)
         amt = float(converted)
         total_spent += amt
-        cat = e.category or "General"
+        cat = _normalize_category(e.category)
         category_breakdown[cat] = round(category_breakdown.get(cat, 0.0) + amt, 2)
 
     return schemas.PersonalMonthlySummaryOut(
@@ -5849,7 +6299,7 @@ def create_personal_expense(
         bill_date=payload.bill_date,
         total_amount=Decimal(str(payload.total_amount)),
         currency=_normalize_currency(payload.currency, "USD"),
-        category=payload.category or "General",
+        category=_normalize_category(payload.category),
         notes=payload.notes,
         image_path=final_path,
     )
@@ -5875,7 +6325,7 @@ def update_personal_expense(
     expense.bill_date = payload.bill_date
     expense.total_amount = Decimal(str(payload.total_amount))
     expense.currency = _normalize_currency(payload.currency, expense.currency or "USD")
-    expense.category = payload.category or expense.category or "General"
+    expense.category = _normalize_category(payload.category or expense.category)
     expense.notes = payload.notes
 
     _remember_account_vendor(db, account.id, expense.store_name, category=expense.category)

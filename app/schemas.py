@@ -386,6 +386,7 @@ class ExpenseCreate(BaseModel):
     split_with: Optional[List[int]] = None
     split_details: Optional[List[SplitDetailInput]] = None
     period_key: Optional[str] = None
+    recurring_monthly: bool = False
 
 
 class ExpenseUpdate(BaseModel):
@@ -400,6 +401,7 @@ class ExpenseUpdate(BaseModel):
     split_with: Optional[List[int]] = None
     split_details: Optional[List[SplitDetailInput]] = None
     period_key: Optional[str] = None
+    recurring_monthly: Optional[bool] = None
 
 
 class SplitOut(BaseModel):
@@ -429,6 +431,23 @@ class ExpenseOut(BaseModel):
     image_path: Optional[str]
     created_at: datetime
     splits: List[SplitOut]
+    recurring_template_id: Optional[int] = None
+    recurring_active: bool = False
+
+
+class RecurringExpenseOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    group_id: int
+    active: bool
+    store_name: str
+    total_amount: float
+    currency: str
+    category: str
+    day_of_month: int
+    next_run_on: date
+    source_expense_id: Optional[int] = None
+    last_expense_id: Optional[int] = None
 
 
 # ---------- Balances / Settlements / Currency Conversion ----------

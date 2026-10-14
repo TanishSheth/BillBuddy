@@ -64,10 +64,13 @@ except ImportError:
     np = None
     CV2_AVAILABLE = False
 
-# PSM 11: sparse text. PSM 4 merges receipt columns; PSM 6 assumes one uniform block.
-# Receipts vary between a sparse collection of fields and a single long column.
-# We run both layouts below and keep the more complete read.
-_TESSERACT_PSMS = ("--oem 3 --psm 11", "--oem 3 --psm 6")
+# Primary: PSM 11 (sparse text) + EXIF orientation only.
+# Fallback: PSM 6 (uniform block) only when the primary read looks weak.
+# OSD + always-on 180° double-pass were removed — bench showed they added
+# latency without improving field accuracy on upright phone photos.
+_PSM_PRIMARY = "--oem 3 --psm 11"
+_PSM_FALLBACK = "--oem 3 --psm 6"
+_TESSERACT_PSMS = (_PSM_PRIMARY, _PSM_FALLBACK)  # kept for any legacy callers
 
 # ---------------------------------------------------------------------------
 # OCR letter/digit confusion repair
@@ -431,7 +434,8 @@ def _prepare_screenshot_variants(bgr):
         gray = cv2.bitwise_not(gray)
     gray = _ensure_min_width(gray)
     _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return _apply_osd_correction([("screen_gray", gray), ("screen_bin", otsu)])
+    # EXIF already applied in _pil_to_bgr; skip OSD for latency.
+    return [("screen_gray", gray), ("screen_bin", otsu)]
 
 
 def _prepare_paper_variants(bgr):
@@ -448,7 +452,8 @@ def _prepare_paper_variants(bgr):
     gray = _bridge_thermal_dots(gray)
     gray = _ensure_min_width(gray)
     binary = _bridge_thermal_dots(_sauvola(gray))
-    return _apply_osd_correction([("gray", gray), ("binary", binary)])
+    # EXIF already applied in _pil_to_bgr; skip OSD for latency.
+    return [("gray", gray), ("binary", binary)]
 
 
 def _prepare_variants(image_bytes: bytes):
@@ -684,27 +689,38 @@ def looks_garbled_merchant(name: str) -> bool:
     return bad >= 2 or (len(tokens) >= 3 and bad >= 1)
 
 
-def _score_variants(variants: list) -> tuple:
-    """Run PSM passes on prepared gray/binary variants; return best 7-tuple."""
+def _score_variants(variants: list, psms: tuple[str, ...] | list[str]) -> tuple:
+    """Run the given PSM(s) on prepared gray/binary variants; return best 7-tuple."""
     best = ("", -1.0, [], [], [], [], -1.0)
     for name, variant in variants:
-        for psm in _TESSERACT_PSMS:
+        for psm in psms:
             text, conf, lines, ntok, lefts, heights, line_boxes = _tesseract_pass(variant, psm)
             score = _variant_score(text, conf, ntok)
             logger.info("OCR variant %s (%s) mean confidence %.1f score %.1f", name, psm, conf, score)
             if score > best[6]:
                 best = (text, conf, lines, lefts, heights, line_boxes, score)
-        if "bin" in name or name == "binary":
-            text, conf, lines, ntok, lefts, heights, line_boxes = _tesseract_local_line_pass(variant)
-            score = _variant_score(text, conf, ntok)
-            logger.info("OCR variant %s (local PSM 7) mean confidence %.1f score %.1f", name, conf, score)
-            if score > best[6]:
-                best = (text, conf, lines, lefts, heights, line_boxes, score)
     return best
 
 
+def _ocr_read_is_weak(text: str, conf: float, score: float) -> bool:
+    """True when the primary PSM 11 read should escalate to PSM 6."""
+    if score < 0 or not (text or "").strip():
+        return True
+    if conf < _MIN_TESSERACT_CONF:
+        return True
+    if _ocr_lacks_receipt_structure(text):
+        return True
+    if score < 8.0:
+        return True
+    return False
+
+
 def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list[int], list[dict]]:
-    """Return OCR text, confidence, line text, and token-level receipt geometry."""
+    """Return OCR text, confidence, line text, and token-level receipt geometry.
+
+    Cascade: PSM 11 + EXIF → (if weak) PSM 6 + EXIF. VLM escalation is handled
+    by the caller after field parsing.
+    """
     empty = ("", 0.0, [], [], [], [])
     status = tesseract_status()
     if not status.get("available"):
@@ -714,30 +730,21 @@ def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list
     if CV2_AVAILABLE:
         try:
             variants = _prepare_variants(image_bytes)
-            best = _score_variants(variants)
-            # Always score a 180° competitor. OSD and per-platform Tesseract disagree
-            # on upside-down thermal paper (Windows x64 vs Linux ARM); picking the
-            # higher receipt-structure score keeps local and cloud closer without AI.
-            if best[6] >= 0:
-                flipped = [
-                    (f"{name}_180", cv2.rotate(img, cv2.ROTATE_180))
-                    for name, img in variants
-                ]
-                flipped_best = _score_variants(flipped)
-                if flipped_best[6] > best[6] + 0.5:
+            best = _score_variants(variants, (_PSM_PRIMARY,))
+            if best[6] >= 0 and _ocr_read_is_weak(best[0], best[1], best[6]):
+                logger.info(
+                    "OCR primary PSM 11 weak (conf=%.1f score=%.1f) — trying PSM 6 fallback",
+                    best[1],
+                    best[6],
+                )
+                fallback = _score_variants(variants, (_PSM_FALLBACK,))
+                if fallback[6] > best[6]:
                     logger.info(
-                        "OCR kept 180° flip (score %.1f > %.1f)",
-                        flipped_best[6],
+                        "OCR kept PSM 6 fallback (score %.1f > %.1f)",
+                        fallback[6],
                         best[6],
                     )
-                    best = flipped_best
-                elif _ocr_lacks_receipt_structure(best[0]) and flipped_best[6] >= best[6]:
-                    logger.info(
-                        "OCR kept 180° flip (score %.1f >= %.1f) — upright lacked receipt anchors",
-                        flipped_best[6],
-                        best[6],
-                    )
-                    best = flipped_best
+                    best = fallback
             if best[6] >= 0:
                 return best[0], max(best[1], 0.0), best[2], best[3], best[4], best[5]
         except Exception as exc:
@@ -751,12 +758,16 @@ def _run_ocr(image_bytes: bytes) -> tuple[str, float, list[str], list[int], list
         if img.width < 1500:
             scale = 1500 / img.width
             img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
-        candidates = []
-        for psm in _TESSERACT_PSMS:
-            text, conf, lines, ntok, lefts, heights, line_boxes = _tesseract_pass(img, psm)
-            candidates.append((text, conf, lines, lefts, heights, line_boxes, _variant_score(text, conf, ntok)))
-        text, conf, lines, lefts, heights, line_boxes, _score = max(candidates, key=lambda item: item[6])
-        return text, conf, lines, lefts, heights, line_boxes
+        text, conf, lines, ntok, lefts, heights, line_boxes = _tesseract_pass(img, _PSM_PRIMARY)
+        score = _variant_score(text, conf, ntok)
+        best = (text, conf, lines, lefts, heights, line_boxes, score)
+        if _ocr_read_is_weak(text, conf, score):
+            logger.info("OCR primary PSM 11 weak (PIL path) — trying PSM 6 fallback")
+            text2, conf2, lines2, ntok2, lefts2, heights2, boxes2 = _tesseract_pass(img, _PSM_FALLBACK)
+            score2 = _variant_score(text2, conf2, ntok2)
+            if score2 > score:
+                best = (text2, conf2, lines2, lefts2, heights2, boxes2, score2)
+        return best[0], max(best[1], 0.0), best[2], best[3], best[4], best[5]
     except Exception as exc:
         logger.warning("Local OCR failed: %s", exc)
         return empty
@@ -1986,14 +1997,14 @@ _INR_MARK = re.compile(r"\b(GSTIN|CGST|SGST|IGST|HSN)\b", re.I)
 
 
 _CATEGORY_HINTS = (
-    ("Food & Dining", ("restaurant", "cafe", "coffee", "pizza", "burger", "diner", "bar")),
-    ("Groceries", ("grocery", "supermarket", "market", "trader joe", "whole foods", "walmart", "costco", "publix")),
-    ("Transit", ("uber", "lyft", "metro", "transit", "parking", "gas station", "shell", "exxon")),
-    ("Travel", ("airline", "airways", "hotel", "airbnb", "booking.com", "expedia")),
-    ("Healthcare", ("pharmacy", "clinic", "hospital", "dental", "cvs", "walgreens")),
-    ("Utilities", ("electric", "internet", "wifi", "verizon", "at&t", "comcast")),
-    ("Entertainment", ("netflix", "spotify", "cinema", "theater", "amc")),
-    ("Shopping", ("amazon", "target", "best buy", "ikea", "apple store")),
+    ("FOOD & DINING", ("restaurant", "cafe", "coffee", "pizza", "burger", "diner", "bar")),
+    ("GROCERIES", ("grocery", "supermarket", "market", "trader joe", "whole foods", "walmart", "costco", "publix")),
+    ("TRANSIT", ("uber", "lyft", "metro", "transit", "parking", "gas station", "shell", "exxon")),
+    ("TRAVEL", ("airline", "airways", "hotel", "airbnb", "booking.com", "expedia")),
+    ("HEALTHCARE", ("pharmacy", "clinic", "hospital", "dental", "cvs", "walgreens")),
+    ("UTILITIES", ("electric", "internet", "wifi", "verizon", "at&t", "comcast")),
+    ("ENTERTAINMENT", ("netflix", "spotify", "cinema", "theater", "amc")),
+    ("SHOPPING", ("amazon", "target", "best buy", "ikea", "apple store")),
 )
 
 
@@ -2002,7 +2013,7 @@ def _guess_category(text: str, store_name: str | None) -> str:
     for category, needles in _CATEGORY_HINTS:
         if any(n in haystack for n in needles):
             return category
-    return "General"
+    return "GENERAL"
 
 
 # ---------------------------------------------------------------------------
