@@ -1224,7 +1224,32 @@ label.receipt-source-btn {
 .notification-item small { display: block; margin-top: 5px; color: var(--muted); font: 10px var(--font-sans); }
 .activity-item { display: grid; grid-template-columns: 12px 1fr; gap: 10px; align-items: start; }
 .activity-dot { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--brand); }
-.insight-kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.insight-kpis {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  width: 100%;
+}
+.insight-kpis > .bb-card {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+@media (min-width: 768px) {
+  .insight-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+}
+#insightsContent,
+#insightsContent > .grid {
+  width: 100%;
+}
+#insightsContent > .grid > .bb-card {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
 .insight-label { color: var(--muted); font: 700 10px var(--font-sans); letter-spacing: .07em; text-transform: uppercase; }
 .insight-value { margin-top: 8px; color: var(--brand); font: 800 24px/1.1 var(--font-display); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .insight-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
@@ -1266,10 +1291,23 @@ label.receipt-source-btn {
   gap: 10px;
   font-size: 12px;
 }
-.category-pie-legend-row strong {
+.category-pie-legend-row strong,
+.category-pie-legend-metrics {
   color: var(--brand);
   white-space: nowrap;
   font-family: var(--font-display);
+}
+.category-pie-legend-metrics {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+.money-amount {
+  display: inline-block;
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 .category-pie-swatch {
   width: 10px;
@@ -1288,7 +1326,7 @@ label.receipt-source-btn {
 .category-pie-swatch.cat-Shopping { background: #EA580C; }
 .category-pie-swatch.cat-Healthcare { background: #0D9488; }
 .category-pie-swatch.cat-General { background: #64748B; }
-.category-chart-share { color: var(--muted); font-weight: 600; margin-left: 4px; }
+.category-chart-share { color: var(--muted); font-weight: 600; }
 html.theme-dark .category-pie-slice { stroke: var(--surface); }
 html.theme-dark .category-chart-share { color: #94a3b8; }
 html.theme-dark .category-pie-empty { fill: #1e293b; }
@@ -1340,7 +1378,6 @@ html.theme-dark .category-pie-empty { fill: #1e293b; }
     min-height: 40px;
     padding: 8px 12px;
   }
-  .insight-kpis { grid-template-columns: 1fr; gap: 12px; }
   .activity-item { grid-template-columns: 10px 1fr; }
   #paymentHistory .bb-btn-secondary { width: 100%; }
 }

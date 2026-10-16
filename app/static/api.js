@@ -525,7 +525,8 @@ function formatMoney(amount, currency = "USD") {
   const num = Number(amount || 0);
   const meta = currencyMeta(currency);
   const formatted = num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `<span class="currency-sym">${escapeHtml(meta.symbol)}</span>${formatted}`;
+  // Isolate LTR so RTL glyphs (e.g. AED د.إ) cannot reorder amount vs following %.
+  return `<span class="money-amount" dir="ltr"><span class="currency-sym">${escapeHtml(meta.symbol)}</span>${formatted}</span>`;
 }
 
 function formatMoneyText(amount, currency = "USD") {
@@ -891,7 +892,7 @@ function renderCategoryPieChart(categoryRows, totalSpent, currency) {
         <span class="category-pie-swatch ${categoryClass(name)}" style="background:${color}"></span>
         <span class="truncate">${escapeHtml(name)}</span>
       </span>
-      <strong>${formatMoney(amount, currency)} <span class="category-chart-share">${share}%</span></strong>
+      <strong class="category-pie-legend-metrics" dir="ltr">${formatMoney(amount, currency)}<span class="category-chart-share">${share}%</span></strong>
     </div>`;
   }).join("");
 

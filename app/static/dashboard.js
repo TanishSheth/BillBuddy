@@ -46,15 +46,14 @@ function setExpenseView(view, { updateUrl = true } = {}) {
   const help = $("#expenseViewHelp");
   if (help) help.innerHTML = EXPENSE_VIEW_HELP[next];
 
-  // Bottom nav: highlight Friends when that sub-tab is open, else Expenses
+  // Bottom nav: Groups / Friends match the expense-view toggles
   $$(".bottom-nav a").forEach((link) => link.classList.remove("active"));
-  const bottomKey = next === "friends" ? "friends" : "expenses";
+  const bottomKey = next === "friends" ? "friends" : "groups";
   document.querySelector(`.bottom-nav a[data-bottom-nav="${bottomKey}"]`)?.classList.add("active");
 
   if (updateUrl) {
     const url = new URL(location.href);
-    if (next === "friends") url.searchParams.set("view", "friends");
-    else url.searchParams.delete("view");
+    url.searchParams.set("view", next);
     history.replaceState({}, "", url.pathname + url.search + url.hash);
   }
 }
