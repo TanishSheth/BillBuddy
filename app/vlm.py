@@ -118,9 +118,10 @@ def extract_receipt_data(
     """
     Cascaded extraction:
       1. Local OCR (PSM 11 + EXIF, with PSM 6 only if that read is weak).
-      2. If OCR is confident and fields look complete → keep OCR (skip VLM).
-      3. If OCR is weak/missing fields and an API key is configured → VLM.
-      4. Without a key, keep OCR-only.
+      2. Without an API key → keep OCR-only.
+      3. With an API key → always run VLM (temperature 0) so Personal/Group
+         and repeat scans of the same photo stay consistent. OCR remains the
+         fallback if VLM fails, and still supplies the store fingerprint.
     """
     from .ocr_extractor import extract_receipt_data_ocr
 
@@ -131,25 +132,19 @@ def extract_receipt_data(
     missing = _missing_scan_fields(ocr_result)
     ocr_ok = ocr_confident and not missing
 
-    if ocr_ok:
-        logger.info(
-            "Keeping local OCR result (confident, no missing fields; source=%s)",
-            getattr(config, "source", "?"),
-        )
-        return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
-
     if not config.api_key:
-        logger.warning(
-            "OCR weak (missing=%s, confident=%s) and no API key resolved (source=%s)",
-            missing,
-            ocr_confident,
-            getattr(config, "source", "?"),
-        )
+        if not ocr_ok:
+            logger.warning(
+                "OCR weak (missing=%s, confident=%s) and no API key resolved (source=%s)",
+                missing,
+                ocr_confident,
+                getattr(config, "source", "?"),
+            )
         return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
     try:
         logger.info(
-            "OCR weak — VLM fallback (%s/%s, source=%s, ocr_confident=%s, missing=%s)",
+            "VLM extract (%s/%s, source=%s, ocr_confident=%s, missing=%s)",
             config.provider,
             config.model,
             getattr(config, "source", "?"),
@@ -226,6 +221,8 @@ def _extract_google_once(image_bytes: bytes, mime_type: str, api_key: str, model
         config={
             "response_mime_type": "application/json",
             "response_schema": _VlmReceiptSchema,
+            # Lock sampling so the same receipt image does not invent new totals/merchants.
+            "temperature": 0.0,
         },
     )
     return json.loads(response.text)
@@ -294,6 +291,7 @@ def _extract_openai_compatible(
         ],
         "response_format": {"type": "json_object"},
         "max_tokens": 500,
+        "temperature": 0,
     }
     with httpx.Client(timeout=60.0) as client:
         res = client.post(
@@ -311,6 +309,7 @@ def _extract_anthropic(image_bytes: bytes, mime_type: str, api_key: str, model: 
     payload = {
         "model": model,
         "max_tokens": 500,
+        "temperature": 0,
         "messages": [
             {
                 "role": "user",
