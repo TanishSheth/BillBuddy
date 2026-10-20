@@ -11,6 +11,7 @@ import smtplib
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr, parseaddr
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +25,19 @@ def _smtp_settings() -> tuple[str, int, str, str, str, bool]:
     port = int(os.environ.get("SMTP_PORT", "587"))
     user = os.environ.get("SMTP_USER", "").strip()
     password = os.environ.get("SMTP_PASSWORD", "")
-    from_addr = os.environ.get("SMTP_FROM", user or "noreply@sharesquad.local")
+    from_addr = os.environ.get("SMTP_FROM", user or "noreply@sharesquad.local").strip()
     use_tls = os.environ.get("SMTP_TLS", "true").lower() in ("1", "true", "yes")
     return host, port, user, password, from_addr, use_tls
+
+
+def _from_header(from_addr: str) -> str:
+    """Prefer a clear product display name: ShareSquad <addr@…>."""
+    display_name = (os.environ.get("SMTP_FROM_NAME") or "ShareSquad").strip() or "ShareSquad"
+    name, addr = parseaddr(from_addr)
+    address = (addr or from_addr).strip()
+    # If SMTP_FROM already includes a display name, keep it unless empty.
+    label = (name or display_name).strip() or display_name
+    return formataddr((label, address))
 
 
 def _send_message(msg: MIMEMultipart, to_email: str) -> None:
@@ -34,7 +45,9 @@ def _send_message(msg: MIMEMultipart, to_email: str) -> None:
     if not host:
         raise RuntimeError("SMTP is not configured")
 
-    msg["From"] = from_addr
+    _name, envelope_from = parseaddr(from_addr)
+    envelope_from = (envelope_from or from_addr).strip()
+    msg["From"] = _from_header(from_addr)
     msg["To"] = to_email
 
     # Keep invites snappy when SMTP is misconfigured or unreachable (QA: ~30s hangs).
@@ -44,7 +57,7 @@ def _send_message(msg: MIMEMultipart, to_email: str) -> None:
             server.starttls()
         if user and password:
             server.login(user, password)
-        server.sendmail(from_addr, [to_email], msg.as_string())
+        server.sendmail(envelope_from, [to_email], msg.as_string())
 
 
 def _period_label(period_key: str) -> str:
