@@ -194,9 +194,12 @@ def test_camera_capture_hooks_present():
     personal_js = open(os.path.join(static, "personal.js"), encoding="utf-8").read()
     api_js = open(os.path.join(static, "api.js"), encoding="utf-8").read()
     group_html = open(os.path.join(static, "group.html"), encoding="utf-8").read()
-    assert "bindReceiptCamera" in group_js and "onCapture: handleReceiptUpload" in group_js
-    assert "bindReceiptCamera" in personal_js and "onCapture: handleReceiptUpload" in personal_js
+    assert "bindReceiptCamera" in group_js and "fromCamera: true" in group_js
+    assert "bindReceiptCamera" in personal_js and "fromCamera: true" in personal_js
+    assert "onCapture:" in group_js and "handleReceiptUpload" in group_js
+    assert "onCapture:" in personal_js and "handleReceiptUpload" in personal_js
     assert "prepareReceiptFile" in api_js and "canvas.toBlob" in api_js and "image/jpeg" in api_js
+    assert "_sniffImageSize" in api_js and "fromCamera" in api_js
     assert "mediaDevices" not in api_js
     assert 'id="liveCameraModal"' not in group_html
     assert 'id="pickCameraBtn"' in group_html

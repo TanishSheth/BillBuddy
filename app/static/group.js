@@ -1477,7 +1477,7 @@ function setScanBusy(on) {
   $("#dropzone")?.classList.toggle("is-busy", on);
 }
 
-async function handleReceiptUpload(file) {
+async function handleReceiptUpload(file, opts = {}) {
   if (state.isDraft) { ShareSquad.showToast("Invite at least one member before adding shared expenses", "info"); return; }
   if (!file) return;
   if (!ShareSquad.isReceiptImageFile(file)) {
@@ -1488,7 +1488,8 @@ async function handleReceiptUpload(file) {
   setScanBusy(true);
   let prepared = file;
   try {
-    prepared = await ShareSquad.prepareReceiptFile(file);
+    // Camera captures need harder downscale — gallery picks are often already shrunk.
+    prepared = await ShareSquad.prepareReceiptFile(file, opts);
   } catch (err) {
     setScanBusy(false);
     ShareSquad.showToast(err.message || "Could not read that photo.", "error");
@@ -1502,7 +1503,7 @@ async function handleReceiptUpload(file) {
   preview.classList.remove("hidden");
 
   try {
-    const data = await ShareSquad.uploadReceipt(`/groups/${gid()}/receipts/upload`, prepared);
+    const data = await ShareSquad.uploadReceipt(`/groups/${gid()}/receipts/upload`, prepared, opts);
 
     state.currentUploadId = data.upload_id;
     state.editingExpenseId = null;
@@ -1662,18 +1663,27 @@ async function handleReceiptUpload(file) {
   const galleryInput = $("#fileInputGallery");
   const cameraInput = $("#fileInputCamera");
   dropzone.addEventListener("click", () => galleryInput?.click());
-  galleryInput?.addEventListener("change", (e) => {
-    handleReceiptUpload(e.target.files[0]);
-    e.target.value = "";
+  galleryInput?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    // Clear only after we finish — clearing early can drop camera/gallery temp files mid-read.
+    try {
+      if (file) await handleReceiptUpload(file);
+    } finally {
+      e.target.value = "";
+    }
   });
-  cameraInput?.addEventListener("change", (e) => {
-    handleReceiptUpload(e.target.files[0]);
-    e.target.value = "";
+  cameraInput?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    try {
+      if (file) await handleReceiptUpload(file, { fromCamera: true });
+    } finally {
+      e.target.value = "";
+    }
   });
   ShareSquad.bindReceiptCamera({
     openBtn: "#pickCameraBtn",
     fileInput: "#fileInputCamera",
-    onCapture: handleReceiptUpload,
+    onCapture: (file) => handleReceiptUpload(file, { fromCamera: true }),
   });
   $("#renameGroupBtn")?.addEventListener("click", (e) => {
     e.preventDefault();

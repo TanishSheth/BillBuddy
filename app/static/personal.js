@@ -239,7 +239,7 @@ function setScanBusy(on) {
   $("#dropzone")?.classList.toggle("is-busy", on);
 }
 
-async function handleReceiptUpload(file) {
+async function handleReceiptUpload(file, opts = {}) {
   if (!file) return;
   if (!ShareSquad.isReceiptImageFile(file)) {
     ShareSquad.showToast("Please choose a photo or image file.", "error");
@@ -249,7 +249,8 @@ async function handleReceiptUpload(file) {
 
   let prepared = file;
   try {
-    prepared = await ShareSquad.prepareReceiptFile(file);
+    // Camera captures need harder downscale — gallery picks are often already shrunk.
+    prepared = await ShareSquad.prepareReceiptFile(file, opts);
   } catch (err) {
     setScanBusy(false);
     ShareSquad.showToast(err.message || "Could not read that photo.", "error");
@@ -263,7 +264,7 @@ async function handleReceiptUpload(file) {
   preview.classList.remove("hidden");
 
   try {
-    const data = await ShareSquad.uploadReceipt("/personal/receipts/upload", prepared);
+    const data = await ShareSquad.uploadReceipt("/personal/receipts/upload", prepared, opts);
     $("#uploadId").value = data.upload_id;
     if (data.extraction) {
       const ex = data.extraction;
@@ -381,18 +382,27 @@ async function submitExpenseForm(e) {
   const galleryInput = $("#receiptGalleryInput");
   const cameraInput = $("#receiptCameraInput");
   dropzone.addEventListener("click", () => galleryInput?.click());
-  galleryInput?.addEventListener("change", (e) => {
-    handleReceiptUpload(e.target.files[0]);
-    e.target.value = "";
+  galleryInput?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    // Clear only after we finish — clearing early can drop camera temp files mid-read.
+    try {
+      if (file) await handleReceiptUpload(file);
+    } finally {
+      e.target.value = "";
+    }
   });
-  cameraInput?.addEventListener("change", (e) => {
-    handleReceiptUpload(e.target.files[0]);
-    e.target.value = "";
+  cameraInput?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    try {
+      if (file) await handleReceiptUpload(file, { fromCamera: true });
+    } finally {
+      e.target.value = "";
+    }
   });
   ShareSquad.bindReceiptCamera({
     openBtn: "#pickCameraBtn",
     fileInput: "#receiptCameraInput",
-    onCapture: handleReceiptUpload,
+    onCapture: (file) => handleReceiptUpload(file, { fromCamera: true }),
   });
 
   dropzone.addEventListener("dragover", (e) => {

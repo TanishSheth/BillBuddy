@@ -569,25 +569,104 @@ function isReceiptImageFile(file) {
   return /\.(jpe?g|png|webp|gif|bmp|heic|heif|tif{1,2})$/i.test(file.name || "");
 }
 
+function _isPhoneClient() {
+  if (typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches) return true;
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+}
+
+/** Read width/height from JPEG/PNG headers without decoding pixels (cheap). */
+async function _sniffImageSize(file) {
+  try {
+    const head = new Uint8Array(await file.slice(0, 65536).arrayBuffer());
+    // PNG: IHDR after 8-byte signature
+    if (head.length >= 24 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) {
+      const w = (head[16] << 24) | (head[17] << 16) | (head[18] << 8) | head[19];
+      const h = (head[20] << 24) | (head[21] << 16) | (head[22] << 8) | head[23];
+      if (w > 0 && h > 0) return { w, h };
+    }
+    // JPEG: scan for SOF0/SOF2
+    if (head.length > 4 && head[0] === 0xff && head[1] === 0xd8) {
+      let i = 2;
+      while (i + 9 < head.length) {
+        if (head[i] !== 0xff) { i += 1; continue; }
+        const marker = head[i + 1];
+        if (marker === 0xd9 || marker === 0xda) break;
+        const size = (head[i + 2] << 8) | head[i + 3];
+        if (size < 2) break;
+        // SOF0..SOF3, SOF5..SOF7, SOF9..SOF11, SOF13..SOF15
+        if (
+          (marker >= 0xc0 && marker <= 0xc3)
+          || (marker >= 0xc5 && marker <= 0xc7)
+          || (marker >= 0xc9 && marker <= 0xcb)
+          || (marker >= 0xcd && marker <= 0xcf)
+        ) {
+          const h = (head[i + 5] << 8) | head[i + 6];
+          const w = (head[i + 7] << 8) | head[i + 8];
+          if (w > 0 && h > 0) return { w, h };
+          break;
+        }
+        i += 2 + size;
+      }
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return null;
+}
+
 async function _decodeReceiptBitmap(file, maxEdge) {
-  // Prefer decode-time resize when the browser supports it — avoids holding a
-  // full 12MP phone photo in memory (common "not enough memory" crash).
-  // Only one edge is set so the browser keeps aspect ratio.
+  // Prefer decode-time resize — avoids holding a full 12MP camera frame in RAM.
+  // Gallery picks are often already downsized by the OS; camera captures are not.
+  const dims = await _sniffImageSize(file);
+  const resizeOpts = { resizeQuality: "medium" };
+  try {
+    resizeOpts.imageOrientation = "from-image";
+  } catch (_) {
+    /* older browsers */
+  }
+  if (dims) {
+    if (dims.w >= dims.h) resizeOpts.resizeWidth = maxEdge;
+    else resizeOpts.resizeHeight = maxEdge;
+  } else if (_isPhoneClient()) {
+    // Phone camera receipts are usually portrait — cap height when size unknown.
+    resizeOpts.resizeHeight = maxEdge;
+  } else {
+    resizeOpts.resizeWidth = maxEdge;
+  }
+
   if (typeof createImageBitmap === "function") {
     try {
-      return await createImageBitmap(file, {
-        resizeWidth: maxEdge,
-        resizeQuality: "high",
-      });
+      return await createImageBitmap(file, resizeOpts);
+    } catch (_) {
+      /* try the other edge, still resized — never full-res on phones */
+    }
+    const alt = { ...resizeOpts };
+    if (alt.resizeWidth) {
+      delete alt.resizeWidth;
+      alt.resizeHeight = maxEdge;
+    } else {
+      delete alt.resizeHeight;
+      alt.resizeWidth = maxEdge;
+    }
+    try {
+      return await createImageBitmap(file, alt);
     } catch (_) {
       /* fall through */
     }
-    try {
-      return await createImageBitmap(file);
-    } catch (_) {
-      /* fall through to <img> path */
+    // Desktop-only last resort: full decode. Phones must not do this.
+    if (!_isPhoneClient()) {
+      try {
+        return await createImageBitmap(file);
+      } catch (_) {
+        /* fall through to <img> */
+      }
     }
   }
+
+  if (_isPhoneClient()) {
+    throw new Error("MEMORY");
+  }
+
   const url = URL.createObjectURL(file);
   try {
     const img = await new Promise((resolve, reject) => {
@@ -602,50 +681,108 @@ async function _decodeReceiptBitmap(file, maxEdge) {
   }
 }
 
-async function prepareReceiptFile(file) {
-  if (!file) return file;
-  if (!isReceiptImageFile(file)) return file;
-  // Cap harder on phones — full-res camera JPEGs routinely OOM mid-preview.
-  const coarsePointer = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
-  const maxEdge = coarsePointer ? 1280 : 1600;
-  const maxBytes = coarsePointer ? 900 * 1024 : 1.2 * 1024 * 1024;
-  try {
-    const bitmap = await _decodeReceiptBitmap(file, maxEdge);
-    const srcW = bitmap.width || bitmap.naturalWidth || 0;
-    const srcH = bitmap.height || bitmap.naturalHeight || 0;
-    if (!srcW || !srcH) {
-      if (bitmap.close) bitmap.close();
-      return file;
-    }
-    const scale = Math.min(1, maxEdge / Math.max(srcW, srcH));
-    const outW = Math.max(1, Math.round(srcW * scale));
-    const outH = Math.max(1, Math.round(srcH * scale));
-    // Already small enough and already JPEG — keep the original bytes.
-    const type = (file.type || "").toLowerCase();
-    if (scale >= 1 && file.size <= maxBytes && (type === "image/jpeg" || type === "image/jpg")) {
-      if (bitmap.close) bitmap.close();
-      return file;
-    }
-    const canvas = document.createElement("canvas");
-    canvas.width = outW;
-    canvas.height = outH;
-    const ctx = canvas.getContext("2d", { alpha: false });
-    ctx.drawImage(bitmap, 0, 0, outW, outH);
+async function _compressReceiptAttempt(file, maxEdge, quality) {
+  const bitmap = await _decodeReceiptBitmap(file, maxEdge);
+  const srcW = bitmap.width || bitmap.naturalWidth || 0;
+  const srcH = bitmap.height || bitmap.naturalHeight || 0;
+  if (!srcW || !srcH) {
     if (bitmap.close) bitmap.close();
-    const quality = file.size > 4 * 1024 * 1024 ? 0.72 : 0.82;
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
-    canvas.width = 0;
-    canvas.height = 0;
-    if (!blob) return file;
-    const base = (file.name || "receipt").replace(/\.[^.]+$/, "") || "receipt";
-    return new File([blob], `${base}.jpg`, { type: "image/jpeg", lastModified: Date.now() });
-  } catch (err) {
-    const msg = String(err?.message || err || "");
-    if (/memory|allocat/i.test(msg)) {
-      throw new Error("That photo is too large for this device. Try again with a smaller picture, or move farther from the receipt.");
-    }
-    return file;
+    throw new Error("Could not read that photo.");
   }
+  const scale = Math.min(1, maxEdge / Math.max(srcW, srcH));
+  const outW = Math.max(1, Math.round(srcW * scale));
+  const outH = Math.max(1, Math.round(srcH * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = outW;
+  canvas.height = outH;
+  try {
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) throw new Error("MEMORY");
+    ctx.drawImage(bitmap, 0, 0, outW, outH);
+  } finally {
+    if (bitmap.close) bitmap.close();
+  }
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+  canvas.width = 0;
+  canvas.height = 0;
+  if (!blob) throw new Error("MEMORY");
+  const base = (file.name || "receipt").replace(/\.[^.]+$/, "") || "receipt";
+  const out = new File([blob], `${base}.jpg`, { type: "image/jpeg", lastModified: Date.now() });
+  out._sharesquadPrepared = true;
+  return out;
+}
+
+/**
+ * Downscale/compress receipt images before preview + upload.
+ * @param {File} file
+ * @param {{ fromCamera?: boolean }} [opts] - camera captures need harder limits:
+ *   the OS photo picker often already shrinks gallery images, but the camera
+ *   returns a full-sensor frame while the WebView is still memory-tight.
+ */
+async function prepareReceiptFile(file, opts = {}) {
+  if (!file) return file;
+  if (file._sharesquadPrepared) return file;
+  if (!isReceiptImageFile(file)) return file;
+
+  const fromCamera = Boolean(opts.fromCamera);
+  const phone = _isPhoneClient();
+  const type = (file.type || "").toLowerCase();
+  const maxBytes = phone || fromCamera ? 700 * 1024 : 1.2 * 1024 * 1024;
+
+  // Already a small JPEG — skip decode entirely (common after a prior prepare).
+  if ((type === "image/jpeg" || type === "image/jpg") && file.size <= maxBytes) {
+    const dims = await _sniffImageSize(file);
+    const edgeCap = phone || fromCamera ? 1280 : 1600;
+    if (dims && Math.max(dims.w, dims.h) <= edgeCap) {
+      file._sharesquadPrepared = true;
+      return file;
+    }
+    if (!dims && file.size <= 400 * 1024) {
+      file._sharesquadPrepared = true;
+      return file;
+    }
+  }
+
+  // Camera return path: give the OS a tick to release the camera app’s RAM
+  // before we allocate decode buffers.
+  if (fromCamera || phone) {
+    await new Promise((r) => setTimeout(r, fromCamera ? 120 : 0));
+  }
+
+  const attempts = (phone || fromCamera)
+    ? [
+        { maxEdge: fromCamera ? 960 : 1024, quality: 0.68 },
+        { maxEdge: 720, quality: 0.62 },
+        { maxEdge: 560, quality: 0.55 },
+      ]
+    : [
+        { maxEdge: 1600, quality: 0.82 },
+        { maxEdge: 1200, quality: 0.72 },
+      ];
+
+  let lastErr;
+  for (const attempt of attempts) {
+    try {
+      return await _compressReceiptAttempt(file, attempt.maxEdge, attempt.quality);
+    } catch (err) {
+      lastErr = err;
+      const msg = String(err?.message || err || "");
+      if (!/memory|allocat|MEMORY/i.test(msg)) {
+        // Non-memory failure: still try a smaller pass once, then stop.
+        continue;
+      }
+    }
+  }
+
+  const msg = String(lastErr?.message || lastErr || "");
+  if (/memory|allocat|MEMORY/i.test(msg)) {
+    throw new Error(
+      fromCamera
+        ? "Camera photo was too large for this phone. Try again, hold a bit farther away, or pick the photo from your gallery."
+        : "That photo is too large for this device. Try a smaller picture, or pick it from your gallery."
+    );
+  }
+  throw new Error(lastErr?.message || "Could not read that photo.");
 }
 
 async function waitForScanJob(jobId, { timeoutMs = 120000, intervalMs = 700 } = {}) {
@@ -676,8 +813,9 @@ async function waitForScanJob(jobId, { timeoutMs = 120000, intervalMs = 700 } = 
   throw new Error("Receipt scan timed out. Enter the details manually, or try again.");
 }
 
-async function uploadReceipt(path, file) {
-  const prepared = await prepareReceiptFile(file);
+async function uploadReceipt(path, file, prepareOpts = {}) {
+  // Skip a second compress when the caller already prepared (camera path).
+  const prepared = file?._sharesquadPrepared ? file : await prepareReceiptFile(file, prepareOpts);
   let lastErr;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const formData = new FormData();
