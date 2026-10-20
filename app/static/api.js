@@ -415,7 +415,9 @@ function bindLogoutButton() {
   button.addEventListener("click", () => {
     removeToken();
     removeStoredGroupId();
-    window.location.href = "/login";
+    allowLoginOnce();
+    // Replace so browser Back cannot return to a signed-in screen after logout.
+    window.location.replace("/login.html");
   });
 }
 
@@ -440,11 +442,11 @@ async function api(path, opts = {}) {
     
     if (res.status === 401) {
       // If we are already on login or reset password page, do not infinite redirect
-      if (!window.location.pathname.includes("login.html") && !window.location.pathname.includes("reset-password.html")) {
+      if (!isLoginPath() && !window.location.pathname.includes("reset-password.html")) {
         removeToken();
         showToast("Session expired. Please sign in again.", "error");
         setTimeout(() => {
-          window.location.href = "/login.html";
+          goToLogin({ replace: true, keepNext: true });
         }, 800);
       }
       throw new Error("Session expired. Please sign in.");
@@ -567,30 +569,81 @@ function isReceiptImageFile(file) {
   return /\.(jpe?g|png|webp|gif|bmp|heic|heif|tif{1,2})$/i.test(file.name || "");
 }
 
+async function _decodeReceiptBitmap(file, maxEdge) {
+  // Prefer decode-time resize when the browser supports it — avoids holding a
+  // full 12MP phone photo in memory (common "not enough memory" crash).
+  // Only one edge is set so the browser keeps aspect ratio.
+  if (typeof createImageBitmap === "function") {
+    try {
+      return await createImageBitmap(file, {
+        resizeWidth: maxEdge,
+        resizeQuality: "high",
+      });
+    } catch (_) {
+      /* fall through */
+    }
+    try {
+      return await createImageBitmap(file);
+    } catch (_) {
+      /* fall through to <img> path */
+    }
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("Could not read that photo."));
+      el.src = url;
+    });
+    return img;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function prepareReceiptFile(file) {
   if (!file) return file;
-  const type = (file.type || "").toLowerCase();
-  if (type.includes("heic") || type.includes("heif")) return file;
-  if (!type.startsWith("image/") && !isReceiptImageFile(file)) return file;
+  if (!isReceiptImageFile(file)) return file;
+  // Cap harder on phones — full-res camera JPEGs routinely OOM mid-preview.
+  const coarsePointer = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+  const maxEdge = coarsePointer ? 1280 : 1600;
+  const maxBytes = coarsePointer ? 900 * 1024 : 1.2 * 1024 * 1024;
   try {
-    const bitmap = await createImageBitmap(file);
-    const maxEdge = 1600;
-    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
-    if (scale >= 1 && file.size < 1.2 * 1024 * 1024) {
+    const bitmap = await _decodeReceiptBitmap(file, maxEdge);
+    const srcW = bitmap.width || bitmap.naturalWidth || 0;
+    const srcH = bitmap.height || bitmap.naturalHeight || 0;
+    if (!srcW || !srcH) {
+      if (bitmap.close) bitmap.close();
+      return file;
+    }
+    const scale = Math.min(1, maxEdge / Math.max(srcW, srcH));
+    const outW = Math.max(1, Math.round(srcW * scale));
+    const outH = Math.max(1, Math.round(srcH * scale));
+    // Already small enough and already JPEG — keep the original bytes.
+    const type = (file.type || "").toLowerCase();
+    if (scale >= 1 && file.size <= maxBytes && (type === "image/jpeg" || type === "image/jpg")) {
       if (bitmap.close) bitmap.close();
       return file;
     }
     const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    canvas.width = outW;
+    canvas.height = outH;
+    const ctx = canvas.getContext("2d", { alpha: false });
+    ctx.drawImage(bitmap, 0, 0, outW, outH);
     if (bitmap.close) bitmap.close();
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+    const quality = file.size > 4 * 1024 * 1024 ? 0.72 : 0.82;
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+    canvas.width = 0;
+    canvas.height = 0;
     if (!blob) return file;
-    const base = (file.name || "receipt").replace(/\.[^.]+$/, "");
-    return new File([blob], `${base}.jpg`, { type: "image/jpeg" });
+    const base = (file.name || "receipt").replace(/\.[^.]+$/, "") || "receipt";
+    return new File([blob], `${base}.jpg`, { type: "image/jpeg", lastModified: Date.now() });
   } catch (err) {
+    const msg = String(err?.message || err || "");
+    if (/memory|allocat/i.test(msg)) {
+      throw new Error("That photo is too large for this device. Try again with a smaller picture, or move farther from the receipt.");
+    }
     return file;
   }
 }
@@ -673,82 +726,221 @@ document.addEventListener("dragstart", (event) => {
 });
 
 function bindReceiptCamera(opts) {
-  const modal = $(opts.modalId || "#liveCameraModal");
-  const video = $(opts.videoId || "#liveCameraVideo");
-  const captureBtn = $(opts.captureBtn || "#liveCameraCapture");
-  const cancelBtn = $(opts.cancelBtn || "#liveCameraCancel");
-  const fallbackBtn = $(opts.fallbackBtn || "#liveCameraFallback");
+  // Always use the native camera / file picker (capture=environment). The old
+  // in-app live-preview modal could not focus or use flash and produced poor
+  // scans; the system camera app is sharper and supports flash.
   const openBtn = $(opts.openBtn);
   const fileInput = $(opts.fileInput);
-  let stream = null;
-
-  async function stopCamera() {
-    if (stream) {
-      stream.getTracks().forEach((t) => t.stop());
-      stream = null;
-    }
-    if (video) video.srcObject = null;
-    modal?.classList.add("hidden");
-  }
-
-  async function startCamera() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      fileInput?.click();
-      return;
-    }
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-      });
-      if (video) {
-        video.srcObject = stream;
-        await video.play().catch(() => {});
-      }
-      modal?.classList.remove("hidden");
-    } catch (err) {
-      showToast("Could not open the in-app camera. Using the phone camera instead.", "info");
-      fileInput?.click();
-    }
-  }
-
   openBtn?.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    startCamera();
-  });
-  cancelBtn?.addEventListener("click", (e) => {
-    e.preventDefault();
-    stopCamera();
-  });
-  fallbackBtn?.addEventListener("click", (e) => {
-    e.preventDefault();
-    stopCamera();
-    fileInput?.click();
-  });
-  captureBtn?.addEventListener("click", async (e) => {
-    e.preventDefault();
-    if (!video || !video.videoWidth) {
-      showToast("Camera is not ready yet. Try again.", "info");
+    if (!fileInput) {
+      showToast("Camera is not available on this device.", "error");
       return;
     }
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext("2d").drawImage(video, 0, 0);
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
-    await stopCamera();
-    if (!blob) {
-      showToast("Could not capture the photo.", "error");
+    fileInput.click();
+  });
+}
+
+const RETURN_PATH_KEY = "sharesquad_return_path";
+
+function isLoginPath(pathname = location.pathname) {
+  const path = (pathname || "/").replace(/\/+$/, "") || "/";
+  return path === "/login" || path === "/login.html";
+}
+
+function isAuthedAppPath(pathname = location.pathname) {
+  const path = (pathname || "/").replace(/\/+$/, "") || "/";
+  if (isLoginPath(path) || path === "/" || path === "/landing" || path === "/landing.html") return false;
+  // Public marketing / legal / join pages stay reachable without a session.
+  if (/\/(about|contact|help|privacy|terms|receipt-scanning|shared-groups|clear-balances|friend-join|reset-password)(?:\.html)?$/.test(path)) {
+    return false;
+  }
+  if (/\/(join|quick-join)(?:\.html)?$/.test(path)) return false;
+  return true;
+}
+
+function isBackForwardNavigation() {
+  try {
+    const nav = performance.getEntriesByType("navigation")[0];
+    if (nav && nav.type === "back_forward") return true;
+  } catch (_) {
+    /* ignore */
+  }
+  try {
+    // Legacy PerformanceNavigation.TYPE_BACK_FORWARD === 2
+    if (performance.navigation && performance.navigation.type === 2) return true;
+  } catch (_) {
+    /* ignore */
+  }
+  return false;
+}
+
+function safeAppRedirect(rawNext) {
+  const next = String(rawNext || "").trim();
+  // Never bounce signed-in users to the marketing home page.
+  if (!next || next === "/" || next === "/landing.html" || next.startsWith("//") || !next.startsWith("/")) {
+    return "/app";
+  }
+  if (isLoginPath(next.split("?")[0])) return "/app";
+  return next;
+}
+
+function goToLogin({ replace = true, keepNext = false, search = "" } = {}) {
+  allowLoginOnce();
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  if (keepNext && !params.has("next") && !isLoginPath()) {
+    const here = `${location.pathname}${location.search}`;
+    if (here && here !== "/" && !here.startsWith("/landing")) params.set("next", here);
+  }
+  const qs = params.toString();
+  const url = `/login.html${qs ? `?${qs}` : ""}`;
+  if (replace) location.replace(url);
+  else location.href = url;
+}
+
+const ALLOW_LOGIN_KEY = "sharesquad_allow_login";
+
+function allowLoginOnce() {
+  try {
+    sessionStorage.setItem(ALLOW_LOGIN_KEY, "1");
+  } catch (_) {
+    /* private mode */
+  }
+}
+
+function consumeAllowLogin() {
+  try {
+    const ok = sessionStorage.getItem(ALLOW_LOGIN_KEY) === "1";
+    if (ok) sessionStorage.removeItem(ALLOW_LOGIN_KEY);
+    return ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * While signed in, block accidental return to login via browser Back / bfcache.
+ * Intentional visits still work: Sign out, typing /login or /login.html, or following a login link.
+ */
+function initLoginHistoryGuard() {
+  const bounceAway = () => {
+    if (!getToken() || !isLoginPath()) return false;
+    // Sign out (and similar) set a one-shot allow flag so login stays reachable.
+    if (consumeAllowLogin()) return false;
+    const next = new URLSearchParams(location.search).get("next");
+    location.replace(safeAppRedirect(next));
+    return true;
+  };
+
+  if (isLoginPath()) {
+    // Only block real Back/Forward (or bfcache). Never bounce typed /login or Sign out.
+    if (isBackForwardNavigation()) bounceAway();
+    window.addEventListener("pageshow", (event) => {
+      if (!getToken() || !event.persisted) return;
+      bounceAway();
+    });
+    return;
+  }
+
+  // After logout, a bfcache Back into an app page must not stay open as if signed in.
+  if (!isAuthedAppPath()) return;
+  window.addEventListener("pageshow", (event) => {
+    if (getToken() || !event.persisted) return;
+    allowLoginOnce();
+    goToLogin({ replace: true });
+  });
+}
+
+function currentAppPath() {
+  // Prefer the live group tab from the DOM when the address bar is briefly stale
+  // (e.g. right after a swipe before replaceState lands).
+  try {
+    if (/\/group(?:\.html)?$/.test(location.pathname)) {
+      const active = document.querySelector(".tab-btn.active[data-tab]");
+      if (active?.dataset?.tab) {
+        const url = new URL(location.href);
+        if (active.dataset.tab !== "balances") url.searchParams.set("tab", active.dataset.tab);
+        else url.searchParams.delete("tab");
+        return `${url.pathname}${url.search}${url.hash}`;
+      }
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return `${location.pathname}${location.search}${location.hash}`;
+}
+
+function rememberReturnPath(url = currentAppPath()) {
+  try {
+    sessionStorage.setItem(RETURN_PATH_KEY, url);
+  } catch (_) {
+    /* private mode / quota */
+  }
+}
+
+function consumeReturnPath() {
+  try {
+    const value = sessionStorage.getItem(RETURN_PATH_KEY);
+    sessionStorage.removeItem(RETURN_PATH_KEY);
+    return value;
+  } catch (_) {
+    return null;
+  }
+}
+
+function navigateWithReturn(url) {
+  // Don't overwrite the saved origin when already on Settings / Account.
+  if (!/\/settings(?:\.html)?(?:$|[?#])/.test(location.pathname + location.search)) {
+    const live = currentAppPath();
+    // Sync the live path (e.g. group ?tab=insights) into this history entry so
+    // browser Back from Settings restores the same screen as the in-app Back.
+    try {
+      const here = `${location.pathname}${location.search}${location.hash}`;
+      if (live !== here) history.replaceState(history.state, "", live);
+    } catch (_) {
+      /* ignore */
+    }
+    rememberReturnPath(live);
+  }
+  location.href = url;
+}
+
+function bindSmartBack(el, fallback = "/index.html") {
+  // Settings-only: return to the saved page (e.g. group Insights). Never use
+  // history.back() — that traps people between group tabs / settings.
+  if (!el || el.dataset.smartBackBound === "1") return;
+  el.dataset.smartBackBound = "1";
+  el.addEventListener("click", (e) => {
+    e.preventDefault();
+    const stored = consumeReturnPath();
+    const here = currentAppPath();
+    if (stored && stored !== here && !/\/settings(?:\.html)?(?:$|[?#])/.test(stored)) {
+      location.href = stored;
       return;
     }
-    const file = new File([blob], "receipt.jpg", { type: "image/jpeg" });
-    if (typeof opts.onCapture === "function") opts.onCapture(file);
+    location.href = el.getAttribute("href") || fallback;
   });
+}
+
+function initSmartNavigation() {
+  // Remember the current screen when opening Settings / Account.
+  document.querySelectorAll('a[href="/settings.html"], a[href="/settings"]').forEach((link) => {
+    if (link.dataset.returnNavBound === "1") return;
+    link.dataset.returnNavBound = "1";
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      navigateWithReturn("/settings.html");
+    });
+  });
+  // Smart back applies ONLY on the Settings page. Group / Personal / Friends
+  // / Quick-split back arrows keep their plain href (Groups list, Friends, …).
+  if (!/\/settings(?:\.html)?$/.test(location.pathname)) return;
+  const back = document.getElementById("backLink");
+  if (back) {
+    const fallback = back.getAttribute("href") || "/index.html";
+    bindSmartBack(back, fallback);
+  }
 }
 
 const CATEGORIES = [
@@ -1142,14 +1334,6 @@ document.addEventListener("focusin", (event) => {
   if (/^0(?:\.0+)?$/.test(field.value.trim())) field.value = "";
   else if (field.value) field.select();
 });
-if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", renderDemoBanner, { once: true });
-else renderDemoBanner();
-try {
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-    if (getThemePreference() === "system") applyTheme("system");
-  });
-} catch (_) {}
-
 window.ShareSquad = {
   $,
   $$,
@@ -1174,6 +1358,17 @@ window.ShareSquad = {
   uploadReceipt,
   setAuthImage,
   bindReceiptCamera,
+  rememberReturnPath,
+  consumeReturnPath,
+  navigateWithReturn,
+  bindSmartBack,
+  initSmartNavigation,
+  isLoginPath,
+  isBackForwardNavigation,
+  safeAppRedirect,
+  goToLogin,
+  allowLoginOnce,
+  initLoginHistoryGuard,
   formatMoney,
   formatMoneyText,
   formatDate,
@@ -1213,3 +1408,17 @@ window.ShareSquad = {
   applyTheme,
   resolveTheme,
 };
+
+function bootSharedUi() {
+  renderDemoBanner();
+  initLoginHistoryGuard();
+  initSmartNavigation();
+}
+// Assign ShareSquad before boot so login/inline pages never see a partial client.
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bootSharedUi, { once: true });
+else bootSharedUi();
+try {
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (getThemePreference() === "system") applyTheme("system");
+  });
+} catch (_) {}

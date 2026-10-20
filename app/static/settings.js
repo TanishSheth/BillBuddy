@@ -113,7 +113,7 @@ async function requestAccountDeletion() {
     msg.className = "text-xs font-mono balance-positive";
     ShareSquad.removeToken();
     ShareSquad.removeStoredGroupId();
-    window.location.href = "/login.html?recovery=1";
+    ShareSquad.goToLogin({ replace: true, search: "recovery=1" });
   } catch (err) {
     msg.textContent = err.message || "Could not schedule account deletion.";
     msg.className = "text-xs font-mono balance-negative";
@@ -320,7 +320,7 @@ async function clearGroupKey() {
 
 (async function init() {
   if (!ShareSquad.getToken()) {
-    window.location.href = "/login.html";
+    ShareSquad.goToLogin({ replace: true });
     return;
   }
 

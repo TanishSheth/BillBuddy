@@ -102,4 +102,4 @@ $("#quickSplitForm")?.addEventListener("submit", async (event) => {
 });
 $("#copyShareLink")?.addEventListener("click", async () => { await navigator.clipboard.writeText($("#shareLink").value); ShareSquad.showToast("Private invite link copied", "success"); });
 $("#createGroupFromSplit")?.addEventListener("click", () => { location.href = "/?createGroup=1"; });
-(async () => { if (!ShareSquad.getToken()) { location.href = "/login.html"; return; } ShareSquad.fillAllCurrencySelects(); ShareSquad.bindAllCategorySelects(); if ($("#qsDate")) { $("#qsDate").max = todayISO(); $("#qsDate").value = todayISO(); } await loadGroupPeople(); toggleInviteMode(); await load(); })();
+(async () => { if (!ShareSquad.getToken()) { ShareSquad.goToLogin({ replace: true }); return; } ShareSquad.fillAllCurrencySelects(); ShareSquad.bindAllCategorySelects(); if ($("#qsDate")) { $("#qsDate").max = todayISO(); $("#qsDate").value = todayISO(); } await loadGroupPeople(); toggleInviteMode(); await load(); })();

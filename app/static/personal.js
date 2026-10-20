@@ -247,13 +247,23 @@ async function handleReceiptUpload(file) {
   }
   setScanBusy(true);
 
+  let prepared = file;
+  try {
+    prepared = await ShareSquad.prepareReceiptFile(file);
+  } catch (err) {
+    setScanBusy(false);
+    ShareSquad.showToast(err.message || "Could not read that photo.", "error");
+    return;
+  }
+
   const preview = $("#previewImg");
   if (preview.src && preview.src.startsWith("blob:")) URL.revokeObjectURL(preview.src);
-  preview.src = URL.createObjectURL(file);
+  // Preview the compressed copy — never the full phone-camera original.
+  preview.src = URL.createObjectURL(prepared);
   preview.classList.remove("hidden");
 
   try {
-    const data = await ShareSquad.uploadReceipt("/personal/receipts/upload", file);
+    const data = await ShareSquad.uploadReceipt("/personal/receipts/upload", prepared);
     $("#uploadId").value = data.upload_id;
     if (data.extraction) {
       const ex = data.extraction;
@@ -335,7 +345,7 @@ async function submitExpenseForm(e) {
 
 (async function init() {
   if (!ShareSquad.getToken()) {
-    window.location.href = "/login.html";
+    ShareSquad.goToLogin({ replace: true });
     return;
   }
 
@@ -436,7 +446,7 @@ async function submitExpenseForm(e) {
     } finally { btn.disabled = false; }
   });
 
-  $("#settingsBtn")?.addEventListener("click", () => { window.location.href = "/settings.html"; });
+  $("#settingsBtn")?.addEventListener("click", () => { ShareSquad.navigateWithReturn("/settings.html"); });
 
   function navigateMainScreen(screen, direction = -1) {
     const destination = screen === "groups" ? "/index.html?view=groups" : "/index.html?view=friends";

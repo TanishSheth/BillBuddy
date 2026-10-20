@@ -446,14 +446,14 @@ async function submitCreateGroup(e) {
 
 (async function init() {
   if (!ShareSquad.getToken()) {
-    window.location.href = "/login.html";
+    ShareSquad.goToLogin({ replace: true });
     return;
   }
 
   $("#newGroupBtn")?.addEventListener("click", showCreateGroupModal);
   $("#splitGroupBtn")?.addEventListener("click", showCreateGroupModal);
   $("#quickSplitBtn")?.addEventListener("click", () => { window.location.href = "/quick-split.html"; });
-  $("#settingsBtn")?.addEventListener("click", () => { window.location.href = "/settings.html"; });
+  $("#settingsBtn")?.addEventListener("click", () => { ShareSquad.navigateWithReturn("/settings.html"); });
   $("#createFirstGroupBtn")?.addEventListener("click", showCreateGroupModal);
   $("#createGroupForm")?.addEventListener("submit", submitCreateGroup);
   $("#addCreateGroupEmailBtn")?.addEventListener("click", () => {

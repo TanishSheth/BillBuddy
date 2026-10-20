@@ -188,7 +188,7 @@ def test_forgot_password_success_when_smtp_works(monkeypatch):
 
 
 def test_camera_capture_hooks_present():
-    """Camera OCR uses the same upload path as gallery; UI wiring must exist."""
+    """Camera OCR uses the native capture picker (no in-app getUserMedia modal)."""
     static = os.path.join(os.path.dirname(__file__), "app", "static")
     group_js = open(os.path.join(static, "group.js"), encoding="utf-8").read()
     personal_js = open(os.path.join(static, "personal.js"), encoding="utf-8").read()
@@ -196,6 +196,16 @@ def test_camera_capture_hooks_present():
     group_html = open(os.path.join(static, "group.html"), encoding="utf-8").read()
     assert "bindReceiptCamera" in group_js and "onCapture: handleReceiptUpload" in group_js
     assert "bindReceiptCamera" in personal_js and "onCapture: handleReceiptUpload" in personal_js
-    assert "canvas.toBlob" in api_js and 'image/jpeg' in api_js
-    assert 'id="liveCameraModal"' in group_html
+    assert "prepareReceiptFile" in api_js and "canvas.toBlob" in api_js and "image/jpeg" in api_js
+    assert "mediaDevices" not in api_js
+    assert 'id="liveCameraModal"' not in group_html
     assert 'id="pickCameraBtn"' in group_html
+    assert 'capture="environment"' in group_html
+    assert "navigateWithReturn" in api_js and "bindSmartBack" in api_js
+    assert "initLoginHistoryGuard" in api_js and "isBackForwardNavigation" in api_js
+    assert "goToLogin" in api_js and "allowLoginOnce" in api_js
+    login_html = open(os.path.join(static, "login.html"), encoding="utf-8").read()
+    assert "back_forward" in login_html
+    assert "sharesquad_token" in login_html
+    assert "function safeAppRedirect" in login_html
+    assert "sharesquad_allow_login" in login_html

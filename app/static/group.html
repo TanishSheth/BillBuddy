@@ -451,19 +451,6 @@
     <div class="bb-card modal-card"><div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3"><h2 id="commentsTitle" class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Expense comments</h2><button type="button" id="closeCommentsBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button></div><div id="commentsList" class="space-y-3 max-h-[45vh] overflow-y-auto mb-4"></div><form id="commentForm" class="flex gap-2"><input id="commentInput" class="bb-input flex-1" maxlength="1000" placeholder="Optional note or question"><button class="bb-btn-primary !px-3" type="submit">Post</button></form></div>
   </div>
 
-  <div id="liveCameraModal" class="modal-overlay hidden">
-    <div class="bb-card modal-card">
-      <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Take photo</h2>
-      <video id="liveCameraVideo" class="live-camera-video" playsinline autoplay muted></video>
-      <p class="text-[10px] text-ink/50 font-mono mt-2">Hold the receipt flat and fill the frame. If this fails, use the phone camera.</p>
-      <div class="flex flex-wrap gap-2 mt-4">
-        <button type="button" id="liveCameraCapture" class="bb-btn-primary flex-1">Capture</button>
-        <button type="button" id="liveCameraFallback" class="bb-btn-secondary">Phone camera</button>
-        <button type="button" id="liveCameraCancel" class="bb-btn-secondary">Cancel</button>
-      </div>
-    </div>
-  </div>
-
   <!-- Bottom nav bar (mobile) -->
   <nav class="bottom-nav">
     <a href="/index.html?view=friends">
@@ -490,8 +477,8 @@
     Add expense
   </button>
 
-  <script src="/api.js?v=20261015uiFixes"></script>
-  <script src="/group.js?v=20261015uiFixes"></script>
+  <script src="/api.js?v=20261020loginFix"></script>
+  <script src="/group.js?v=20261020loginFix"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

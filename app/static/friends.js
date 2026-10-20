@@ -733,7 +733,7 @@ $("#friendOtherValue").oninput = renderValues;
 $("#friendExpenseAmount").oninput = renderValues;
 $("#friendMyPaid").oninput = renderValues;
 $("#friendTheirPaid").oninput = renderValues;
-$("#settingsBtn").onclick = () => { location.href = "/settings.html"; };
+$("#settingsBtn").onclick = () => { ShareSquad.navigateWithReturn("/settings.html"); };
 $("#addFriendBtn").onclick = openFriendInvite;
 $("#addFriendHeaderBtn")?.addEventListener("click", openFriendInvite);
 const legacySplitButton = document.querySelector('a[href="/quick-split.html"]');
@@ -815,4 +815,4 @@ $("#friendExpenseForm").onsubmit = async (event) => {
     $("#friendMsg").className = "text-xs font-mono balance-negative";
   }
 };
-(async () => { if (!ShareSquad.getToken()) { location.href = "/login.html"; return; } ShareSquad.fillAllCurrencySelects(); ShareSquad.bindAllCategorySelects(); $("#friendExpenseDate").max = todayISO(); $("#friendExpenseDate").value = todayISO(); renderValues(); try { me = await ShareSquad.api("/auth/me"); $("#headerInitials").textContent = ShareSquad.initials(me.account.display_name); if (me.account.has_avatar) { ShareSquad.setAuthImage($("#headerAvatar"), "/auth/me/avatar"); $("#headerInitials").classList.add("hidden"); } await refresh(); const selectedFriendId = Number(new URLSearchParams(location.search).get("friend")); if (selectedFriendId) { openedFromBalances = true; openFriend(`account-${selectedFriendId}`); } } catch (err) { ShareSquad.showToast(err.message || "Could not load friend splits", "error"); } if (window.lucide) lucide.createIcons(); })();
+(async () => { if (!ShareSquad.getToken()) { ShareSquad.goToLogin({ replace: true }); return; } ShareSquad.fillAllCurrencySelects(); ShareSquad.bindAllCategorySelects(); $("#friendExpenseDate").max = todayISO(); $("#friendExpenseDate").value = todayISO(); renderValues(); try { me = await ShareSquad.api("/auth/me"); $("#headerInitials").textContent = ShareSquad.initials(me.account.display_name); if (me.account.has_avatar) { ShareSquad.setAuthImage($("#headerAvatar"), "/auth/me/avatar"); $("#headerInitials").classList.add("hidden"); } await refresh(); const selectedFriendId = Number(new URLSearchParams(location.search).get("friend")); if (selectedFriendId) { openedFromBalances = true; openFriend(`account-${selectedFriendId}`); } } catch (err) { ShareSquad.showToast(err.message || "Could not load friend splits", "error"); } if (window.lucide) lucide.createIcons(); })();

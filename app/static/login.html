@@ -5,6 +5,34 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#F6F3EC">
 <script>(function(){try{var k="sharesquad_theme",p=localStorage.getItem(k)||"system",d=p==="dark"||(p!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("theme-dark",d);document.documentElement.classList.toggle("theme-light",!d);document.documentElement.dataset.theme=d?"dark":"light";var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",d?"#0B1220":"#F8FAFC");}catch(e){}})();</script>
+<script>
+/* Block browser Back onto login while still signed in. Typing /login or Sign out still works. */
+(function () {
+  try {
+    var token = localStorage.getItem("sharesquad_token") || localStorage.getItem("billbuddy_token");
+    if (!token) return;
+    var back = false;
+    try {
+      var nav = performance.getEntriesByType && performance.getEntriesByType("navigation")[0];
+      if (nav && nav.type === "back_forward") back = true;
+    } catch (e1) {}
+    try {
+      if (!back && performance.navigation && performance.navigation.type === 2) back = true;
+    } catch (e2) {}
+    if (!back) return;
+    try {
+      if (sessionStorage.getItem("sharesquad_allow_login") === "1") {
+        sessionStorage.removeItem("sharesquad_allow_login");
+        return;
+      }
+    } catch (e0) {}
+    var next = new URLSearchParams(location.search).get("next");
+    var dest = "/app";
+    if (next && next.charAt(0) === "/" && next.indexOf("//") !== 0 && next !== "/" && next.indexOf("/landing") !== 0 && next.indexOf("/login") !== 0) dest = next;
+    location.replace(dest);
+  } catch (e) {}
+})();
+</script>
 <title>ShareSquad — Sign In</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -58,23 +86,23 @@
     </div>
   </div>
 
-  <script src="/api.js?v=20260925final"></script>
+  <script src="/api.js?v=20261020loginFix"></script>
   <script>
     const PENDING_INVITE_KEY = "sharesquad_pending_invite";
     const PENDING_QUICK_SPLIT_KEY = "sharesquad_pending_quick_split";
     const PENDING_QUICK_SPLIT_SLOT_KEY = "sharesquad_pending_quick_split_slot";
-
+    // Keep redirect logic local so a partial/cached api.js cannot break Sign In.
     function safeAppRedirect(rawNext) {
-      const next = (rawNext || "").trim();
-      // Never bounce signed-in users to the marketing home page.
+      if (window.ShareSquad && typeof ShareSquad.safeAppRedirect === "function") {
+        return ShareSquad.safeAppRedirect(rawNext);
+      }
+      const next = String(rawNext || "").trim();
       if (!next || next === "/" || next === "/landing.html" || next.startsWith("//") || !next.startsWith("/")) {
         return "/app";
       }
+      const pathOnly = next.split("?")[0].replace(/\/+$/, "") || "/";
+      if (pathOnly === "/login" || pathOnly === "/login.html") return "/app";
       return next;
-    }
-    if (ShareSquad.getToken()) {
-      const next = new URLSearchParams(window.location.search).get("next");
-      window.location.replace(safeAppRedirect(next));
     }
 
     let mode = "signin"; // signin | register | forgot | restore
@@ -205,6 +233,7 @@
         }
 
         ShareSquad.setToken(data.access_token);
+        try { sessionStorage.removeItem("sharesquad_allow_login"); } catch (_) {}
 
         const params = new URLSearchParams(window.location.search);
         let redirect = safeAppRedirect(params.get("next"));

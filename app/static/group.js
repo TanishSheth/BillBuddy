@@ -113,19 +113,39 @@ function updateGroupPageHelp(tabName) {
   if (help) help.innerHTML = GROUP_PAGE_HELP[tabName] || GROUP_PAGE_HELP.upload;
 }
 
-function switchTab(tabName) {
-  $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tabName));
-  $$(".tab-panel").forEach((p) => p.classList.toggle("hidden", p.id !== `tab-${tabName}`));
-  const tabSelect = $("#groupTabSelect");
-  if (tabSelect && tabSelect.value !== tabName) tabSelect.value = tabName;
-  updateGroupPageHelp(tabName);
+function syncGroupTabInUrl(tabName) {
+  // Keep ?tab= in the address bar so Settings → Back (and reloads) restore
+  // Insights / Expenses / etc., not always Balances.
+  try {
+    const url = new URL(window.location.href);
+    const current = url.searchParams.get("tab");
+    if (current === tabName) return;
+    if (tabName && tabName !== "balances") url.searchParams.set("tab", tabName);
+    else url.searchParams.delete("tab");
+    history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  } catch (_) {
+    /* ignore */
+  }
+}
 
-  if (tabName === "expenses") loadExpenses();
-  if (tabName === "balances") loadBalances();
-  if (tabName === "reports") loadReports();
-  if (tabName === "members") loadMembers();
-  if (tabName === "insights") loadInsights();
-  if (tabName === "activity") loadActivity();
+function switchTab(tabName) {
+  const next = GROUP_PAGE_HELP[tabName] ? tabName : "balances";
+  $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === next));
+  $$(".tab-panel").forEach((p) => p.classList.toggle("hidden", p.id !== `tab-${next}`));
+  const tabSelect = $("#groupTabSelect");
+  if (tabSelect && tabSelect.value !== next) tabSelect.value = next;
+  updateGroupPageHelp(next);
+  syncGroupTabInUrl(next);
+
+  if (next === "expenses") loadExpenses();
+  if (next === "balances") loadBalances();
+  if (next === "reports") loadReports();
+  if (next === "members") loadMembers();
+  if (next === "insights") loadInsights();
+  if (next === "activity") loadActivity();
+  if (next === "upload") {
+    /* upload panel is opened on demand; no extra loader */
+  }
 }
 
 function focusNotificationTarget() {
@@ -1465,14 +1485,24 @@ async function handleReceiptUpload(file) {
     return;
   }
 
+  setScanBusy(true);
+  let prepared = file;
+  try {
+    prepared = await ShareSquad.prepareReceiptFile(file);
+  } catch (err) {
+    setScanBusy(false);
+    ShareSquad.showToast(err.message || "Could not read that photo.", "error");
+    return;
+  }
+
   const preview = $("#previewImg");
   if (preview.src && preview.src.startsWith("blob:")) URL.revokeObjectURL(preview.src);
-  preview.src = URL.createObjectURL(file);
+  // Preview the compressed copy — never the full phone-camera original.
+  preview.src = URL.createObjectURL(prepared);
   preview.classList.remove("hidden");
-  setScanBusy(true);
 
   try {
-    const data = await ShareSquad.uploadReceipt(`/groups/${gid()}/receipts/upload`, file);
+    const data = await ShareSquad.uploadReceipt(`/groups/${gid()}/receipts/upload`, prepared);
 
     state.currentUploadId = data.upload_id;
     state.editingExpenseId = null;
@@ -1532,7 +1562,7 @@ async function handleReceiptUpload(file) {
 // ---------------------------------------------------------------------------
 (async function init() {
   if (!ShareSquad.getToken()) {
-    window.location.href = "/login.html";
+    ShareSquad.goToLogin({ replace: true });
     return;
   }
 
@@ -1893,7 +1923,8 @@ async function handleReceiptUpload(file) {
   await loadGroup();
   restoreExpenseFilters();
   await loadPeriods();
-  switchTab("balances");
+  const bootTab = new URLSearchParams(window.location.search).get("tab");
+  switchTab(bootTab && GROUP_PAGE_HELP[bootTab] ? bootTab : "balances");
   await loadNotificationCount();
   startGroupSync();
   focusNotificationTarget();
