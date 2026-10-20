@@ -726,39 +726,36 @@ async function prepareReceiptFile(file, opts = {}) {
 
   const fromCamera = Boolean(opts.fromCamera);
   const phone = _isPhoneClient();
-  const type = (file.type || "").toLowerCase();
-  const maxBytes = phone || fromCamera ? 700 * 1024 : 1.2 * 1024 * 1024;
 
-  // Already a small JPEG — skip decode entirely (common after a prior prepare).
-  if ((type === "image/jpeg" || type === "image/jpg") && file.size <= maxBytes) {
-    const dims = await _sniffImageSize(file);
-    const edgeCap = phone || fromCamera ? 1280 : 1600;
-    if (dims && Math.max(dims.w, dims.h) <= edgeCap) {
-      file._sharesquadPrepared = true;
-      return file;
-    }
-    if (!dims && file.size <= 400 * 1024) {
-      file._sharesquadPrepared = true;
-      return file;
-    }
+  // Camera: memory-safe ladder. Gallery (Personal + Group): one shared profile so
+  // the same photo is not re-encoded differently per tab before upload.
+  if (fromCamera) {
+    await new Promise((r) => setTimeout(r, 120));
   }
 
-  // Camera return path: give the OS a tick to release the camera app’s RAM
-  // before we allocate decode buffers.
-  if (fromCamera || phone) {
-    await new Promise((r) => setTimeout(r, fromCamera ? 120 : 0));
-  }
-
-  const attempts = (phone || fromCamera)
+  const attempts = fromCamera
     ? [
-        { maxEdge: fromCamera ? 960 : 1024, quality: 0.68 },
+        { maxEdge: 960, quality: 0.68 },
         { maxEdge: 720, quality: 0.62 },
         { maxEdge: 560, quality: 0.55 },
       ]
     : [
-        { maxEdge: 1600, quality: 0.82 },
-        { maxEdge: 1200, quality: 0.72 },
+        // Match server normalize intent (1600 / ~0.85). Phones use 1280 to avoid OOM.
+        { maxEdge: phone ? 1280 : 1600, quality: phone ? 0.75 : 0.85 },
+        { maxEdge: phone ? 960 : 1200, quality: 0.7 },
       ];
+
+  // Gallery: always run the shared profile (do not keep the original bytes),
+  // so Personal and Group upload the same encoding for the same pick.
+  // Already-prepared files short-circuit above via _sharesquadPrepared.
+  if (!fromCamera && (file.type || "").toLowerCase().includes("jpeg") && file.size <= 350 * 1024) {
+    const dims = await _sniffImageSize(file);
+    const edgeCap = phone ? 1280 : 1600;
+    if (dims && Math.max(dims.w, dims.h) <= edgeCap) {
+      file._sharesquadPrepared = true;
+      return file;
+    }
+  }
 
   let lastErr;
   for (const attempt of attempts) {
@@ -766,11 +763,6 @@ async function prepareReceiptFile(file, opts = {}) {
       return await _compressReceiptAttempt(file, attempt.maxEdge, attempt.quality);
     } catch (err) {
       lastErr = err;
-      const msg = String(err?.message || err || "");
-      if (!/memory|allocat|MEMORY/i.test(msg)) {
-        // Non-memory failure: still try a smaller pass once, then stop.
-        continue;
-      }
     }
   }
 

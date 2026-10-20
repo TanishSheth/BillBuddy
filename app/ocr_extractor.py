@@ -21,6 +21,38 @@ from .schemas import ReceiptExtraction
 
 logger = logging.getLogger(__name__)
 
+# Shared scan normalize — Personal and Group both feed OCR/VLM through this so
+# the same photo is not decoded at different sizes/qualities per tab.
+RECEIPT_SCAN_MAX_EDGE = 1600
+RECEIPT_SCAN_JPEG_QUALITY = 85
+
+
+def normalize_receipt_image(
+    image_bytes: bytes,
+    *,
+    max_edge: int = RECEIPT_SCAN_MAX_EDGE,
+    jpeg_quality: int = RECEIPT_SCAN_JPEG_QUALITY,
+) -> tuple[bytes, str]:
+    """EXIF-orient, RGB, cap long edge, re-encode as JPEG for a stable scan input."""
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img = ImageOps.exif_transpose(img).convert("RGB")
+        w, h = img.size
+        long_edge = max(w, h)
+        if long_edge > max_edge > 0:
+            scale = max_edge / float(long_edge)
+            img = img.resize(
+                (max(1, int(w * scale)), max(1, int(h * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+        return buf.getvalue(), "image/jpeg"
+    except Exception as exc:
+        logger.warning("Receipt image normalize failed, using original bytes: %s", exc)
+        return image_bytes, "image/jpeg"
+
+
 try:
     import pytesseract
     TESSERACT_AVAILABLE = True

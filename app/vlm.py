@@ -117,13 +117,16 @@ def extract_receipt_data(
 ) -> tuple[ReceiptExtraction, str, str | None, dict]:
     """
     Cascaded extraction:
-      1. Local OCR (PSM 11 + EXIF, with PSM 6 only if that read is weak).
-      2. Without an API key → keep OCR-only.
-      3. With an API key → always run VLM (temperature 0) so Personal/Group
-         and repeat scans of the same photo stay consistent. OCR remains the
-         fallback if VLM fails, and still supplies the store fingerprint.
+      1. Normalize image (fixed max edge + JPEG) so Personal/Group see the same bytes.
+      2. Local OCR (PSM 11 + EXIF, with PSM 6 only if that read is weak).
+      3. If OCR is confident and fields look complete → keep OCR (skip VLM / no AI cost).
+      4. If OCR is weak/missing fields and an API key is configured → VLM (temperature 0).
+      5. Without a key, keep OCR-only.
     """
-    from .ocr_extractor import extract_receipt_data_ocr
+    from .ocr_extractor import extract_receipt_data_ocr, normalize_receipt_image
+
+    # Same photo → same scan pixels whether uploaded from Personal or a Group.
+    image_bytes, mime_type = normalize_receipt_image(image_bytes)
 
     ocr_result, ocr_confident, fingerprint = extract_receipt_data_ocr(
         image_bytes, learned_vendors=learned_vendors,
@@ -132,19 +135,25 @@ def extract_receipt_data(
     missing = _missing_scan_fields(ocr_result)
     ocr_ok = ocr_confident and not missing
 
+    if ocr_ok:
+        logger.info(
+            "Keeping local OCR result (confident, no missing fields; source=%s)",
+            getattr(config, "source", "?"),
+        )
+        return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
+
     if not config.api_key:
-        if not ocr_ok:
-            logger.warning(
-                "OCR weak (missing=%s, confident=%s) and no API key resolved (source=%s)",
-                missing,
-                ocr_confident,
-                getattr(config, "source", "?"),
-            )
+        logger.warning(
+            "OCR weak (missing=%s, confident=%s) and no API key resolved (source=%s)",
+            missing,
+            ocr_confident,
+            getattr(config, "source", "?"),
+        )
         return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
     try:
         logger.info(
-            "VLM extract (%s/%s, source=%s, ocr_confident=%s, missing=%s)",
+            "OCR weak — VLM fallback (%s/%s, source=%s, ocr_confident=%s, missing=%s)",
             config.provider,
             config.model,
             getattr(config, "source", "?"),
