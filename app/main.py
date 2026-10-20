@@ -76,6 +76,7 @@ from .emailer import (
     send_quick_split_email,
     send_monthly_digest_email,
     send_password_reset_email,
+    send_payment_reminder_email,
 )
 from .demo_service import create_sandbox, purge_expired_sandboxes, reset_sandbox, sandbox_for_account
 from . import redis_support
@@ -3918,6 +3919,70 @@ def get_consolidated_friend_balances(
     finally:
         _BALANCE_MEMO.reset(token)
     return schemas.ConsolidatedFriendBalancesOut(friend_id=friend_id, balances=balances)
+
+
+def _friend_owed_totals(
+    db: Session, account: models.Account, friend_id: int,
+) -> list[schemas.PaymentReminderAmountOut]:
+    """Amounts the friend currently owes the viewer (positive consolidated balances)."""
+    currencies = _friend_balance_currencies(db, account.id, friend_id)
+    owed: list[schemas.PaymentReminderAmountOut] = []
+    for currency in currencies:
+        balance, _atomic_sources = _consolidated_friend_balance(db, account.id, friend_id, currency)
+        if balance <= Decimal("0.005"):
+            continue
+        owed.append(schemas.PaymentReminderAmountOut(currency=currency, amount=float(balance)))
+    return owed
+
+
+@app.post("/api/friends/{friend_id}/payment-reminder", response_model=schemas.PaymentReminderOut)
+def send_friend_payment_reminder(
+    friend_id: int,
+    account: models.Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """Manually email this friend only — polite reminder with totals they still owe you.
+
+    Allowed whenever they owe you. Never emails anyone else; never runs automatically.
+    """
+    friend = db.query(models.Account).get(friend_id)
+    if friend_id == account.id or not friend:
+        raise HTTPException(404, "Friend not found")
+    one, two = _friend_pair(account.id, friend_id)
+    connection = db.query(models.FriendConnection).filter_by(
+        account_one_id=one, account_two_id=two, status="ACTIVE",
+    ).first()
+    if not connection:
+        raise HTTPException(403, "Add this person as a friend before sending a reminder")
+    if not is_email_configured():
+        raise HTTPException(503, "Email is not configured on this server yet.")
+
+    token = _BALANCE_MEMO.set({})
+    try:
+        owed = _friend_owed_totals(db, account, friend_id)
+    finally:
+        _BALANCE_MEMO.reset(token)
+    if not owed:
+        raise HTTPException(400, "This friend does not currently owe you any money.")
+
+    amount_lines = [f"{row.currency} {row.amount:,.2f}" for row in owed]
+    try:
+        send_payment_reminder_email(
+            to_email=friend.email,
+            friend_name=friend.display_name or "there",
+            sender_name=account.display_name or "a friend",
+            amount_lines=amount_lines,
+        )
+    except Exception:
+        logger.exception("Payment reminder failed for friend_id=%s", friend_id)
+        raise HTTPException(502, "Could not send the reminder email. Try again in a moment.")
+
+    totals = ", ".join(amount_lines)
+    return schemas.PaymentReminderOut(
+        email_sent=True,
+        message=f"Reminder sent to {friend.display_name} ({totals}).",
+        amounts=owed,
+    )
 
 
 @app.get("/api/friends/{friend_id}/group-contributions", response_model=list[schemas.FriendGroupContributionOut])

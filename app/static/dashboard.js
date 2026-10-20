@@ -145,6 +145,27 @@ function openQuickSplit(id) {
   window.location.href = `/quick-split.html?id=${encodeURIComponent(id)}`;
 }
 
+/** Reminder available whenever this friend currently owes you (any currency). */
+function consolidatedReminderEligible(consolidated) {
+  const balances = Array.isArray(consolidated?.balances) ? consolidated.balances : (consolidated ? [consolidated] : []);
+  return balances.some((total) => Number(total.balance || 0) > 0.005);
+}
+
+async function sendFriendPaymentReminder(friendId, friendName) {
+  if (!await ShareSquad.confirmDialog({
+    title: `Remind ${friendName}?`,
+    message: `Send a polite email only to ${friendName} with the total they still owe you? Nothing is sent to anyone else.`,
+    confirmLabel: "Send reminder",
+    danger: false,
+  })) return;
+  try {
+    const result = await ShareSquad.api(`/friends/${friendId}/payment-reminder`, { method: "POST" });
+    ShareSquad.showToast(result.message || `Reminder sent to ${friendName}.`, "success");
+  } catch (error) {
+    ShareSquad.showToast(error.message || "Could not send reminder", "error");
+  }
+}
+
 function renderQuickSplits(_splits, contacts = [], consolidatedByFriend = new Map()) {
   const grid = $("#friendSplitsGrid");
   const empty = $("#emptyFriendSplits");
@@ -178,11 +199,13 @@ function renderQuickSplits(_splits, contacts = [], consolidatedByFriend = new Ma
       existing.currency = primary?.currency || existing.currency;
       existing.hasConsolidatedBalance = true;
       existing.balancePending = false;
+      existing.reminderEligible = consolidatedReminderEligible(consolidated);
     } else {
       existing.balances = [];
       existing.balance = 0;
       existing.hasConsolidatedBalance = false;
       existing.balancePending = true;
+      existing.reminderEligible = false;
     }
     people.set(key, existing);
   });
@@ -229,6 +252,9 @@ function renderQuickSplits(_splits, contacts = [], consolidatedByFriend = new Ma
           return `<p class="text-lg font-bold font-mono ${itemPositive ? "text-emerald-700" : "text-red-700"}">${itemPositive ? "+" : "−"}${ShareSquad.formatMoney(Math.abs(item.balance), item.currency)}</p>`;
         }).join("")
       : `<p class="text-xl font-bold font-mono mt-2 ${amtCls}">${isPositive || isNegative ? amount : "—"}</p>`;
+    const remindBtn = person.id && person.reminderEligible
+      ? `<button type="button" class="remind-friend-pay bb-btn-secondary w-full !py-1.5 text-[11px]" data-remind-friend="${person.id}"><i data-lucide="mail" class="w-3.5 h-3.5"></i> Send payment reminder</button>`
+      : "";
     return `<div class="bb-card friend-split-card flex flex-col justify-between gap-3 border-l-4 cursor-pointer ${leftBorder}" style="border-top-color:var(--line);border-right-color:var(--line);border-bottom-color:var(--line);" data-href="${href}" role="link" tabindex="0">
   <div>
     <div class="flex items-center justify-between gap-2">
@@ -240,13 +266,25 @@ function renderQuickSplits(_splits, contacts = [], consolidatedByFriend = new Ma
     <p class="text-xs mt-1 text-ink/60">${status}</p>
     <p class="text-[10px] font-mono mt-2 text-ink/40">${person.hasConsolidatedBalance ? "Total to pay" : `${person.count} direct bill${person.count === 1 ? "" : "s"} in history`}</p>
   </div>
-  <a class="bb-btn-secondary w-full !py-1.5 text-[11px]" href="${href}"><i data-lucide="receipt-text" class="w-3.5 h-3.5"></i> Open details</a>
+  <div class="space-y-2">
+    <a class="bb-btn-secondary w-full !py-1.5 text-[11px]" href="${href}"><i data-lucide="receipt-text" class="w-3.5 h-3.5"></i> Open details</a>
+    ${remindBtn}
+  </div>
 </div>`;
   }).join("");
   grid.querySelectorAll(".friend-split-card").forEach((card) => {
     const open = () => { window.location.href = card.dataset.href; };
     card.addEventListener("click", (event) => { if (!event.target.closest("a, button")) open(); });
     card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } });
+  });
+  const peopleById = new Map([...people.values()].filter((person) => person.id).map((person) => [Number(person.id), person]));
+  grid.querySelectorAll(".remind-friend-pay").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const friendId = Number(button.dataset.remindFriend);
+      sendFriendPaymentReminder(friendId, peopleById.get(friendId)?.name || "this friend");
+    });
   });
   lucide.createIcons();
 }

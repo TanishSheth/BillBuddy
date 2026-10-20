@@ -52,6 +52,29 @@ function consolidatedTotals(friend) {
   return totals.filter((total) => Math.abs(Number(total.balance || 0)) >= 0.005);
 }
 
+/** Reminder available whenever this friend currently owes you (any currency). */
+function friendReminderEligible(friend) {
+  const totals = friend.consolidatedBalances?.balances || [];
+  return totals.some((total) => Number(total.balance || 0) > 0.005);
+}
+
+async function sendPaymentReminder(friendId) {
+  const entry = friends.find((item) => Number(item.friend.id) === Number(friendId));
+  const name = entry?.friend?.name || "this friend";
+  if (!await ShareSquad.confirmDialog({
+    title: `Remind ${name}?`,
+    message: `Send a polite email only to ${name} with the total they still owe you? Nothing is sent to anyone else.`,
+    confirmLabel: "Send reminder",
+    danger: false,
+  })) return;
+  try {
+    const result = await ShareSquad.api(`/friends/${friendId}/payment-reminder`, { method: "POST" });
+    ShareSquad.showToast(result.message || `Reminder sent to ${name}.`, "success");
+  } catch (error) {
+    ShareSquad.showToast(error.message || "Could not send reminder", "error");
+  }
+}
+
 function statusFor(friend) {
   const balance = cents(friend.balance);
   if (balance > 0) return { tone: "text-green-800 bg-green-600/10 border-green-700/20", text: `${ShareSquad.escapeHtml(friend.friend.name)} owes you ${money(balance, friend.currency)}`, hint: "They owe you" };
@@ -179,7 +202,12 @@ function monthDirectFullyCovered(friend, monthKey, currency) {
 function renderList() {
   const grid = $("#friendsGrid");
   if (!friends.length) { grid.innerHTML = '<div class="bb-card sm:col-span-2 lg:col-span-3 text-center py-10"><p class="font-mono font-bold">No friends yet</p><p class="text-sm text-ink/60 mt-2">Add an existing ShareSquad user by email. Group members will also appear here automatically.</p></div>'; return; }
-  grid.innerHTML = friends.map((friend) => `<article class="bb-card border border-ink/10"><div class="flex items-center justify-between gap-3"><button class="text-left grow flex items-center gap-3" data-friend-key="${friend.key}">${friendAvatar(friend.friend)}<p class="font-mono font-bold text-base">${ShareSquad.escapeHtml(friend.friend.name)}</p></button><button type="button" class="remove-friend bb-btn-secondary !py-1.5 !px-2.5 text-[10px] text-stamp border-stamp/30" data-remove-friend="${friend.friend.id}">Remove</button></div><button type="button" class="invite-friend-group bb-btn-secondary w-full !py-1.5 mt-3 text-[10px]" data-invite-friend="${friend.friend.id}">Invite to group</button></article>`).join("");
+  grid.innerHTML = friends.map((friend) => {
+    const remind = friend.friend.id && friendReminderEligible(friend)
+      ? `<button type="button" class="remind-friend-pay bb-btn-secondary w-full !py-1.5 mt-2 text-[10px]" data-remind-friend="${friend.friend.id}">Send payment reminder</button>`
+      : "";
+    return `<article class="bb-card border border-ink/10"><div class="flex items-center justify-between gap-3"><button class="text-left grow flex items-center gap-3" data-friend-key="${friend.key}">${friendAvatar(friend.friend)}<p class="font-mono font-bold text-base">${ShareSquad.escapeHtml(friend.friend.name)}</p></button><button type="button" class="remove-friend bb-btn-secondary !py-1.5 !px-2.5 text-[10px] text-stamp border-stamp/30" data-remove-friend="${friend.friend.id}">Remove</button></div><button type="button" class="invite-friend-group bb-btn-secondary w-full !py-1.5 mt-3 text-[10px]" data-invite-friend="${friend.friend.id}">Invite to group</button>${remind}</article>`;
+  }).join("");
   loadFriendAvatars(grid);
   grid.querySelectorAll("[data-friend-key]").forEach((button) => button.onclick = () => {
     openedFromBalances = false;
@@ -187,6 +215,7 @@ function renderList() {
   });
   grid.querySelectorAll("[data-remove-friend]").forEach((button) => button.onclick = () => removeFriend(Number(button.dataset.removeFriend)));
   grid.querySelectorAll("[data-invite-friend]").forEach((button) => button.onclick = () => inviteFriendToGroup(Number(button.dataset.inviteFriend)));
+  grid.querySelectorAll("[data-remind-friend]").forEach((button) => button.onclick = () => sendPaymentReminder(Number(button.dataset.remindFriend)));
 }
 
 async function inviteFriendToGroup(friendId) {
@@ -599,6 +628,19 @@ function openFriend(key) {
   $("#friendBalance").innerHTML = balanceMarkup;
   $("#friendBalance").className = `font-mono font-bold text-xl mt-3 ${balanceTone}`;
   $("#friendBalanceHelp").textContent = balanceNote;
+  let remindHost = $("#friendRemindWrap");
+  if (!remindHost) {
+    remindHost = document.createElement("div");
+    remindHost.id = "friendRemindWrap";
+    remindHost.className = "mt-3";
+    $("#friendBalanceHelp")?.after(remindHost);
+  }
+  if (friend.friend.id && friendReminderEligible(friend)) {
+    remindHost.innerHTML = `<button type="button" id="friendRemindBtn" class="bb-btn-secondary !py-1.5 !px-3 text-[10px]">Send payment reminder</button><p class="text-[10px] text-ink/50 mt-1.5">Emails only ${ShareSquad.escapeHtml(friend.friend.name)} with the total they owe you. Manual — nothing is sent automatically.</p>`;
+    $("#friendRemindBtn").onclick = () => sendPaymentReminder(friend.friend.id);
+  } else {
+    remindHost.innerHTML = "";
+  }
   renderConsolidated(friend);
   setupHistory(friend);
   $("#friendExpensePanel").classList.toggle("hidden", !friend.friend.id); $("#friendExpenseForm").dataset.friendId = friend.friend.id || ""; $("#friendPaidBy").options[1].textContent = `${friend.friend.name} paid`; ShareSquad.fillCurrencySelect($("#friendExpenseCurrency"), friend.currency); resetExpenseForm();

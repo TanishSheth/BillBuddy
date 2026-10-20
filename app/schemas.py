@@ -330,6 +330,17 @@ class FriendInviteOut(BaseModel):
     message: str
 
 
+class PaymentReminderAmountOut(BaseModel):
+    currency: str
+    amount: float
+
+
+class PaymentReminderOut(BaseModel):
+    email_sent: bool
+    message: str
+    amounts: List[PaymentReminderAmountOut] = []
+
+
 # ---------- VLM Extraction ----------
 class ReceiptExtraction(BaseModel):
     store_name: str = Field(description="Name of the store/merchant on the receipt")
