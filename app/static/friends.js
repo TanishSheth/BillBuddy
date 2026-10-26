@@ -170,6 +170,8 @@ function isDirectBillSettled(row, friend) {
   if (String(row.split?.status || "").toUpperCase() === "SETTLED") return true;
   if (friend.paidDirectSplitIds?.has(Number(row.split.id))) return true;
   if (Math.abs(Number(row.balance || 0)) < 0.005) return true;
+  // Still owes money on this row — never file it as Paid because another
+  // month's Direct cancelled the display total (Sep +$19.50 vs Oct −$19.50).
   const monthKey = String(row.split.bill_date).slice(0, 7);
   const currency = row.split.currency || friend.currency || "USD";
   if (monthDirectFullyCovered(friend, monthKey, currency)) return true;
@@ -180,15 +182,17 @@ function isDirectBillSettled(row, friend) {
 }
 
 function monthDirectFullyCovered(friend, monthKey, currency) {
-  // When confirmed Friend payments have already zeroed this month's direct
-  // source, every private bill in that month belongs in Paid private bills —
-  // even if an older payment never wrote quick_split_id / payment_status.
+  // Use atomic month lines — display sources net across months and can omit a
+  // month entirely when Sep +$19.50 and Oct −$19.50 cancel, which wrongly made
+  // "missing month = fully covered" and filed partial bills as Paid/Settled.
   const totals = friend.consolidatedBalances?.balances || (friend.consolidated ? [friend.consolidated] : []);
   const total = totals.find((item) => String(item.currency || "USD") === String(currency || "USD"));
   if (!total) return false;
-  const remaining = (total.sources || [])
-    .filter((source) => source.kind === "DIRECT" && String(source.period_key || "") === String(monthKey))
-    .reduce((sum, source) => sum + Number(source.amount || 0), 0);
+  const monthSources = (total.atomic_sources || total.sources || []).filter(
+    (source) => source.kind === "DIRECT" && String(source.period_key || "") === String(monthKey),
+  );
+  if (!monthSources.length) return false;
+  const remaining = monthSources.reduce((sum, source) => sum + Number(source.amount || 0), 0);
   if (Math.abs(remaining) >= 0.005) return false;
   return (total.payments || []).some((payment) => (
     payment.status === "CONFIRMED"
@@ -505,7 +509,7 @@ function directLedgerRow(row, friend) {
       return `<p class="text-[10px] text-ink/55">${when ? `${when} · ` : ""}${who}: ${ShareSquad.formatMoney(oldTotal, split.currency)} → ${ShareSquad.formatMoney(newTotal, split.currency)}${deltaText}</p>`;
     }).join("")}</div></details>`
     : "";
-  return `<div class="member-row ${settled ? "opacity-70" : ""}" data-direct-split="${split.id}"><div class="min-w-0"><p class="font-semibold text-sm ${settledClass}">${ShareSquad.escapeHtml(split.title)}</p><p class="text-xs text-ink/55 ${settledClass}">${ShareSquad.formatDate(split.bill_date)} · ${split.payer_paid_amount == null ? (split.is_payer ? "You paid" : `${ShareSquad.escapeHtml(friend.friend.name)} paid`) : "You both paid"} ${money(split.total_amount, split.currency)}</p>${editedChip}${historyHtml}${actions}</div><div class="text-right shrink-0"><p class="text-xs font-mono font-bold ${bill.tone}">${bill.text}</p><p class="text-[10px] text-ink/50">${bill.hint}</p></div></div>`;
+  return `<div class="member-row ${settled ? "opacity-70" : ""}" data-direct-split="${split.id}" data-settled="${settled ? "1" : "0"}"><div class="min-w-0"><p class="font-semibold text-sm ${settledClass}" style="${settled ? "text-decoration:line-through" : ""}">${ShareSquad.escapeHtml(split.title)}</p><p class="text-xs text-ink/55 ${settledClass}" style="${settled ? "text-decoration:line-through" : ""}">${ShareSquad.formatDate(split.bill_date)} · ${split.payer_paid_amount == null ? (split.is_payer ? "You paid" : `${ShareSquad.escapeHtml(friend.friend.name)} paid`) : "You both paid"} ${money(split.total_amount, split.currency)}</p>${editedChip}${historyHtml}${actions}</div><div class="text-right shrink-0"><p class="text-xs font-mono font-bold ${bill.tone}" style="${settled ? "text-decoration:line-through" : ""}">${bill.text}</p><p class="text-[10px] text-ink/50">${bill.hint}</p></div></div>`;
 }
 
 function renderLedger(friend) {
@@ -532,7 +536,18 @@ function renderLedger(friend) {
     return `<button type="button" class="member-row group-ledger-row w-full text-left" data-group-id="${group.groupId}"><div><p class="font-semibold text-sm">Group settlement · ${ShareSquad.escapeHtml(group.name)}</p><p class="text-xs text-ink/55">${expenseNote}</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${amountTone}">${amountText}</p><p class="text-[10px] text-ink/50">${status}</p></div></button>`;
   }).join("")}</section>` : "";
   const hasPrivate = openRows.length || paidRows.length;
-  const directHeader = hasPrivate ? `<div class="flex items-center justify-between gap-3"><p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Private bills</p><span class="text-[10px] font-mono ${directSummary.length && directSummary.every((item) => item.amount > 0) ? "text-green-700" : directSummary.length && directSummary.every((item) => item.amount < 0) ? "text-red-700" : "text-ink/50"}">${directSummary.length ? directSummary.map((item) => signedMoney(item.amount, item.currency)).join(" · ") : "Settled"}</span></div>` : "";
+  // Header must match the lists below — never show "Settled" while open rows remain
+  // (cross-month Direct nets can cancel in the summary while bills are still unpaid).
+  const openPrivateTotal = openRows.reduce((sum, row) => sum + Number(row.balance || 0), 0);
+  const privateHeaderTone = !openRows.length
+    ? "text-ink/50"
+    : openPrivateTotal > 0.005 ? "text-green-700" : openPrivateTotal < -0.005 ? "text-red-700" : "text-ink/50";
+  const privateHeaderValue = !openRows.length
+    ? "Settled"
+    : (directSummary.length
+      ? directSummary.map((item) => signedMoney(item.amount, item.currency)).join(" · ")
+      : signedMoney(openPrivateTotal, openRows[0]?.split?.currency || friend.currency || "USD"));
+  const directHeader = hasPrivate ? `<div class="flex items-center justify-between gap-3"><p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Private bills</p><span class="text-[10px] font-mono ${privateHeaderTone}">${privateHeaderValue}</span></div>` : "";
   const privateHtml = hasPrivate ? `<section class="space-y-2 ${groupHtml ? "pt-4 mt-4 border-t border-ink/10" : ""}">${directHeader}${openRows.map((row) => directLedgerRow(row, friend)).join("")}${paidRows.length ? `<details class="pt-2"><summary class="cursor-pointer text-xs font-semibold text-ink/60">Paid private bills · ${paidRows.length}</summary><div class="space-y-2 mt-2">${paidRows.map((row) => directLedgerRow(row, friend)).join("")}</div></details>` : ""}</section>` : "";
   $("#friendLedger").innerHTML = groupHtml || privateHtml ? `${groupHtml}${privateHtml}` : '<p class="text-sm text-ink/55 py-3">No open group settlements or private bills with this person.</p>';
   $("#friendLedger").querySelectorAll(".group-ledger-row").forEach((button) => button.addEventListener("click", () => {
