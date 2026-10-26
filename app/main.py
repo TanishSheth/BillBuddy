@@ -3540,6 +3540,10 @@ def _weekly_pair_settlement_sources(
     Draft group math stays on the group page until someone locks the week
     (manually or on schedule). Bill edits after a lock rewrite that week's
     latest locked batch so Friends updates in the same timeframe.
+
+    Remaining cash that no longer matches live Who-pays-whom (overpay after a
+    bill shrink, or payments missing batch_id) is Extra pay credit — a private
+    Friends balance — not a phantom group line.
     """
     if _normalize_currency(group.currency, "USD") != _normalize_currency(currency, "USD"):
         return []
@@ -3556,33 +3560,117 @@ def _weekly_pair_settlement_sources(
             ),
         ).order_by(models.WeeklySettlementBatch.window_ends_at.asc()).all()
     )
-    results = []
+    confirmed_payments = db.query(models.PairPayment).filter(
+        models.PairPayment.status == "CONFIRMED",
+        models.PairPayment.currency == _normalize_currency(currency, "USD"),
+    ).all()
+    # Confirmed group cash for this period (Friends or group UI). Older pair
+    # payments may omit batch_id; consume this pool oldest-week-first so paid
+    # legs clear and reverse overpay residuals become Extra pay.
+    period_cash_left: dict[tuple[int, int], Decimal] = {}
+    for payment in (
+        db.query(models.GroupPayment)
+        .filter(
+            models.GroupPayment.period_id == period.id,
+            models.GroupPayment.status.in_(("PAID", "CONFIRMED")),
+            or_(
+                (models.GroupPayment.payer_member_id == my_member_id) & (models.GroupPayment.recipient_member_id == friend_member_id),
+                (models.GroupPayment.payer_member_id == friend_member_id) & (models.GroupPayment.recipient_member_id == my_member_id),
+            ),
+        )
+        .all()
+    ):
+        cash = Decimal(str(payment.cleared_amount if payment.cleared_amount is not None else payment.amount))
+        key = (int(payment.payer_member_id), int(payment.recipient_member_id))
+        period_cash_left[key] = period_cash_left.get(key, Decimal("0.00")) + cash
+
+    remainings: list[dict] = []
     for leg, batch in rows:
         # Pair payments are allocated to a precise frozen leg.  This is vital:
         # recording a payment must reduce that leg, not make a new graph pass
         # reroute somebody else's debt.
         applied = Decimal("0.00")
-        for payment in db.query(models.PairPayment).filter(
-            models.PairPayment.status == "CONFIRMED",
-            models.PairPayment.currency == _normalize_currency(leg.currency, "USD"),
-        ).all():
+        opposite_from_alloc = Decimal("0.00")
+        for payment in confirmed_payments:
             for allocation in json.loads(payment.allocations_json or "[]"):
-                if allocation.get("kind") != "GROUP" or allocation.get("batch_id") != batch.id:
+                if allocation.get("kind") != "GROUP":
                     continue
+                batch_match = allocation.get("batch_id") == batch.id
+                period_match = (
+                    allocation.get("batch_id") is None
+                    and allocation.get("period_id") == period.id
+                )
+                if not batch_match and not period_match:
+                    continue
+                amount = Decimal(str(allocation.get("amount") or 0))
                 if (allocation.get("payer_member_id") == leg.payer_member_id
                         and allocation.get("recipient_member_id") == leg.recipient_member_id):
-                    applied += Decimal(str(allocation.get("amount") or 0))
+                    applied += amount
+                elif (allocation.get("payer_member_id") == leg.recipient_member_id
+                        and allocation.get("recipient_member_id") == leg.payer_member_id):
+                    opposite_from_alloc += amount
+        same_key = (int(leg.payer_member_id), int(leg.recipient_member_id))
+        opp_key = (int(leg.recipient_member_id), int(leg.payer_member_id))
+        # Spend period GroupPayment cash once across weeks (oldest first).
+        if applied <= Decimal("0.005") and period_cash_left.get(same_key, Decimal("0.00")) > 0:
+            take = min(Decimal(str(leg.amount)), period_cash_left[same_key])
+            applied += take
+            period_cash_left[same_key] -= take
+        opposite_pool = period_cash_left.get(opp_key, Decimal("0.00"))
+        opposite_applied = opposite_from_alloc + opposite_pool
         remaining = max(Decimal("0.00"), Decimal(str(leg.amount)) - applied).quantize(Decimal("0.01"))
         if remaining <= 0:
             continue
         signed = remaining if leg.payer_member_id == friend_member_id else -remaining
-        results.append({
-            "kind": "GROUP", "label": f"{group.name} · week ending {batch.window_ends_at.astimezone(BUSINESS_TIMEZONE).date().isoformat()}",
-            "amount": float(signed), "currency": _normalize_currency(leg.currency, "USD"),
-            "period_key": period.period_key, "group_id": group.id, "period_id": period.id,
-            "batch_id": batch.id, "payer_member_id": leg.payer_member_id, "recipient_member_id": leg.recipient_member_id,
-            "settlement_ready": True,
+        remainings.append({
+            "signed": signed,
+            "force_credit": opposite_applied > Decimal("0.005"),
+            "batch": batch,
+            "leg": leg,
+            "currency": _normalize_currency(leg.currency, "USD"),
         })
+
+    live = _pair_settlement_source_for_period(
+        db, group, period, my_member_id, friend_member_id, currency, settlement_ready=True,
+    )
+    live_budget = Decimal(str(live["amount"])) if live else Decimal("0.00")
+    results: list[dict] = []
+    for item in remainings:
+        signed = Decimal(str(item["signed"])).quantize(Decimal("0.01"))
+        if abs(signed) < Decimal("0.005"):
+            continue
+        batch = item["batch"]
+        leg = item["leg"]
+        week_label = (
+            f"{group.name} · week ending "
+            f"{batch.window_ends_at.astimezone(BUSINESS_TIMEZONE).date().isoformat()}"
+        )
+        credit_meta = {
+            "kind": "CREDIT", "label": "Extra pay",
+            "currency": item["currency"], "period_key": period.period_key,
+            "group_id": None, "period_id": period.id, "batch_id": batch.id,
+            "payer_member_id": leg.payer_member_id, "recipient_member_id": leg.recipient_member_id,
+            "settlement_ready": True,
+        }
+        group_meta = {
+            "kind": "GROUP", "label": week_label,
+            "currency": item["currency"], "period_key": period.period_key,
+            "group_id": group.id, "period_id": period.id, "batch_id": batch.id,
+            "payer_member_id": leg.payer_member_id, "recipient_member_id": leg.recipient_member_id,
+            "settlement_ready": True,
+        }
+        # No live Who-pays-whom edge (or opposite cash) → private Extra pay.
+        if item["force_credit"] or live_budget * signed <= 0:
+            results.append({**credit_meta, "amount": float(signed)})
+            continue
+        group_part = min(abs(signed), abs(live_budget)).quantize(Decimal("0.01"))
+        sign = Decimal("1") if signed > 0 else Decimal("-1")
+        live_budget -= sign * group_part
+        credit_part = (abs(signed) - group_part).quantize(Decimal("0.01"))
+        if group_part > Decimal("0.005"):
+            results.append({**group_meta, "amount": float(sign * group_part)})
+        if credit_part > Decimal("0.005"):
+            results.append({**credit_meta, "amount": float(sign * credit_part)})
     return results
 
 
@@ -3646,7 +3734,7 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
     for month_key, value in residual_by_month.items():
         if value:
             sources.append({
-                "kind": "DIRECT", "label": f"Payment credit · {month_key}", "amount": float(value),
+                "kind": "DIRECT", "label": f"Extra pay · {month_key}", "amount": float(value),
                 "currency": currency, "period_key": month_key, "group_id": None, "settlement_ready": True,
             })
 
@@ -3663,7 +3751,7 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
             credit_total += amount if payment.payer_account_id == account_id else -amount
     if abs(credit_total) >= Decimal("0.005"):
         sources.append({
-            "kind": "CREDIT", "label": "Payment credit", "amount": float(credit_total),
+            "kind": "CREDIT", "label": "Extra pay", "amount": float(credit_total),
             "currency": currency, "period_key": None, "group_id": None, "settlement_ready": True,
         })
 
@@ -3806,7 +3894,7 @@ def _aggregate_friend_display_sources(atomic_sources: list[dict]) -> list[dict]:
             continue
         if source.get("kind") == "CREDIT":
             credits.append({
-                "kind": "CREDIT", "label": str(source.get("label") or "Payment credit"),
+                "kind": "CREDIT", "label": str(source.get("label") or "Extra pay"),
                 "amount": amount, "currency": currency, "period_key": None, "group_id": None,
                 "settlement_ready": True,
             })
@@ -3852,7 +3940,18 @@ def _aggregate_friend_display_sources(atomic_sources: list[dict]) -> list[dict]:
             **entry,
             "amount": float(amount),
         })
-    display.extend({**entry, "amount": float(entry["amount"].quantize(Decimal("0.01")))} for entry in credits)
+    credit_total = sum((entry["amount"] for entry in credits), Decimal("0.00"))
+    if abs(credit_total) >= Decimal("0.005"):
+        credit_currency = credits[0]["currency"] if credits else "USD"
+        display.append({
+            "kind": "CREDIT",
+            "label": "Extra pay",
+            "amount": float(credit_total.quantize(Decimal("0.01"))),
+            "currency": credit_currency,
+            "period_key": None,
+            "group_id": None,
+            "settlement_ready": True,
+        })
     return display
 
 
