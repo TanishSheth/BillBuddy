@@ -162,19 +162,26 @@ function indexPaidDirectBills(friend) {
   friend.paidDirectSplitIds = paidIds;
 }
 
+function friendPrivateBillsNetSettled(friend, currency) {
+  // Odyssey +$27, Parking −$7.50, Ramayana −$19.50 → net $0. The pair has
+  // settled privately; put every private bill in Paid private bills.
+  const cur = String(currency || "USD");
+  const rows = (friend.rows || []).filter((row) => String(row.split?.currency || "USD") === cur);
+  if (!rows.length) return false;
+  const net = rows.reduce((sum, row) => sum + Number(row.balance || 0), 0);
+  return Math.abs(net) < 0.005;
+}
+
 function isDirectBillSettled(row, friend) {
   // Fully cleared bills belong under "Paid private bills" with strikethrough.
-  // Bills with money left stay in the open Private bills list — never archive
-  // them just because another month's Direct cancelled the net to $0.
   if (["PAID", "CONFIRMED"].includes(String(row.person?.payment_status || "").toUpperCase())) return true;
   if (String(row.split?.status || "").toUpperCase() === "SETTLED") return true;
   if (friend.paidDirectSplitIds?.has(Number(row.split.id))) return true;
   if (Math.abs(Number(row.balance || 0)) < 0.005) return true;
   const monthKey = String(row.split.bill_date).slice(0, 7);
   const currency = row.split.currency || friend.currency || "USD";
-  // Month Direct is fully covered only when this row also has no open balance
-  // (indexPaidDirectBills / payment_status should already have caught it).
-  if (Math.abs(Number(row.balance || 0)) < 0.005 && monthDirectFullyCovered(friend, monthKey, currency)) return true;
+  if (friendPrivateBillsNetSettled(friend, currency)) return true;
+  if (monthDirectFullyCovered(friend, monthKey, currency)) return true;
   const settlement = friend.settlements?.get(monthKey);
   if (!settlement) return false;
   if (settlement.status === "SETTLED") return true;
