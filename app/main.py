@@ -1851,6 +1851,10 @@ def start_account_deletion_cleanup() -> None:
     try:
         purge_expired_sandboxes(db)
         _repair_all_group_payment_snapshots(db)
+        _repair_all_weekly_locks_to_smart(db)
+    except Exception:
+        db.rollback()
+        logger.exception("Startup balance repair failed")
     finally:
         db.close()
     _backfill_expense_audit_baselines()
@@ -3299,9 +3303,14 @@ def _applied_pair_amounts_for_batch(db: Session, batch_id: int) -> dict[tuple[in
 def _compute_weekly_residual_legs(
     db: Session, group: models.Group, period: models.MonthlyPeriod, *, exclude_batch_id: Optional[int] = None,
 ) -> tuple[dict[int, dict], list[dict]]:
-    """Live period net minus older locked nets → residual who-pays-whom legs."""
-    balances, _live_settlements, _expenses = build_balances_and_settlements(
-        db, group.id, period, settlement_mode="simplified",
+    """Live period net minus older locked nets → residual who-pays-whom legs.
+
+    Uses the same expense-aware (smart) graph as the group Balances card so
+    Friends never invents a transfer between two people who only co-owed
+    someone else — that mismatch was showing wrong Bk / Extra pay lines.
+    """
+    balances, _live_settlements, expenses = build_balances_and_settlements(
+        db, group.id, period, settlement_mode="smart",
     )
     locked_nets = _locked_weekly_net_by_member(db, group.id, period.id, exclude_batch_id=exclude_batch_id)
     residual: dict[int, dict] = {}
@@ -3311,13 +3320,15 @@ def _compute_weekly_residual_legs(
         residual[member_id] = {
             "member_id": member_id, "name": row["name"], "net_balance": float(net.quantize(Decimal("0.01"))),
         }
-    legs = simplify_debts(residual)
-    currency = _normalize_currency(group.currency, "USD")
+    members = [{"id": mid, "name": row["name"]} for mid, row in residual.items()]
+    base_currency = _normalize_currency(group.currency, "USD")
+    expense_dicts = _expenses_as_dicts(expenses, base_currency, base_currency)
+    legs = graph_constrained_settlements(members, expense_dicts, residual)
     clean_legs = [{
         "payer_member_id": int(row["from_member_id"]),
         "recipient_member_id": int(row["to_member_id"]),
         "amount": Decimal(str(row["amount"])).quantize(Decimal("0.01")),
-        "currency": currency,
+        "currency": base_currency,
     } for row in legs if Decimal(str(row["amount"])) > 0]
     return residual, clean_legs
 
@@ -3418,6 +3429,57 @@ def _reconcile_latest_weekly_lock(
         "weekly_settlement_batch", latest.id,
     )
     return latest
+
+
+def _repair_all_weekly_locks_to_smart(db: Session) -> int:
+    """Rewrite every latest locked week onto expense-aware Who-pays-whom.
+
+    Older locks used simplify_debts and invented friend↔friend transfers (e.g.
+    co-debtors of Bk). Safe to run on every startup: floors already-paid cash.
+    """
+    latest_ids = [
+        row[0]
+        for row in (
+            db.query(func.max(models.WeeklySettlementBatch.id))
+            .filter(models.WeeklySettlementBatch.status == "LOCKED")
+            .group_by(models.WeeklySettlementBatch.group_id, models.WeeklySettlementBatch.period_id)
+            .all()
+        )
+    ]
+    if not latest_ids:
+        return 0
+    repaired = 0
+    batches = (
+        db.query(models.WeeklySettlementBatch)
+        .filter(models.WeeklySettlementBatch.id.in_(latest_ids))
+        .all()
+    )
+    groups = {
+        g.id: g
+        for g in db.query(models.Group).filter(
+            models.Group.id.in_({batch.group_id for batch in batches})
+        ).all()
+    }
+    periods = {
+        p.id: p
+        for p in db.query(models.MonthlyPeriod).filter(
+            models.MonthlyPeriod.id.in_({batch.period_id for batch in batches})
+        ).all()
+    }
+    for batch in batches:
+        group = groups.get(batch.group_id)
+        period = periods.get(batch.period_id)
+        if not group or not period:
+            continue
+        residual, clean_legs = _compute_weekly_residual_legs(
+            db, group, period, exclude_batch_id=batch.id,
+        )
+        _rewrite_weekly_batch_legs(db, batch, group, period, residual, clean_legs)
+        repaired += 1
+    if repaired:
+        db.commit()
+        logger.info("Repaired %s weekly settlement lock(s) onto smart Who-pays-whom", repaired)
+    return repaired
 
 
 def _lock_weekly_settlement_batch(
@@ -3618,15 +3680,21 @@ def _weekly_pair_settlement_sources(
             applied += take
             period_cash_left[same_key] -= take
         opposite_pool = period_cash_left.get(opp_key, Decimal("0.00"))
-        # Only treat as Extra pay when opposite cash still sits unused on this
-        # period (true overpay). Do not consume the pool here — multiple reverse
-        # leftovers are the same credit event.
-        opposite_applied = opposite_from_alloc + opposite_pool
         remaining = max(Decimal("0.00"), Decimal(str(leg.amount)) - applied).quantize(Decimal("0.01"))
         if remaining <= 0:
             continue
         signed = remaining if leg.payer_member_id == friend_member_id else -remaining
-        if opposite_applied > Decimal("0.005"):
+        # Extra pay only for true reverse overpay: allocation on this batch the
+        # other way, or unused opposite GroupPayment while live Who-pays-whom
+        # for this pair is already clear (bill shrink after cash moved).
+        force_extra = opposite_from_alloc > Decimal("0.005")
+        if not force_extra and opposite_pool > Decimal("0.005"):
+            live_edge = _pair_settlement_source_for_period(
+                db, group, period, my_member_id, friend_member_id, currency, settlement_ready=True,
+            )
+            live_amt = Decimal(str(live_edge["amount"])) if live_edge else Decimal("0.00")
+            force_extra = abs(live_amt) < Decimal("0.005")
+        if force_extra:
             results.append({
                 "kind": "CREDIT", "label": "Extra pay",
                 "amount": float(signed), "currency": _normalize_currency(leg.currency, "USD"),
@@ -3784,12 +3852,20 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
                 continue
             if period.id not in expense_period_ids and period.status != "SETTLED":
                 continue
-            # Friend obligations are immutable weekly settlement legs.  Live
-            # graph optimisation remains a group planning tool only; it can no
-            # longer make yesterday's payable amount silently change.
-            sources.extend(_weekly_pair_settlement_sources(
+            # Prefer locked weekly legs (immutable after cash). If nothing is
+            # locked yet, fall back to the same live smart Who-pays-whom edge
+            # the group Balances card shows — otherwise Friends goes blank.
+            weekly = _weekly_pair_settlement_sources(
                 db, group, period, mine_id, theirs_id, currency,
-            ))
+            )
+            if weekly:
+                sources.extend(weekly)
+                continue
+            live = _pair_settlement_source_for_period(
+                db, group, period, mine_id, theirs_id, currency, settlement_ready=True,
+            )
+            if live:
+                sources.append(live)
     return sources
 
 

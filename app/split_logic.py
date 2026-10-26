@@ -406,4 +406,21 @@ def graph_constrained_settlements(
             "to_name": names.get(lender, str(lender)),
             "amount": round(amount_cents / 100, 2),
         })
+        net_cents[debtor] += amount_cents
+        net_cents[lender] -= amount_cents
+
+    # Overpay / payment-only credit leaves nets with no payer↔participant edge
+    # (the creditor never paid a bill). Settle that leftover with min-cash-flow
+    # so Friends and Balances still show the repayment instead of going blank.
+    leftover = {
+        mid: {
+            "member_id": mid,
+            "name": names.get(mid, str(mid)),
+            "net_balance": net_cents[mid] / 100.0,
+        }
+        for mid in user_ids
+        if abs(net_cents[mid]) > 0
+    }
+    if leftover:
+        settlements.extend(simplify_debts(leftover))
     return settlements
