@@ -18,6 +18,7 @@ class Account(Base):
     password_hash = Column(String(255), nullable=False)
     display_name = Column(String(100), nullable=False)
     avatar_path = Column(String, nullable=True)
+    session_version = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime, server_default=func.now())
     deletion_requested_at = Column(DateTime, nullable=True)
     deletion_purge_after = Column(DateTime, nullable=True)
@@ -102,6 +103,7 @@ class Group(Base):
     invite_code = Column(String(64), unique=True, nullable=False, default=generate_invite_code)
     created_by_id = Column(Integer, ForeignKey("accounts.id"), nullable=False)
     cover_image_path = Column(String, nullable=True)
+    revision = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime, server_default=func.now())
 
     creator = relationship("Account", back_populates="groups_created")
@@ -216,6 +218,67 @@ class Expense(Base):
     payers = relationship("ExpensePayer", back_populates="expense", cascade="all, delete-orphan")
     splits = relationship("ExpenseSplit", back_populates="expense", cascade="all, delete-orphan")
     comments = relationship("ExpenseComment", back_populates="expense", cascade="all, delete-orphan")
+
+
+class ExpenseAuditEvent(Base):
+    """Immutable, hash-linked record of every financial change to a group bill.
+
+    The expense remains the convenient current projection.  This table is the
+    accounting history: rows are append-only and deliberately do not cascade
+    when an expense is deleted.
+    """
+    __tablename__ = "expense_audit_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    expense_id = Column(Integer, nullable=True, index=True)
+    actor_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
+    event_type = Column(String(40), nullable=False)  # CREATED, UPDATED, DELETED
+    revision = Column(Integer, nullable=False)
+    before_json = Column(Text, nullable=True)
+    after_json = Column(Text, nullable=True)
+    changed_fields_json = Column(Text, nullable=True)
+    previous_hash = Column(String(64), nullable=True)
+    event_hash = Column(String(64), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+
+    actor = relationship("Account")
+
+
+class WeeklySettlementBatch(Base):
+    """A locked weekly group settlement snapshot.
+
+    Manual or scheduled lock freezes Friends payment instructions. Later expense
+    edits in the same month rewrite the *latest* locked batch for that period so
+    Friends reflects the correction in the same locked timeframe (not the next week).
+    """
+    __tablename__ = "weekly_settlement_batches"
+    __table_args__ = (UniqueConstraint("group_id", "period_id", "window_ends_at", name="uq_group_weekly_window"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=False, index=True)
+    period_id = Column(Integer, ForeignKey("monthly_periods.id", ondelete="CASCADE"), nullable=False, index=True)
+    window_starts_at = Column(DateTime, nullable=False)
+    window_ends_at = Column(DateTime, nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="LOCKED")
+    snapshot_json = Column(Text, nullable=False)
+    previous_hash = Column(String(64), nullable=True)
+    batch_hash = Column(String(64), nullable=False, unique=True, index=True)
+    created_by_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+
+class WeeklySettlementLeg(Base):
+    __tablename__ = "weekly_settlement_legs"
+    __table_args__ = (UniqueConstraint("batch_id", "payer_member_id", "recipient_member_id", "currency", name="uq_weekly_settlement_leg"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(Integer, ForeignKey("weekly_settlement_batches.id", ondelete="CASCADE"), nullable=False, index=True)
+    payer_member_id = Column(Integer, ForeignKey("group_members.id", ondelete="RESTRICT"), nullable=False)
+    recipient_member_id = Column(Integer, ForeignKey("group_members.id", ondelete="RESTRICT"), nullable=False)
+    amount = Column(Numeric(10, 2), nullable=False)
+    currency = Column(String(10), nullable=False, default="USD")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
 class RecurringExpenseTemplate(Base):

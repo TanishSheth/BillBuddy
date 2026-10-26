@@ -4,6 +4,8 @@ const TOKEN_KEY = "sharesquad_token";
 const LEGACY_TOKEN_KEY = "billbuddy_token";
 const GROUP_KEY = "sharesquad_group_id";
 const LEGACY_GROUP_KEY = "billbuddy_group_id";
+const PRE_DEMO_TOKEN_KEY = "sharesquad_pre_demo_token";
+const PRE_DEMO_GROUP_KEY = "sharesquad_pre_demo_group_id";
 
 function getToken() {
   return localStorage.getItem(TOKEN_KEY) || localStorage.getItem(LEGACY_TOKEN_KEY);
@@ -14,10 +16,55 @@ function setToken(token) {
   localStorage.setItem(LEGACY_TOKEN_KEY, token);
 }
 
+function clearPreDemoSession() {
+  localStorage.removeItem(PRE_DEMO_TOKEN_KEY);
+  localStorage.removeItem(PRE_DEMO_GROUP_KEY);
+}
+
+function stashRealSessionForDemo() {
+  // Already in a sandbox (e.g. Reset demo) — keep the original stash intact.
+  if (localStorage.getItem("sharesquad_demo_sandbox") === "1") return;
+  const token = getToken();
+  if (!token) {
+    clearPreDemoSession();
+    return;
+  }
+  localStorage.setItem(PRE_DEMO_TOKEN_KEY, token);
+  const groupId = getStoredGroupId();
+  if (groupId) localStorage.setItem(PRE_DEMO_GROUP_KEY, groupId);
+  else localStorage.removeItem(PRE_DEMO_GROUP_KEY);
+}
+
+function beginDemoSession(accessToken, groupId) {
+  stashRealSessionForDemo();
+  setToken(accessToken);
+  localStorage.setItem("sharesquad_demo_sandbox", "1");
+  if (groupId != null && groupId !== "") setStoredGroupId(groupId);
+}
+
+/** Leave demo; restore the pre-demo account when one was stashed. Returns true if restored. */
+function exitDemoSession() {
+  const savedToken = localStorage.getItem(PRE_DEMO_TOKEN_KEY);
+  const savedGroup = localStorage.getItem(PRE_DEMO_GROUP_KEY);
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(LEGACY_TOKEN_KEY);
+  localStorage.removeItem("sharesquad_demo_sandbox");
+  clearPreDemoSession();
+  if (savedToken) {
+    setToken(savedToken);
+    if (savedGroup) setStoredGroupId(savedGroup);
+    else removeStoredGroupId();
+    return true;
+  }
+  removeStoredGroupId();
+  return false;
+}
+
 function removeToken() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(LEGACY_TOKEN_KEY);
   localStorage.removeItem("sharesquad_demo_sandbox");
+  clearPreDemoSession();
 }
 
 function renderDemoBanner() {
@@ -41,7 +88,8 @@ function renderDemoBanner() {
       setToken(result.access_token);
       localStorage.setItem("sharesquad_demo_sandbox", "1");
       setStoredGroupId(result.group_id);
-      window.location.href = `/group?group=${encodeURIComponent(result.group_id)}&tab=balances&demo=1`;
+      // Return to the app dashboard so Reset demo matches Try the full demo.
+      window.location.href = "/app?view=groups&demo=1";
     } catch (error) {
       showToast(error.message || "Could not reset the demo", "error");
     }
@@ -403,16 +451,25 @@ function bindLogoutButton() {
   }
   const button = $("#logoutBtn");
   if (!button) return;
+  const inDemo = localStorage.getItem("sharesquad_demo_sandbox") === "1";
+  const label = inDemo ? "Exit demo" : "Sign out";
   // Always restore the same icon + label (covers stale cached HTML that was icon-only).
   button.className = "bb-btn-secondary !py-1.5 !px-2.5 text-[11px] hover:text-stamp hover:border-stamp/40";
   button.type = "button";
-  button.title = "Sign out";
-  button.setAttribute("aria-label", "Sign out");
-  button.innerHTML = '<i data-lucide="log-out" class="w-3.5 h-3.5" aria-hidden="true"></i><span>Sign out</span>';
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.innerHTML = `<i data-lucide="log-out" class="w-3.5 h-3.5" aria-hidden="true"></i><span>${label}</span>`;
   if (window.lucide?.createIcons) window.lucide.createIcons();
   if (button.dataset.boundLogout === "1") return;
   button.dataset.boundLogout = "1";
   button.addEventListener("click", () => {
+    const leavingDemo = localStorage.getItem("sharesquad_demo_sandbox") === "1";
+    if (leavingDemo) {
+      exitDemoSession();
+      // Landing shows Open app when the real session was restored.
+      window.location.replace("/");
+      return;
+    }
     removeToken();
     removeStoredGroupId();
     allowLoginOnce();
@@ -1471,6 +1528,8 @@ window.ShareSquad = {
   getToken,
   setToken,
   removeToken,
+  beginDemoSession,
+  exitDemoSession,
   renderDemoBanner,
   getStoredGroupId,
   setStoredGroupId,

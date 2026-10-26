@@ -409,7 +409,7 @@ function renderOnboarding(groups, friends, quickSplits) {
     [groups.length > 0, "Create your first group", "#newGroupBtn"],
     [groups.some((group) => group.member_count > 1), "Invite a member", "/index.html?view=friends"],
     [quickSplits.length > 0, "Log your first shared bill", "/quick-split.html"],
-    [groups.length > 0 || friends.length > 0, "Review balances and settlements", groups[0] ? "/group.html" : "/index.html?view=friends"],
+    [groups.length > 0 || friends.length > 0, "Review balances and settlements", groups[0] ? `/group.html?group=${encodeURIComponent(groups[0].id)}&tab=balances` : "/index.html?view=friends"],
   ];
   const complete = steps.filter(([done]) => done).length;
   if (complete === steps.length) { card.classList.add("hidden"); return; }

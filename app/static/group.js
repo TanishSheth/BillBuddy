@@ -101,7 +101,7 @@ function syncExpenseCurrencyUI() {
 const GROUP_PAGE_HELP = {
   upload: "<strong>Add / Scan:</strong> Upload a receipt or enter a bill, choose who paid and who shares it, then save it to this month.",
   expenses: "<strong>Expenses:</strong> Newest saves on top. The date column is the receipt date. Filter by the month you added a bill, category, member, or search.",
-  balances: "<strong>Balances & settlement:</strong> Overall who owes whom across every month in this group. Record payments on Friends — amounts here update when a payment is saved.",
+  balances: "<strong>Balances & settlement:</strong> This is the live group plan. Use <em>Lock current week</em> to publish payment instructions on Friends. Edits after a lock update that same locked week on Friends (they do not wait for the next week).",
   insights: "<strong>Insights:</strong> Pick a month to see total spending, top category, and largest bills saved that month.",
   activity: "<strong>Activity:</strong> Follow group changes, expenses, comments, and payment updates in time order.",
   reports: "<strong>PDF Reports:</strong> Generate or download a PDF for the current calendar month, and reopen past PDFs below.",
@@ -786,6 +786,7 @@ async function loadExpenses() {
       <td class="py-2.5 text-right">
         <div class="flex items-center justify-end gap-1">
           <button class="edit-exp p-1 hover:text-brand" data-id="${e.id}" title="Edit"><i data-lucide="edit-2" class="w-3.5 h-3.5"></i></button>
+          <button class="audit-exp p-1 hover:text-brand" data-id="${e.id}" title="Change history"><i data-lucide="history" class="w-3.5 h-3.5"></i></button>
           <button class="comment-exp p-1 hover:text-brand" data-id="${e.id}" title="Comments"><i data-lucide="message-circle" class="w-3.5 h-3.5"></i></button>
           <button class="delete-exp p-1 hover:text-stamp" data-id="${e.id}" data-name="${ShareSquad.escapeHtml(e.store_name)}" title="Delete"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
         </div>
@@ -812,6 +813,7 @@ async function loadExpenses() {
       </div>
       <div class="card-actions">
         <button class="edit-exp bb-btn-secondary !py-1 !px-2 text-xs flex-1" data-id="${e.id}"><i data-lucide="edit-2" class="w-3 h-3"></i> Edit</button>
+        <button class="audit-exp bb-btn-secondary !py-1 !px-2 text-xs flex-1" data-id="${e.id}"><i data-lucide="history" class="w-3 h-3"></i> History</button>
         <button class="comment-exp bb-btn-secondary !py-1 !px-2 text-xs flex-1" data-id="${e.id}"><i data-lucide="message-circle" class="w-3 h-3"></i> Notes</button>
         <button class="delete-exp bb-btn-secondary !py-1 !px-2 text-xs text-stamp border-stamp/30 hover:bg-stamp/5 flex-1" data-id="${e.id}" data-name="${ShareSquad.escapeHtml(e.store_name)}"><i data-lucide="trash-2" class="w-3 h-3"></i> Delete</button>
       </div>
@@ -860,6 +862,7 @@ async function loadExpenses() {
   });
 
   $$(".comment-exp").forEach((btn) => btn.addEventListener("click", () => openComments(Number(btn.dataset.id))));
+  $$(".audit-exp").forEach((btn) => btn.addEventListener("click", () => openExpenseAudit(Number(btn.dataset.id))));
 }
 
 function startEditExpense(exp) {
@@ -917,6 +920,47 @@ async function openComments(expenseId) {
   $("#commentsTitle").textContent = `Notes - ${expense?.store_name || "Expense"}`;
   $("#commentsModal").classList.remove("hidden");
   await loadComments();
+}
+
+async function openExpenseAudit(expenseId) {
+  const expense = state.currentExpenses.find((item) => item.id === expenseId);
+  $("#auditTitle").textContent = `Bill change history — ${expense?.store_name || "Expense"}`;
+  const list = $("#auditList");
+  list.innerHTML = '<p class="text-xs font-mono text-ink/40 py-3">Loading…</p>';
+  $("#auditModal").classList.remove("hidden");
+  try {
+    const events = await ShareSquad.api(`/groups/${gid()}/expenses/${expenseId}/audit`);
+    if (!events.length) {
+      list.innerHTML = '<p class="text-xs font-mono text-ink/40 py-3">No change history yet for this bill.</p>';
+      return;
+    }
+    list.innerHTML = events.map((event) => {
+      const when = ShareSquad.formatDate(event.created_at);
+      const actor = ShareSquad.escapeHtml(event.actor_name || "System");
+      const fields = (event.changed_fields || []).map((field) => ShareSquad.escapeHtml(field)).join(", ");
+      const detail = fields ? `Changed: ${fields}` : (event.event_type || "");
+      return `<article class="p-3 rounded-lg bg-ink/5"><p class="text-xs font-mono uppercase tracking-widest text-brand">${ShareSquad.escapeHtml(event.event_type || "EVENT")} · rev ${event.revision}</p><p class="text-sm text-ink mt-1">${detail}</p><p class="text-[10px] font-mono text-ink/45 mt-1">${actor} · ${when}</p></article>`;
+    }).join("");
+  } catch (err) {
+    list.innerHTML = `<p class="text-xs balance-negative py-3">${ShareSquad.escapeHtml(err.message || "Could not load history")}</p>`;
+  }
+}
+
+async function lockCurrentWeekSettlement() {
+  if (!await ShareSquad.confirmDialog({
+    title: "Lock this week's payment instructions?",
+    message: "This freezes the current group result for Friends now. If someone edits a bill afterward, Friends updates in this same locked week — it does not wait for the next lock.",
+    confirmLabel: "Lock current week",
+    danger: false,
+  })) return;
+  try {
+    const periodKey = state.currentPeriod || calendarPeriodKey();
+    await ShareSquad.api(`/groups/${gid()}/periods/${periodKey}/weekly-settlements/lock`, { method: "POST" });
+    ShareSquad.showToast("Week locked. Payment instructions are on Friends.", "success");
+    if (typeof loadBalances === "function") await loadBalances();
+  } catch (err) {
+    ShareSquad.showToast(err.message || "Could not lock this week", "error");
+  }
 }
 
 async function loadComments() {
@@ -1057,7 +1101,7 @@ async function saveExpense() {
         body: JSON.stringify(payload),
       });
       ShareSquad.showToast(
-        recurringMonthly ? "Expense updated · repeats every month" : "Expense updated successfully",
+        recurringMonthly ? "Expense updated · repeats every month" : "Expense updated · locked Friends instructions for this week were refreshed.",
         "success",
       );
     } else {
@@ -1650,6 +1694,11 @@ async function handleReceiptUpload(file, opts = {}) {
   $("#openAddExpenseBtn")?.addEventListener("click", () => {
     switchTab("upload");
     $("#tab-upload")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  $("#lockWeeklySettlementBtn")?.addEventListener("click", () => lockCurrentWeekSettlement());
+  $("#closeAuditBtn")?.addEventListener("click", () => $("#auditModal").classList.add("hidden"));
+  $("#auditModal")?.addEventListener("click", (e) => {
+    if (e.target.id === "auditModal") $("#auditModal").classList.add("hidden");
   });
 
   $("#cancelEditBtn").addEventListener("click", cancelEdit);

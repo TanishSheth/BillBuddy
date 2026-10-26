@@ -15,6 +15,13 @@ import heapq
 from collections import deque
 
 
+def _reject_duplicate_member_ids(member_ids: Sequence[int]) -> List[int]:
+    ids = [int(mid) for mid in member_ids]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Duplicate split participants are not allowed")
+    return ids
+
+
 def equal_split(
     total_amount: Decimal | float,
     member_ids: Sequence[int],
@@ -23,7 +30,7 @@ def equal_split(
     if not member_ids:
         raise ValueError("split_with must contain at least one member")
 
-    ids = [int(mid) for mid in member_ids]
+    ids = _reject_duplicate_member_ids(member_ids)
     n = len(ids)
     total_cents = int((Decimal(str(total_amount)) * 100).to_integral_value(rounding=ROUND_HALF_UP))
     base_cents, remainder = divmod(total_cents, n)
@@ -43,6 +50,7 @@ def percentage_split(total_amount: Decimal | float, member_percents: Dict[int, D
     """
     if not member_percents:
         raise ValueError("Split must contain at least one member")
+    _reject_duplicate_member_ids(list(member_percents.keys()))
 
     total_pct = sum(Decimal(str(p)) for p in member_percents.values())
     if abs(total_pct - Decimal("100.0")) > Decimal("0.05"):
@@ -76,6 +84,7 @@ def exact_split(total_amount: Decimal | float, member_amounts: Dict[int, Decimal
     """
     if not member_amounts:
         raise ValueError("Split must contain at least one member")
+    _reject_duplicate_member_ids(list(member_amounts.keys()))
 
     total_dec = Decimal(str(total_amount)).quantize(Decimal("0.01"))
     shares = {mid: Decimal(str(amt)).quantize(Decimal("0.01")) for mid, amt in member_amounts.items()}
@@ -93,6 +102,7 @@ def shares_split(total_amount: Decimal | float, member_shares: Dict[int, Decimal
     """
     if not member_shares:
         raise ValueError("Split must contain at least one member")
+    _reject_duplicate_member_ids(list(member_shares.keys()))
 
     total_weight = sum(Decimal(str(w)) for w in member_shares.values())
     if total_weight <= Decimal("0"):
@@ -142,13 +152,20 @@ def calculate_splits(
     # Convert list of dicts [{member_id: X, value: Y}] to dict {member_id: value}
     data_dict: Dict[int, Union[Decimal, float, int]] = {}
     if isinstance(split_inputs, dict):
-        data_dict = split_inputs
+        data_dict = {int(mid): value for mid, value in split_inputs.items()}
+        _reject_duplicate_member_ids(list(data_dict.keys()))
     elif isinstance(split_inputs, list):
+        seen: List[int] = []
         for item in split_inputs:
             if isinstance(item, dict):
-                data_dict[item["member_id"]] = item.get("value", 0)
+                mid = int(item["member_id"])
+                seen.append(mid)
+                data_dict[mid] = item.get("value", 0)
             elif isinstance(item, (int, str)):
-                data_dict[int(item)] = 1
+                mid = int(item)
+                seen.append(mid)
+                data_dict[mid] = 1
+        _reject_duplicate_member_ids(seen)
 
     if split_type == "PERCENTAGE":
         return percentage_split(total_amount, data_dict)

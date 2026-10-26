@@ -446,6 +446,44 @@ class ExpenseOut(BaseModel):
     recurring_active: bool = False
 
 
+class ExpenseAuditEventOut(BaseModel):
+    id: int
+    expense_id: Optional[int] = None
+    event_type: str
+    revision: int
+    actor_name: Optional[str] = None
+    before: Optional[Dict] = None
+    after: Optional[Dict] = None
+    changed_fields: List[str] = []
+    event_hash: str
+    previous_hash: Optional[str] = None
+    created_at: datetime
+
+
+class AuditIntegrityOut(BaseModel):
+    valid: bool
+    checked_events: int
+    issue: Optional[str] = None
+
+
+class WeeklySettlementLegOut(BaseModel):
+    payer_member_id: int
+    recipient_member_id: int
+    amount: float
+    currency: str
+
+
+class WeeklySettlementBatchOut(BaseModel):
+    id: int
+    period_key: str
+    window_starts_at: datetime
+    window_ends_at: datetime
+    status: str
+    legs: List[WeeklySettlementLegOut] = []
+    batch_hash: str
+    created_at: datetime
+
+
 class RecurringExpenseOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

@@ -86,6 +86,9 @@
     <div id="appContent">
 
       <div id="periodBar" class="period-bar flex items-center justify-end mb-6 font-mono text-sm flex-wrap gap-2">
+        <button id="lockWeeklySettlementBtn" type="button" class="bb-btn-secondary !py-1 !px-2.5 text-[11px] flex items-center gap-1.5">
+          <i data-lucide="lock-keyhole" class="w-3.5 h-3.5"></i> <span>Lock current week</span>
+        </button>
         <button id="openAddExpenseBtn" type="button" class="bb-btn-primary !py-1 !px-2.5 text-[11px] flex items-center gap-1.5">
           <i data-lucide="plus" class="w-3.5 h-3.5"></i> <span>Add expense</span>
         </button>
@@ -450,6 +453,9 @@
   <div id="commentsModal" class="modal-overlay hidden">
     <div class="bb-card modal-card"><div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3"><h2 id="commentsTitle" class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Expense comments</h2><button type="button" id="closeCommentsBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button></div><div id="commentsList" class="space-y-3 max-h-[45vh] overflow-y-auto mb-4"></div><form id="commentForm" class="flex gap-2"><input id="commentInput" class="bb-input flex-1" maxlength="1000" placeholder="Optional note or question"><button class="bb-btn-primary !px-3" type="submit">Post</button></form></div>
   </div>
+  <div id="auditModal" class="modal-overlay hidden">
+    <div class="bb-card modal-card max-w-2xl"><div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3"><div><h2 id="auditTitle" class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Bill change history</h2><p class="text-xs text-ink/55 mt-1">Each bill change is preserved. Locked Friends weeks refresh in place when a bill in that period changes.</p></div><button type="button" id="closeAuditBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button></div><div id="auditList" class="space-y-3 max-h-[55vh] overflow-y-auto"></div></div>
+  </div>
 
   <!-- Bottom nav bar (mobile) -->
   <nav class="bottom-nav">
@@ -477,8 +483,8 @@
     Add expense
   </button>
 
-  <script src="/api.js?v=20261020payRemindAny"></script>
-  <script src="/group.js?v=20261020payRemindAny"></script>
+  <script src="/api.js?v=20261026weeklyAudit"></script>
+  <script src="/group.js?v=20261026weeklyAudit"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

@@ -41,6 +41,12 @@ def get_redis():
         return None
 
 
+def clear_memory_rate_limits() -> None:
+    """Test helper: reset the in-process rate-limit buckets."""
+    with _memory_rate_lock:
+        _memory_rate.clear()
+
+
 def rate_limit_hit(key: str, limit: int, window_seconds: int) -> bool:
     """Return True when the caller should be rejected (over limit)."""
     client = get_redis()

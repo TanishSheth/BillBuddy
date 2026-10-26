@@ -19,7 +19,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from . import models
-from .auth import create_access_token, hash_password
+from .auth import create_access_token_for_account, hash_password
 from .config import APP_VERSION
 from .split_logic import calculate_splits
 
@@ -540,7 +540,7 @@ def create_sandbox(db: Session) -> dict:
     db.commit()
     return {
         "sandbox_id": sandbox.id,
-        "access_token": create_access_token(owner.id),
+        "access_token": create_access_token_for_account(owner),
         "group_id": group.id,
         "expires_at": sandbox.expires_at,
     }

@@ -20,7 +20,7 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, 
 from fastapi.responses import FileResponse, Response, StreamingResponse, RedirectResponse
 from PIL import Image, ImageOps
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, or_, update, text
+from sqlalchemy import case, func, or_, update, text
 from sqlalchemy.orm import Session, selectinload
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -42,12 +42,12 @@ from .config import (
 )
 from .database import engine, get_db, Base, SessionLocal
 from .auth import (
-    ACCESS_TOKEN_HEADER,
     get_current_account,
     hash_password,
     verify_password,
     validate_password_strength,
-    create_access_token,
+    create_access_token_for_account,
+    bump_session_version,
     process_pending_invites,
 )
 from .vlm import extract_receipt_data
@@ -175,6 +175,16 @@ def _fanout_group_event(group_id: int, kind: str) -> None:
             pass
 
 
+def _bump_group_revision(db: Session, group_id: int) -> int:
+    """Advance the durable sync revision for a group (call inside the write txn)."""
+    group = db.query(models.Group).get(group_id)
+    if not group:
+        return 0
+    group.revision = int(getattr(group, "revision", 1) or 1) + 1
+    db.add(group)
+    return group.revision
+
+
 def notify_group_change(group_id: int, kind: str = "updated") -> None:
     """Tell open group pages to refresh after a committed change."""
     payload = {"group_id": group_id, "kind": kind}
@@ -203,6 +213,104 @@ def _record_activity(
         group_id=group_id, actor_account_id=actor.id if actor else None,
         event_type=event_type, summary=summary[:300], entity_type=entity_type, entity_id=entity_id,
     ))
+
+
+def _audit_json(value) -> str:
+    """Stable JSON is essential: it is the exact material protected by the hash chain."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _expense_snapshot(db: Session, expense: models.Expense) -> dict:
+    """A complete, human-readable financial snapshot; never expose only a vague update."""
+    payer_rows = db.query(models.ExpensePayer).filter_by(expense_id=expense.id).all()
+    split_rows = db.query(models.ExpenseSplit).filter_by(expense_id=expense.id).all()
+    payers = sorted(
+        [{"member_id": int(row.member_id), "amount": str(Decimal(str(row.amount_paid)).quantize(Decimal("0.01")))} for row in payer_rows],
+        key=lambda row: row["member_id"],
+    )
+    if not payers:
+        payers = [{"member_id": int(expense.payer_member_id), "amount": str(Decimal(str(expense.total_amount)).quantize(Decimal("0.01")))}]
+    splits = sorted(
+        [{"member_id": int(row.member_id), "share_amount": str(Decimal(str(row.share_amount)).quantize(Decimal("0.01"))), "split_value": str(row.split_value) if row.split_value is not None else None} for row in split_rows],
+        key=lambda row: row["member_id"],
+    )
+    return {
+        "store_name": expense.store_name,
+        "bill_date": expense.bill_date.isoformat() if expense.bill_date else None,
+        "total_amount": str(Decimal(str(expense.total_amount)).quantize(Decimal("0.01"))),
+        "currency": _normalize_currency(expense.currency, "USD"),
+        "category": expense.category,
+        "split_type": expense.split_type,
+        "payers": payers,
+        "splits": splits,
+    }
+
+
+def _changed_snapshot_fields(before: Optional[dict], after: Optional[dict]) -> list[str]:
+    keys = sorted(set((before or {}).keys()) | set((after or {}).keys()))
+    return [key for key in keys if (before or {}).get(key) != (after or {}).get(key)]
+
+
+def _record_expense_audit(
+    db: Session, *, group_id: int, expense_id: Optional[int], actor: Optional[models.Account],
+    event_type: str, before: Optional[dict], after: Optional[dict],
+) -> models.ExpenseAuditEvent:
+    """Append one tamper-evident audit event.  No code path updates old audit rows."""
+    prior = (
+        db.query(models.ExpenseAuditEvent)
+        .filter_by(group_id=group_id)
+        .order_by(models.ExpenseAuditEvent.id.desc())
+        .first()
+    )
+    revision = (
+        db.query(func.max(models.ExpenseAuditEvent.revision))
+        .filter_by(group_id=group_id, expense_id=expense_id)
+        .scalar()
+        or 0
+    ) + 1
+    created_at = datetime.now(timezone.utc)
+    changed = _changed_snapshot_fields(before, after)
+    material = {
+        "group_id": group_id, "expense_id": expense_id, "event_type": event_type,
+        "revision": revision, "before": before, "after": after, "changed_fields": changed,
+        "previous_hash": prior.event_hash if prior else None, "created_at": created_at.isoformat(),
+    }
+    event = models.ExpenseAuditEvent(
+        group_id=group_id, expense_id=expense_id, actor_account_id=actor.id if actor else None,
+        event_type=event_type, revision=revision, before_json=_audit_json(before) if before is not None else None,
+        after_json=_audit_json(after) if after is not None else None,
+        changed_fields_json=_audit_json(changed), previous_hash=prior.event_hash if prior else None,
+        event_hash=hashlib.sha256(_audit_json(material).encode("utf-8")).hexdigest(), created_at=created_at,
+    )
+    db.add(event)
+    return event
+
+
+def _backfill_expense_audit_baselines() -> int:
+    """Give pre-audit bills a starting snapshot once, without inventing history."""
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(models.Expense)
+            .join(models.MonthlyPeriod)
+            .outerjoin(models.ExpenseAuditEvent, models.ExpenseAuditEvent.expense_id == models.Expense.id)
+            .filter(models.ExpenseAuditEvent.id.is_(None))
+            .all()
+        )
+        for expense in rows:
+            _record_expense_audit(
+                db, group_id=expense.period.group_id, expense_id=expense.id, actor=None,
+                event_type="BASELINE", before=None, after=_expense_snapshot(db, expense),
+            )
+        if rows:
+            db.commit()
+        return len(rows)
+    except Exception:
+        db.rollback()
+        logger.exception("Expense audit baseline backfill failed")
+        return 0
+    finally:
+        db.close()
 
 
 def _notify_group_members(db: Session, group_id: int, message: str, link: str = "", *, exclude_account_id: Optional[int] = None) -> None:
@@ -380,10 +488,12 @@ def _ensure_schema():
         ("account_settings", "preferred_currency", "VARCHAR(10) DEFAULT 'USD'"),
         ("pending_uploads", "account_id", "INTEGER"),
         ("accounts", "avatar_path", "VARCHAR"),
+        ("accounts", "session_version", "INTEGER NOT NULL DEFAULT 1"),
         ("accounts", "deletion_requested_at", timestamp_type),
         ("accounts", "deletion_purge_after", timestamp_type),
         ("accounts", "deletion_completed_at", timestamp_type),
         ("groups", "cover_image_path", "VARCHAR"),
+        ("groups", "revision", "INTEGER NOT NULL DEFAULT 1"),
         ("group_members", "is_active", "BOOLEAN DEFAULT TRUE"),
         ("group_members", "joined_at", timestamp_type),
         ("group_members", "left_at", timestamp_type),
@@ -671,15 +781,7 @@ async def disable_static_cache(request: Request, call_next):
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
-    # Sliding session: attach a refreshed JWT whenever auth ran successfully.
-    refreshed = getattr(request.state, "refresh_access_token", None)
-    if refreshed:
-        response.headers[ACCESS_TOKEN_HEADER] = refreshed
-        expose = response.headers.get("Access-Control-Expose-Headers", "")
-        parts = [p.strip() for p in expose.split(",") if p.strip()]
-        if ACCESS_TOKEN_HEADER not in parts:
-            parts.append(ACCESS_TOKEN_HEADER)
-            response.headers["Access-Control-Expose-Headers"] = ", ".join(parts)
+    # Absolute JWT lifetime — tokens are not refreshed on each request.
     # Hashed Vite assets may be cached; this app serves classic static files.
     if any(path.startswith(prefix) for prefix in _TIMED_PATH_PREFIXES):
         elapsed_ms = (time.perf_counter() - started) * 1000
@@ -1751,12 +1853,14 @@ def start_account_deletion_cleanup() -> None:
         _repair_all_group_payment_snapshots(db)
     finally:
         db.close()
+    _backfill_expense_audit_baselines()
 
     # Exactly one process owns scheduled digests/rollover/email (RUN_SCHEDULER=1).
     # A filesystem lock prevents duplicate schedulers when WEB_CONCURRENCY>1.
     if RUN_SCHEDULER and not DISABLE_SCHEDULER and _acquire_scheduler_lock():
         _purge_stale_read_notifications()
         _rollover_monthly_periods()
+        _lock_due_weekly_settlements()
         # Digest catch-up only from the scheduler owner — never on every worker.
         if not IS_DEVELOPMENT:
             today = _business_today()
@@ -1777,6 +1881,11 @@ def start_account_deletion_cleanup() -> None:
                 _rollover_monthly_periods,
                 CronTrigger(hour=0, minute=0, timezone=BUSINESS_TIMEZONE),
                 id="monthly-period-rollover", replace_existing=True,
+            )
+            account_cleanup_scheduler.add_job(
+                _lock_due_weekly_settlements,
+                CronTrigger(hour=0, minute=5, timezone=BUSINESS_TIMEZONE),
+                id="weekly-settlement-lock", replace_existing=True,
             )
             account_cleanup_scheduler.add_job(
                 lambda: _deliver_monthly_digests(_period_key_for(date(_business_today().year - (_business_today().month == 1), 12 if _business_today().month == 1 else _business_today().month - 1, 1))),
@@ -1842,7 +1951,7 @@ def demo_sandbox_status(
         sandbox_id=sandbox.id,
         group_id=sandbox.group_id,
         expires_at=sandbox.expires_at,
-        access_token=create_access_token(account.id),
+        access_token=create_access_token_for_account(account),
     )
 
 
@@ -1888,7 +1997,7 @@ def register(payload: schemas.RegisterRequest, request: Request, db: Session = D
 
     db.commit()
     db.refresh(account)
-    token = create_access_token(account.id)
+    token = create_access_token_for_account(account)
     return schemas.TokenResponse(access_token=token)
 
 
@@ -1910,7 +2019,7 @@ def login(payload: schemas.LoginRequest, request: Request, db: Session = Depends
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This account is scheduled for deletion. Restore it within 30 days from the login page.")
 
     process_pending_invites(db, account)
-    token = create_access_token(account.id)
+    token = create_access_token_for_account(account)
     return schemas.TokenResponse(access_token=token)
 
 
@@ -1929,9 +2038,10 @@ def restore_account(payload: schemas.AccountRestoreRequest, request: Request, db
         raise HTTPException(status.HTTP_410_GONE, "The 30-day recovery period has ended")
     account.deletion_requested_at = None
     account.deletion_purge_after = None
+    bump_session_version(account)
     db.commit()
     process_pending_invites(db, account)
-    return schemas.TokenResponse(access_token=create_access_token(account.id))
+    return schemas.TokenResponse(access_token=create_access_token_for_account(account))
 
 
 @app.get("/api/auth/me", response_model=schemas.MeOut)
@@ -1994,6 +2104,7 @@ def update_profile(
         if weak:
             raise HTTPException(400, weak)
         account.password_hash = hash_password(payload.new_password.strip())
+        bump_session_version(account)
 
     db.commit()
     db.refresh(account)
@@ -2016,6 +2127,7 @@ def request_account_deletion(
     now = datetime.now(timezone.utc)
     account.deletion_requested_at = now
     account.deletion_purge_after = now + timedelta(days=30)
+    bump_session_version(account)
     db.commit()
     return schemas.MessageResponse(message="Your account is scheduled for permanent deletion in 30 days. You can restore it by signing in from the login page before then.")
 
@@ -2125,6 +2237,7 @@ def reset_password(payload: schemas.ResetPasswordRequest, request: Request, db: 
 
     account = token_rec.account
     account.password_hash = hash_password(payload.password)
+    bump_session_version(account)
     token_rec.used_at = datetime.now()
     db.commit()
 
@@ -3144,6 +3257,335 @@ def _pair_settlement_source_for_period(
     return None
 
 
+def _locked_weekly_net_by_member(
+    db: Session, group_id: int, period_id: int, *, exclude_batch_id: Optional[int] = None,
+) -> dict[int, Decimal]:
+    """Net already promised by locked weekly batches (credit is positive)."""
+    totals: dict[int, Decimal] = {}
+    query = (
+        db.query(models.WeeklySettlementLeg)
+        .join(models.WeeklySettlementBatch, models.WeeklySettlementLeg.batch_id == models.WeeklySettlementBatch.id)
+        .filter(
+            models.WeeklySettlementBatch.group_id == group_id,
+            models.WeeklySettlementBatch.period_id == period_id,
+            models.WeeklySettlementBatch.status == "LOCKED",
+        )
+    )
+    if exclude_batch_id is not None:
+        query = query.filter(models.WeeklySettlementBatch.id != exclude_batch_id)
+    for row in query.all():
+        amount = Decimal(str(row.amount)).quantize(Decimal("0.01"))
+        totals[row.payer_member_id] = totals.get(row.payer_member_id, Decimal("0.00")) - amount
+        totals[row.recipient_member_id] = totals.get(row.recipient_member_id, Decimal("0.00")) + amount
+    return totals
+
+
+def _applied_pair_amounts_for_batch(db: Session, batch_id: int) -> dict[tuple[int, int], Decimal]:
+    """Confirmed Friends cash already allocated to legs in this locked batch."""
+    applied: dict[tuple[int, int], Decimal] = {}
+    for payment in db.query(models.PairPayment).filter_by(status="CONFIRMED").all():
+        for allocation in json.loads(payment.allocations_json or "[]"):
+            if allocation.get("kind") != "GROUP" or allocation.get("batch_id") != batch_id:
+                continue
+            payer_id = allocation.get("payer_member_id")
+            recipient_id = allocation.get("recipient_member_id")
+            if payer_id is None or recipient_id is None:
+                continue
+            key = (int(payer_id), int(recipient_id))
+            applied[key] = applied.get(key, Decimal("0.00")) + Decimal(str(allocation.get("amount") or 0))
+    return {key: amount.quantize(Decimal("0.01")) for key, amount in applied.items()}
+
+
+def _compute_weekly_residual_legs(
+    db: Session, group: models.Group, period: models.MonthlyPeriod, *, exclude_batch_id: Optional[int] = None,
+) -> tuple[dict[int, dict], list[dict]]:
+    """Live period net minus older locked nets → residual who-pays-whom legs."""
+    balances, _live_settlements, _expenses = build_balances_and_settlements(
+        db, group.id, period, settlement_mode="simplified",
+    )
+    locked_nets = _locked_weekly_net_by_member(db, group.id, period.id, exclude_batch_id=exclude_batch_id)
+    residual: dict[int, dict] = {}
+    for row in balances:
+        member_id = int(row["member_id"])
+        net = Decimal(str(row["net_balance"])) - locked_nets.get(member_id, Decimal("0.00"))
+        residual[member_id] = {
+            "member_id": member_id, "name": row["name"], "net_balance": float(net.quantize(Decimal("0.01"))),
+        }
+    legs = simplify_debts(residual)
+    currency = _normalize_currency(group.currency, "USD")
+    clean_legs = [{
+        "payer_member_id": int(row["from_member_id"]),
+        "recipient_member_id": int(row["to_member_id"]),
+        "amount": Decimal(str(row["amount"])).quantize(Decimal("0.01")),
+        "currency": currency,
+    } for row in legs if Decimal(str(row["amount"])) > 0]
+    return residual, clean_legs
+
+
+def _rewrite_weekly_batch_legs(
+    db: Session,
+    batch: models.WeeklySettlementBatch,
+    group: models.Group,
+    period: models.MonthlyPeriod,
+    residual: dict[int, dict],
+    clean_legs: list[dict],
+) -> None:
+    """Replace legs on an existing locked batch; never drop below already-applied cash."""
+    applied = _applied_pair_amounts_for_batch(db, batch.id)
+    floor_pairs = {key: amount for key, amount in applied.items() if amount > 0}
+    final_legs: dict[tuple[int, int], dict] = {}
+    for leg in clean_legs:
+        key = (leg["payer_member_id"], leg["recipient_member_id"])
+        amount = max(leg["amount"], floor_pairs.pop(key, Decimal("0.00")))
+        final_legs[key] = {
+            "payer_member_id": key[0],
+            "recipient_member_id": key[1],
+            "amount": amount,
+            "currency": leg["currency"],
+        }
+    # Keep a zero-remaining floor leg when cash was already paid on a direction that
+    # no longer appears in residual math, so history stays allocated to this week.
+    for key, paid in floor_pairs.items():
+        final_legs[key] = {
+            "payer_member_id": key[0],
+            "recipient_member_id": key[1],
+            "amount": paid,
+            "currency": _normalize_currency(group.currency, "USD"),
+        }
+
+    db.query(models.WeeklySettlementLeg).filter_by(batch_id=batch.id).delete(synchronize_session=False)
+    serialized = [{
+        "payer_member_id": leg["payer_member_id"],
+        "recipient_member_id": leg["recipient_member_id"],
+        "amount": str(Decimal(str(leg["amount"])).quantize(Decimal("0.01"))),
+        "currency": leg["currency"],
+    } for leg in final_legs.values()]
+    for leg in serialized:
+        db.add(models.WeeklySettlementLeg(
+            batch_id=batch.id,
+            payer_member_id=leg["payer_member_id"],
+            recipient_member_id=leg["recipient_member_id"],
+            amount=Decimal(leg["amount"]),
+            currency=leg["currency"],
+        ))
+    snapshot = {
+        "period_key": period.period_key,
+        "window_starts_at": (_as_utc(batch.window_starts_at) or batch.window_starts_at).isoformat(),
+        "window_ends_at": (_as_utc(batch.window_ends_at) or batch.window_ends_at).isoformat(),
+        "residual_net_by_member": {
+            str(mid): str(Decimal(str(row["net_balance"])).quantize(Decimal("0.01"))) for mid, row in residual.items()
+        },
+        "legs": serialized,
+        "reconciled": True,
+    }
+    prior_chain = (
+        db.query(models.WeeklySettlementBatch)
+        .filter(
+            models.WeeklySettlementBatch.group_id == group.id,
+            models.WeeklySettlementBatch.id != batch.id,
+        )
+        .order_by(models.WeeklySettlementBatch.id.desc())
+        .first()
+    )
+    material = {
+        "group_id": group.id, "period_id": period.id, "snapshot": snapshot,
+        "previous_hash": prior_chain.batch_hash if prior_chain else None,
+        "batch_id": batch.id,
+    }
+    batch.snapshot_json = _audit_json(snapshot)
+    batch.previous_hash = prior_chain.batch_hash if prior_chain else None
+    batch.batch_hash = hashlib.sha256(_audit_json(material).encode("utf-8")).hexdigest()
+    db.add(batch)
+
+
+def _reconcile_latest_weekly_lock(
+    db: Session, group: models.Group, period: models.MonthlyPeriod, *, actor: Optional[models.Account] = None,
+) -> Optional[models.WeeklySettlementBatch]:
+    """After a bill change, rewrite the latest locked week so Friends updates in-place."""
+    latest = (
+        db.query(models.WeeklySettlementBatch)
+        .filter_by(group_id=group.id, period_id=period.id, status="LOCKED")
+        .order_by(models.WeeklySettlementBatch.window_ends_at.desc(), models.WeeklySettlementBatch.id.desc())
+        .first()
+    )
+    if not latest:
+        return None
+    residual, clean_legs = _compute_weekly_residual_legs(db, group, period, exclude_batch_id=latest.id)
+    _rewrite_weekly_batch_legs(db, latest, group, period, residual, clean_legs)
+    _record_activity(
+        db, group.id, actor, "weekly_settlement_reconciled",
+        f"Updated locked weekly instructions through {(_as_utc(latest.window_ends_at) or latest.window_ends_at).astimezone(BUSINESS_TIMEZONE).date().isoformat()} after a bill change.",
+        "weekly_settlement_batch", latest.id,
+    )
+    return latest
+
+
+def _lock_weekly_settlement_batch(
+    db: Session, group: models.Group, period: models.MonthlyPeriod, *,
+    window_ends_at: datetime, created_by: Optional[models.Account] = None,
+) -> models.WeeklySettlementBatch:
+    """Freeze residual debt for Friends. Manual lock is allowed mid-week.
+
+    Later expense edits reconcile the latest locked batch for this period so the
+    correction appears on Friends in that same locked timeframe.
+    """
+    end = _as_utc(window_ends_at) or datetime.now(timezone.utc)
+    existing = db.query(models.WeeklySettlementBatch).filter_by(
+        group_id=group.id, period_id=period.id, window_ends_at=end,
+    ).first()
+    if existing:
+        # Re-locking the same window refreshes legs from live balances.
+        residual, clean_legs = _compute_weekly_residual_legs(db, group, period, exclude_batch_id=existing.id)
+        _rewrite_weekly_batch_legs(db, existing, group, period, residual, clean_legs)
+        return existing
+    previous = (
+        db.query(models.WeeklySettlementBatch)
+        .filter_by(group_id=group.id, period_id=period.id, status="LOCKED")
+        .order_by(models.WeeklySettlementBatch.window_ends_at.desc(), models.WeeklySettlementBatch.id.desc())
+        .first()
+    )
+    start = previous.window_ends_at if previous else datetime.combine(
+        date.fromisoformat(f"{period.period_key}-01"), datetime.min.time(), tzinfo=timezone.utc,
+    )
+    residual, clean_legs = _compute_weekly_residual_legs(db, group, period)
+    serialized = [{
+        "payer_member_id": leg["payer_member_id"],
+        "recipient_member_id": leg["recipient_member_id"],
+        "amount": str(leg["amount"]),
+        "currency": leg["currency"],
+    } for leg in clean_legs]
+    snapshot = {
+        "period_key": period.period_key, "window_starts_at": _as_utc(start).isoformat(),
+        "window_ends_at": end.isoformat(), "residual_net_by_member": {
+            str(mid): str(Decimal(str(row["net_balance"])).quantize(Decimal("0.01"))) for mid, row in residual.items()
+        }, "legs": serialized,
+    }
+    prior_chain = (
+        db.query(models.WeeklySettlementBatch)
+        .filter_by(group_id=group.id).order_by(models.WeeklySettlementBatch.id.desc()).first()
+    )
+    material = {"group_id": group.id, "period_id": period.id, "snapshot": snapshot,
+                "previous_hash": prior_chain.batch_hash if prior_chain else None}
+    batch = models.WeeklySettlementBatch(
+        group_id=group.id, period_id=period.id, window_starts_at=_as_utc(start), window_ends_at=end,
+        status="LOCKED", snapshot_json=_audit_json(snapshot),
+        previous_hash=prior_chain.batch_hash if prior_chain else None,
+        batch_hash=hashlib.sha256(_audit_json(material).encode("utf-8")).hexdigest(),
+        created_by_account_id=created_by.id if created_by else None,
+    )
+    db.add(batch)
+    db.flush()
+    for leg in clean_legs:
+        db.add(models.WeeklySettlementLeg(
+            batch_id=batch.id,
+            payer_member_id=leg["payer_member_id"],
+            recipient_member_id=leg["recipient_member_id"],
+            amount=leg["amount"],
+            currency=leg["currency"],
+        ))
+    _record_activity(
+        db, group.id, created_by, "weekly_settlement_locked",
+        f"Locked weekly settlement through {end.astimezone(BUSINESS_TIMEZONE).date().isoformat()} ({len(clean_legs)} payment instruction{'s' if len(clean_legs) != 1 else ''}).",
+        "weekly_settlement_batch", batch.id,
+    )
+    return batch
+
+
+def _lock_due_weekly_settlements() -> int:
+    """Scheduler-safe catch-up. A restart may delay a lock, but can never duplicate one."""
+    db = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        count = 0
+        periods = (
+            db.query(models.MonthlyPeriod)
+            .join(models.Group)
+            .filter(models.MonthlyPeriod.period_key <= _period_key_for(_business_today()))
+            .all()
+        )
+        for period in periods:
+            group = db.query(models.Group).get(period.group_id)
+            if not group or not db.query(models.Expense.id).filter_by(period_id=period.id).first():
+                continue
+            month_start = datetime.combine(date.fromisoformat(f"{period.period_key}-01"), datetime.min.time(), tzinfo=timezone.utc)
+            next_month = date(month_start.year + (month_start.month == 12), 1 if month_start.month == 12 else month_start.month + 1, 1)
+            month_end = datetime.combine(next_month, datetime.min.time(), tzinfo=timezone.utc)
+            latest = (
+                db.query(models.WeeklySettlementBatch)
+                .filter_by(group_id=group.id, period_id=period.id, status="LOCKED")
+                .order_by(models.WeeklySettlementBatch.window_ends_at.desc()).first()
+            )
+            cursor = _as_utc(latest.window_ends_at) if latest else month_start
+            while cursor < month_end and now >= min(cursor + timedelta(days=7), month_end):
+                end = min(cursor + timedelta(days=7), month_end)
+                _lock_weekly_settlement_batch(db, group, period, window_ends_at=end)
+                cursor = end
+                count += 1
+        if count:
+            db.commit()
+        return count
+    except Exception:
+        db.rollback()
+        logger.exception("Weekly settlement locking failed")
+        return 0
+    finally:
+        db.close()
+
+
+def _weekly_pair_settlement_sources(
+    db: Session, group: models.Group, period: models.MonthlyPeriod, my_member_id: int, friend_member_id: int, currency: str,
+) -> list[dict]:
+    """Only locked weekly instructions appear as payable on Friends.
+
+    Draft group math stays on the group page until someone locks the week
+    (manually or on schedule). Bill edits after a lock rewrite that week's
+    latest locked batch so Friends updates in the same timeframe.
+    """
+    if _normalize_currency(group.currency, "USD") != _normalize_currency(currency, "USD"):
+        return []
+    rows = (
+        db.query(models.WeeklySettlementLeg, models.WeeklySettlementBatch)
+        .join(models.WeeklySettlementBatch, models.WeeklySettlementLeg.batch_id == models.WeeklySettlementBatch.id)
+        .filter(
+            models.WeeklySettlementBatch.group_id == group.id,
+            models.WeeklySettlementBatch.period_id == period.id,
+            models.WeeklySettlementBatch.status == "LOCKED",
+            or_(
+                (models.WeeklySettlementLeg.payer_member_id == my_member_id) & (models.WeeklySettlementLeg.recipient_member_id == friend_member_id),
+                (models.WeeklySettlementLeg.payer_member_id == friend_member_id) & (models.WeeklySettlementLeg.recipient_member_id == my_member_id),
+            ),
+        ).order_by(models.WeeklySettlementBatch.window_ends_at.asc()).all()
+    )
+    results = []
+    for leg, batch in rows:
+        # Pair payments are allocated to a precise frozen leg.  This is vital:
+        # recording a payment must reduce that leg, not make a new graph pass
+        # reroute somebody else's debt.
+        applied = Decimal("0.00")
+        for payment in db.query(models.PairPayment).filter(
+            models.PairPayment.status == "CONFIRMED",
+            models.PairPayment.currency == _normalize_currency(leg.currency, "USD"),
+        ).all():
+            for allocation in json.loads(payment.allocations_json or "[]"):
+                if allocation.get("kind") != "GROUP" or allocation.get("batch_id") != batch.id:
+                    continue
+                if (allocation.get("payer_member_id") == leg.payer_member_id
+                        and allocation.get("recipient_member_id") == leg.recipient_member_id):
+                    applied += Decimal(str(allocation.get("amount") or 0))
+        remaining = max(Decimal("0.00"), Decimal(str(leg.amount)) - applied).quantize(Decimal("0.01"))
+        if remaining <= 0:
+            continue
+        signed = remaining if leg.payer_member_id == friend_member_id else -remaining
+        results.append({
+            "kind": "GROUP", "label": f"{group.name} · week ending {batch.window_ends_at.astimezone(BUSINESS_TIMEZONE).date().isoformat()}",
+            "amount": float(signed), "currency": _normalize_currency(leg.currency, "USD"),
+            "period_key": period.period_key, "group_id": group.id, "period_id": period.id,
+            "batch_id": batch.id, "payer_member_id": leg.payer_member_id, "recipient_member_id": leg.recipient_member_id,
+            "settlement_ready": True,
+        })
+    return results
+
+
 def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, currency: str) -> list[dict]:
     """Friend total sources: Who pays whom (per shared group) + direct private bills.
 
@@ -3208,6 +3650,23 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
                 "currency": currency, "period_key": month_key, "group_id": None, "settlement_ready": True,
             })
 
+    # Intentional overpayments are durable pair-level credits. They are not
+    # silently discarded, and they offset the next bill in this currency.
+    credit_total = Decimal("0.00")
+    for payment in db.query(models.PairPayment).filter_by(
+        account_one_id=one, account_two_id=two, status="CONFIRMED", currency=currency,
+    ).all():
+        for allocation in json.loads(payment.allocations_json or "[]"):
+            if allocation.get("kind") != "CREDIT":
+                continue
+            amount = Decimal(str(allocation.get("amount") or 0)).quantize(Decimal("0.01"))
+            credit_total += amount if payment.payer_account_id == account_id else -amount
+    if abs(credit_total) >= Decimal("0.005"):
+        sources.append({
+            "kind": "CREDIT", "label": "Payment credit", "amount": float(credit_total),
+            "currency": currency, "period_key": None, "group_id": None, "settlement_ready": True,
+        })
+
     # One Who-pays-whom edge per shared group period (same plan as the group Balances card).
     # Include groups whose base currency matches, OR periods settled/previewed into this currency.
     # Batch membership → groups → periods → expense presence to avoid N+1 fan-out.
@@ -3258,17 +3717,16 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
             target_currency = _normalize_currency(target_raw) if target_raw else ""
             if base_currency != currency and target_currency != currency:
                 continue
-            ready = period.status == "SETTLED"
-            if not ready:
-                if not members[account_id].is_active or not members[friend_id].is_active:
-                    continue
-                if period.id not in expense_period_ids:
-                    continue
-            source = _pair_settlement_source_for_period(
-                db, group, period, mine_id, theirs_id, currency, settlement_ready=ready,
-            )
-            if source:
-                sources.append(source)
+            if not members[account_id].is_active or not members[friend_id].is_active:
+                continue
+            if period.id not in expense_period_ids and period.status != "SETTLED":
+                continue
+            # Friend obligations are immutable weekly settlement legs.  Live
+            # graph optimisation remains a group planning tool only; it can no
+            # longer make yesterday's payable amount silently change.
+            sources.extend(_weekly_pair_settlement_sources(
+                db, group, period, mine_id, theirs_id, currency,
+            ))
     return sources
 
 
@@ -3334,6 +3792,7 @@ def _aggregate_friend_display_sources(atomic_sources: list[dict]) -> list[dict]:
     direct_currency = None
     direct_ready = True
     group_totals: dict[int, dict] = {}
+    credits: list[dict] = []
 
     for source in atomic_sources:
         amount = Decimal(str(source.get("amount") or 0))
@@ -3344,6 +3803,13 @@ def _aggregate_friend_display_sources(atomic_sources: list[dict]) -> list[dict]:
             direct_total += amount
             direct_currency = direct_currency or currency
             direct_ready = direct_ready and bool(source.get("settlement_ready", True))
+            continue
+        if source.get("kind") == "CREDIT":
+            credits.append({
+                "kind": "CREDIT", "label": str(source.get("label") or "Payment credit"),
+                "amount": amount, "currency": currency, "period_key": None, "group_id": None,
+                "settlement_ready": True,
+            })
             continue
         if source.get("kind") != "GROUP":
             continue
@@ -3386,6 +3852,7 @@ def _aggregate_friend_display_sources(atomic_sources: list[dict]) -> list[dict]:
             **entry,
             "amount": float(amount),
         })
+    display.extend({**entry, "amount": float(entry["amount"].quantize(Decimal("0.01")))} for entry in credits)
     return display
 
 
@@ -3625,6 +4092,22 @@ def _apply_confirmed_pair_payment(db: Session, payment: models.PairPayment) -> N
         )
         db.add(group_payment)
         db.flush()
+        group = db.query(models.Group).get(period.group_id)
+        actor = db.query(models.Account).get(payment.reported_by_account_id) if payment.reported_by_account_id else None
+        _record_expense_audit(
+            db, group_id=period.group_id, expense_id=None, actor=actor, event_type="PAYMENT_CONFIRMED",
+            before=None, after={
+                "group_payment_id": group_payment.id, "batch_id": allocation.get("batch_id"),
+                "payer_member_id": group_payment.payer_member_id, "recipient_member_id": group_payment.recipient_member_id,
+                "amount": str(Decimal(str(group_payment.amount)).quantize(Decimal("0.01"))),
+                "currency": group_payment.currency,
+            },
+        )
+        _record_activity(
+            db, period.group_id, actor, "weekly_settlement_payment_recorded",
+            f"Recorded payment for a locked weekly settlement ({group.currency if group else group_payment.currency} {group_payment.amount}).",
+            "group_payment", group_payment.id,
+        )
         _repair_group_payment_snapshots(db, period)
     payment.status = "CONFIRMED"
     payment.confirmed_at = datetime.now(timezone.utc)
@@ -4059,10 +4542,7 @@ def record_consolidated_friend_payment(
     amount = Decimal(str(payload.amount)).quantize(Decimal("0.01"))
     if account.id not in (payer_id, recipient_id):
         raise HTTPException(403, "Only the two people in this balance can record payment")
-    if amount > abs(settleable_balance):
-        raise HTTPException(400, f"Payment cannot exceed the payment-ready balance of {normalized_currency} {abs(settleable_balance):.2f}")
-
-    payment_kind = "FULL" if amount == abs(settleable_balance) else "PARTIAL"
+    payment_kind = "OVERPAYMENT" if amount > abs(settleable_balance) else "FULL" if amount == abs(settleable_balance) else "PARTIAL"
 
     remaining = amount
     allocations = []
@@ -4077,11 +4557,15 @@ def record_consolidated_friend_payment(
             allocation.update({
                 "period_id": source["period_id"], "payer_member_id": source["payer_member_id"],
                 "recipient_member_id": source["recipient_member_id"], "group_id": source["group_id"],
+                "batch_id": source.get("batch_id"),
             })
         allocations.append(allocation)
         remaining -= applied
     if remaining > Decimal("0.001"):
-        raise HTTPException(409, "This balance changed. Refresh and try the payment again.")
+        allocations.append({
+            "kind": "CREDIT", "amount": float(remaining), "month_key": None,
+            "payment_kind": "OVERPAYMENT",
+        })
 
     one, two = _friend_pair(account.id, friend_id)
     payment = models.PairPayment(
@@ -4090,9 +4574,25 @@ def record_consolidated_friend_payment(
         allocations_json=json.dumps(allocations),
     )
     db.add(payment)
-    # Either person recording payment applies it immediately — no second confirmation.
-    _apply_confirmed_pair_payment(db, payment)
+    # Lender (recipient / person owed) recording received → auto-confirm.
+    # Owing person marking payment → stays PENDING until the lender confirms.
+    if account.id == recipient_id:
+        _apply_confirmed_pair_payment(db, payment)
+        for allocation in allocations:
+            if allocation.get("kind") == "GROUP" and allocation.get("group_id"):
+                _bump_group_revision(db, int(allocation["group_id"]))
+    else:
+        db.add(models.Notification(
+            account_id=recipient_id,
+            group_id=None,
+            message=f"{account.display_name} marked a {normalized_currency} {float(amount):.2f} payment. Confirm to apply it.",
+            link="/friends.html",
+        ))
     db.commit(); db.refresh(payment)
+    if payment.status == "CONFIRMED":
+        for allocation in allocations:
+            if allocation.get("kind") == "GROUP" and allocation.get("group_id"):
+                notify_group_change(int(allocation["group_id"]), "payment-confirmed")
     return _pair_payment_out(payment)
 
 
@@ -4100,7 +4600,7 @@ def record_consolidated_friend_payment(
 def confirm_consolidated_friend_payment(
     friend_id: int, payment_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db),
 ):
-    """Legacy endpoint for older pending rows; new payments apply on record."""
+    """Only the lender (recipient) may confirm a debtor-reported payment."""
     one, two = _friend_pair(account.id, friend_id)
     payment = db.query(models.PairPayment).filter_by(id=payment_id, account_one_id=one, account_two_id=two).first()
     if not payment:
@@ -4109,10 +4609,17 @@ def confirm_consolidated_friend_payment(
         return _pair_payment_out(payment)
     if payment.status != "PENDING":
         raise HTTPException(400, "This payment has already been handled")
-    if account.id not in (payment.payer_account_id, payment.recipient_account_id):
-        raise HTTPException(403, "Only someone in this payment can confirm it")
+    if account.id != payment.recipient_account_id:
+        raise HTTPException(403, "Only the person who is owed can confirm this payment")
     _apply_confirmed_pair_payment(db, payment)
+    allocations = json.loads(payment.allocations_json or "[]")
+    for allocation in allocations:
+        if allocation.get("kind") == "GROUP" and allocation.get("group_id"):
+            _bump_group_revision(db, int(allocation["group_id"]))
     db.commit(); db.refresh(payment)
+    for allocation in allocations:
+        if allocation.get("kind") == "GROUP" and allocation.get("group_id"):
+            notify_group_change(int(allocation["group_id"]), "payment-confirmed")
     return _pair_payment_out(payment)
 
 
@@ -4165,31 +4672,39 @@ def confirm_friend_settlement(friend_id: int, payload: schemas.FriendSettlementC
         if account.id != settlement.recipient_account_id:
             raise HTTPException(403, "Only the person receiving payment can record receipt")
         settlement.recipient_confirmed = True
-    # Either person recording settles the month immediately — no second confirmation.
-    settlement.payer_confirmed = True
-    settlement.recipient_confirmed = True
-    settlement.status = "SETTLED"
-    settlement.settled_at = datetime.now(timezone.utc)
-    try:
-        start, end = _month_date_bounds(payload.month_key)
-    except ValueError:
-        start = end = None
-    if start and end:
-        rows = (
-            db.query(models.QuickSplit, models.QuickSplitParticipant)
-            .join(models.QuickSplitParticipant)
-            .filter(
-                models.QuickSplit.bill_date >= start,
-                models.QuickSplit.bill_date < end,
-                or_(
-                    (models.QuickSplit.payer_account_id == account.id) & (models.QuickSplitParticipant.account_id == friend_id),
-                    (models.QuickSplit.payer_account_id == friend_id) & (models.QuickSplitParticipant.account_id == account.id),
-                ),
+
+    # Lender (recipient) recording receipt settles immediately.
+    # Debtor marking paid stays PENDING until the lender confirms.
+    lender_settled = account.id == settlement.recipient_account_id
+    if lender_settled:
+        settlement.payer_confirmed = True
+        settlement.recipient_confirmed = True
+    if settlement.payer_confirmed and settlement.recipient_confirmed:
+        settlement.status = "SETTLED"
+        settlement.settled_at = datetime.now(timezone.utc)
+        try:
+            start, end = _month_date_bounds(payload.month_key)
+        except ValueError:
+            start = end = None
+        if start and end:
+            rows = (
+                db.query(models.QuickSplit, models.QuickSplitParticipant)
+                .join(models.QuickSplitParticipant)
+                .filter(
+                    models.QuickSplit.bill_date >= start,
+                    models.QuickSplit.bill_date < end,
+                    or_(
+                        (models.QuickSplit.payer_account_id == account.id) & (models.QuickSplitParticipant.account_id == friend_id),
+                        (models.QuickSplit.payer_account_id == friend_id) & (models.QuickSplitParticipant.account_id == account.id),
+                    ),
+                )
+                .all()
             )
-            .all()
-        )
-        for split, _participant in rows:
-            _mark_quick_split_debtor_paid(split, settlement.payer_account_id)
+            for split, _participant in rows:
+                _mark_quick_split_debtor_paid(split, settlement.payer_account_id)
+    else:
+        settlement.status = "PENDING"
+        settlement.settled_at = None
     db.commit()
     db.refresh(settlement)
     return _friend_settlement_out(settlement)
@@ -4231,8 +4746,9 @@ def join_quick_split(payload: schemas.QuickSplitJoinRequest, account: models.Acc
 
 def _finalize_quick_split_participant_payment(
     db: Session, split: models.QuickSplit, participant: models.QuickSplitParticipant,
+    reported_by_account_id: Optional[int] = None,
 ) -> None:
-    """Apply a private-bill payment immediately (no second-person confirmation)."""
+    """Apply cash for a private-bill participant (caller enforces lender/debtor rules)."""
     remaining = _private_participant_remaining(split, participant)
     if remaining <= 0:
         return
@@ -4245,7 +4761,7 @@ def _finalize_quick_split_participant_payment(
             applied,
             split.currency or "USD",
             split.bill_date.strftime("%Y-%m"),
-            split.payer_account_id,
+            reported_by_account_id or split.payer_account_id,
             quick_split_id=split.id,
         )
 
@@ -4266,7 +4782,22 @@ def mark_quick_split_paid(split_id: int, participant_id: int, account: models.Ac
     if is_debtor:
         participant.account_id = account.id
         participant.display_name = account.display_name
-    _finalize_quick_split_participant_payment(db, split, participant)
+    # Bill payer (lender) recording received → apply now.
+    # Debtor marking paid → MARKED until the lender confirms.
+    if is_payer:
+        _finalize_quick_split_participant_payment(db, split, participant, reported_by_account_id=account.id)
+    else:
+        if _private_participant_remaining(split, participant) <= 0:
+            return _quick_split_out(split, account)
+        participant.payment_status = "MARKED"
+        participant.payment_marked_at = datetime.now(timezone.utc)
+        if split.payer_account_id:
+            db.add(models.Notification(
+                account_id=split.payer_account_id,
+                group_id=None,
+                message=f"{account.display_name} marked their share of “{split.title}” as paid. Confirm to apply it.",
+                link=f"/quick-split.html?id={split.id}",
+            ))
     db.commit()
     db.refresh(split)
     return _quick_split_out(split, account)
@@ -4274,21 +4805,16 @@ def mark_quick_split_paid(split_id: int, participant_id: int, account: models.Ac
 
 @app.post("/api/quick-splits/{split_id}/participants/{participant_id}/confirm", response_model=schemas.QuickSplitOut)
 def confirm_quick_split_payment(split_id: int, participant_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
-    """Legacy alias — mark-paid now applies immediately."""
+    """Only the bill payer (lender) may confirm a debtor-marked payment."""
     split = _require_quick_split_access(split_id, account, db)
     participant = db.query(models.QuickSplitParticipant).filter_by(id=participant_id, quick_split_id=split.id).first()
     if not participant:
         raise HTTPException(404, "Participant not found")
     if participant.payment_status == "CONFIRMED":
         return _quick_split_out(split, account)
-    is_debtor = (
-        (participant.account_id and participant.account_id == account.id)
-        or (participant.email and participant.email.lower() == account.email.lower())
-    )
-    is_payer = split.payer_account_id == account.id
-    if not is_debtor and not is_payer:
-        raise HTTPException(403, "Only the people on this bill can record payment")
-    _finalize_quick_split_participant_payment(db, split, participant)
+    if split.payer_account_id != account.id:
+        raise HTTPException(403, "Only the person who is owed can confirm this payment")
+    _finalize_quick_split_participant_payment(db, split, participant, reported_by_account_id=account.id)
     db.commit()
     db.refresh(split)
     return _quick_split_out(split, account)
@@ -4429,10 +4955,15 @@ def get_group_sync(
     db: Session = Depends(get_db),
 ):
     require_group_member(group_id, account, db)
+    group = db.query(models.Group).get(group_id)
+    revision = int(getattr(group, "revision", 1) or 1) if group else 1
+    # Durable monotonic revision is the source of truth; include a content hash
+    # suffix only for older clients that still compare opaque version strings.
     exp = (
         db.query(
             func.coalesce(func.max(models.Expense.id), 0),
             func.count(models.Expense.id),
+            func.coalesce(func.sum(models.Expense.total_amount), 0),
         )
         .select_from(models.Expense)
         .join(models.MonthlyPeriod, models.Expense.period_id == models.MonthlyPeriod.id)
@@ -4443,8 +4974,22 @@ def get_group_sync(
         db.query(
             func.coalesce(func.max(models.GroupMember.id), 0),
             func.count(models.GroupMember.id),
+            func.coalesce(
+                func.sum(case((or_(models.GroupMember.is_active.is_(True), models.GroupMember.is_active.is_(None)), 1), else_=0)),
+                0,
+            ),
         )
         .filter(models.GroupMember.group_id == group_id)
+        .first()
+    )
+    pay = (
+        db.query(
+            func.coalesce(func.max(models.GroupPayment.id), 0),
+            func.count(models.GroupPayment.id),
+        )
+        .select_from(models.GroupPayment)
+        .join(models.MonthlyPeriod, models.GroupPayment.period_id == models.MonthlyPeriod.id)
+        .filter(models.MonthlyPeriod.group_id == group_id)
         .first()
     )
     periods = (
@@ -4457,8 +5002,8 @@ def get_group_sync(
         f"{p.period_key}:{p.status}:{p.target_currency}:{p.settlement_fx_rate}:{p.pdf_filename}"
         for p in periods
     )
-    raw = f"{exp[0]}:{exp[1]}:{mem[0]}:{mem[1]}:{period_sig}"
-    version = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
+    raw = f"{revision}:{exp[0]}:{exp[1]}:{exp[2]}:{mem[0]}:{mem[1]}:{mem[2]}:{pay[0]}:{pay[1]}:{period_sig}"
+    version = f"r{revision}-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
     return schemas.GroupSyncOut(version=version)
 
 
@@ -5237,8 +5782,13 @@ def _apply_expense_splits_custom(
     
     # Build inputs for calculate_splits
     if split_details and len(split_details) > 0:
+        detail_ids = [int(item.member_id) for item in split_details]
+        if len(detail_ids) != len(set(detail_ids)):
+            raise HTTPException(400, "Duplicate split participants are not allowed")
         inputs = {item.member_id: (item.value if item.value is not None else 1.0) for item in split_details}
     elif split_with and len(split_with) > 0:
+        if len(split_with) != len(set(int(mid) for mid in split_with)):
+            raise HTTPException(400, "Duplicate split participants are not allowed")
         inputs = split_with
     else:
         raise HTTPException(400, "Must specify members to split with")
@@ -5258,7 +5808,13 @@ def _apply_expense_splits_custom(
             remainder_offset = prior
         shares = calculate_splits(split_type, total_amount, inputs, remainder_offset=remainder_offset)
     except ValueError as e:
-        raise HTTPException(400, "Invalid split values — check the amounts entered") from e
+        message = str(e) if "Duplicate" in str(e) else "Invalid split values — check the amounts entered"
+        raise HTTPException(400, message) from e
+
+    total_dec = Decimal(str(total_amount)).quantize(Decimal("0.01"))
+    share_sum = sum((Decimal(str(amount)).quantize(Decimal("0.01")) for amount in shares.values()), Decimal("0.00"))
+    if abs(share_sum - total_dec) > Decimal("0.01"):
+        raise HTTPException(400, "Split shares must add up to the bill total")
 
     for mid, amount in shares.items():
         val = None
@@ -5576,8 +6132,32 @@ def create_expense(
     if not group:
         raise HTTPException(404, "Group not found")
 
+    participant_ids = []
+    if payload.split_details:
+        participant_ids = [d.member_id for d in payload.split_details]
+    elif payload.split_with:
+        participant_ids = payload.split_with
+    else:
+        raise HTTPException(400, "Must specify members to split with")
+    if len(participant_ids) != len(set(int(mid) for mid in participant_ids)):
+        raise HTTPException(400, "Duplicate split participants are not allowed")
+
+    payer_ids = [item.member_id for item in payload.payers] if payload.payers and len(payload.payers) >= 2 else [payload.payer_member_id]
+    _validate_expense_members(db, group_id, payer_ids[0], participant_ids + payer_ids[1:])
+
+    # Period = month the bill is saved on the server. Client period_key is ignored.
+    # bill_date stays the receipt date (Added late when older than the save month).
+    period_key = _period_key_for(_business_today())
+    period = get_or_create_period(db, group_id, period_key)
+    _unlock_group_period(period)
+
+    expense_currency = _normalize_currency(payload.currency, group.currency or "USD")
+    group_currency = _normalize_currency(group.currency, "USD")
+    fx_rate = _fx_rate_between(expense_currency, group_currency)
+
     final_path = None
     pending = None
+    pending_src = None
     if payload.upload_id:
         pending = (
             db.query(models.PendingUpload)
@@ -5586,75 +6166,75 @@ def create_expense(
         )
         if not pending or not os.path.exists(pending.file_path):
             raise HTTPException(400, "Upload not found or already used. Re-upload the receipt.")
+        pending_src = pending.file_path
         ext = os.path.splitext(pending.file_path)[1]
         final_filename = f"{uuid.uuid4().hex}{ext}"
         group_uploads = _group_uploads_dir(group_id)
         final_path = os.path.join(group_uploads, final_filename)
+        # Move only after membership/split validation above succeeded.
         shutil.move(pending.file_path, final_path)
 
-    participant_ids = []
-    if payload.split_details:
-        participant_ids = [d.member_id for d in payload.split_details]
-    elif payload.split_with:
-        participant_ids = payload.split_with
-    else:
-        raise HTTPException(400, "Must specify members to split with")
+    try:
+        expense = models.Expense(
+            period_id=period.id,
+            store_name=payload.store_name.strip(),
+            bill_date=payload.bill_date,
+            total_amount=Decimal(str(payload.total_amount)),
+            currency=expense_currency,
+            category=_normalize_category(payload.category),
+            split_type=payload.split_type or "EQUAL",
+            payer_member_id=payload.payer_member_id,
+            image_path=final_path,
+            fx_rate_to_group=fx_rate,
+        )
+        db.add(expense)
+        db.flush()
+        expense.payer_member_id = _apply_expense_payers(db, expense, payload.total_amount, payload.payer_member_id, payload.payers)
 
-    payer_ids = [item.member_id for item in payload.payers] if payload.payers and len(payload.payers) >= 2 else [payload.payer_member_id]
-    _validate_expense_members(db, group_id, payer_ids[0], participant_ids + payer_ids[1:])
-
-    # Period = month the bill is saved (balances / digests). bill_date stays the receipt date.
-    period_key = payload.period_key or _period_key_for(_business_today())
-    period = get_or_create_period(db, group_id, period_key)
-    _unlock_group_period(period)
-
-    expense_currency = _normalize_currency(payload.currency, group.currency or "USD")
-    group_currency = _normalize_currency(group.currency, "USD")
-    fx_rate = _fx_rate_between(expense_currency, group_currency)
-
-    expense = models.Expense(
-        period_id=period.id,
-        store_name=payload.store_name.strip(),
-        bill_date=payload.bill_date,
-        total_amount=Decimal(str(payload.total_amount)),
-        currency=expense_currency,
-        category=_normalize_category(payload.category),
-        split_type=payload.split_type or "EQUAL",
-        payer_member_id=payload.payer_member_id,
-        image_path=final_path,
-        fx_rate_to_group=fx_rate,
-    )
-    db.add(expense)
-    db.flush()
-    expense.payer_member_id = _apply_expense_payers(db, expense, payload.total_amount, payload.payer_member_id, payload.payers)
-
-    _apply_expense_splits_custom(
-        db,
-        expense,
-        payload.total_amount,
-        payload.split_type or "EQUAL",
-        payload.split_with,
-        payload.split_details,
-    )
-
-    _remember_account_vendor(
-        db, account.id, payload.store_name, pending=pending, category=_normalize_category(payload.category),
-    )
-    if pending:
-        db.delete(pending)
-
-    db.flush()
-    if payload.recurring_monthly:
-        _upsert_recurring_template_for_expense(
+        _apply_expense_splits_custom(
             db,
-            group_id=group_id,
-            account=account,
-            expense=expense,
-            payload=payload,
-            enable=True,
+            expense,
+            payload.total_amount,
+            payload.split_type or "EQUAL",
+            payload.split_with,
+            payload.split_details,
         )
 
-    db.commit()
+        _remember_account_vendor(
+            db, account.id, payload.store_name, pending=pending, category=_normalize_category(payload.category),
+        )
+        if pending:
+            db.delete(pending)
+
+        db.flush()
+        if payload.recurring_monthly:
+            _upsert_recurring_template_for_expense(
+                db,
+                group_id=group_id,
+                account=account,
+                expense=expense,
+                payload=payload,
+                enable=True,
+            )
+
+        # A new bill starts an immutable financial history immediately.
+        _record_expense_audit(
+            db, group_id=group_id, expense_id=expense.id, actor=account,
+            event_type="CREATED", before=None, after=_expense_snapshot(db, expense),
+        )
+        _reconcile_latest_weekly_lock(db, group, period, actor=account)
+        _bump_group_revision(db, group_id)
+        db.commit()
+    except Exception:
+        db.rollback()
+        # Restore the pending upload file if we moved it before a later failure.
+        if pending_src and final_path and os.path.exists(final_path) and not os.path.exists(pending_src):
+            try:
+                os.makedirs(os.path.dirname(pending_src), exist_ok=True)
+                shutil.move(final_path, pending_src)
+            except OSError:
+                logger.exception("Could not restore pending upload after failed expense save")
+        raise
     db.refresh(expense)
     _record_activity(db, group_id, account, "expense_created", f"{account.display_name} added {expense.store_name}", "expense", expense.id)
     note = f"{account.display_name} added {expense.store_name} to this group."
@@ -5681,6 +6261,7 @@ def update_expense(
     if not expense or expense.period.group_id != group_id:
         raise HTTPException(404, "Expense not found")
     was_locked = _require_expense_editable(db, expense.period, account, group_id, owner_override)
+    before_snapshot = _expense_snapshot(db, expense)
 
     participant_ids = []
     if payload.split_details:
@@ -5725,11 +6306,19 @@ def update_expense(
             enable=bool(payload.recurring_monthly),
         )
 
+    db.flush()
+    after_snapshot = _expense_snapshot(db, expense)
+    _record_expense_audit(
+        db, group_id=group_id, expense_id=expense.id, actor=account,
+        event_type="UPDATED", before=before_snapshot, after=after_snapshot,
+    )
+    _reconcile_latest_weekly_lock(db, group, expense.period, actor=account)
+    _bump_group_revision(db, group_id)
     db.commit()
     db.refresh(expense)
     _record_activity(db, group_id, account, "expense_updated", f"{account.display_name} updated {expense.store_name}", "expense", expense.id)
     if was_locked:
-        _notify_group_members(db, group_id, f"{account.display_name} corrected {expense.store_name}. Recorded payments stay applied; any overpay is now credit on the balance.", _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
+        _notify_group_members(db, group_id, f"{account.display_name} corrected {expense.store_name}. Recorded payments stay applied; any overpay is now credit on the balance. Locked Friends instructions for this week were updated.", _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
     else:
         _notify_group_members(db, group_id, f"{account.display_name} updated {expense.store_name}.", _group_focus_link(group_id, "expenses", f"expense-{expense.id}"), exclude_account_id=account.id)
     db.commit()
@@ -5758,11 +6347,22 @@ def delete_expense(
             pass
 
     store_name = expense.store_name
+    period = expense.period
+    group = db.query(models.Group).get(group_id)
+    before_snapshot = _expense_snapshot(db, expense)
+    _record_expense_audit(
+        db, group_id=group_id, expense_id=expense.id, actor=account,
+        event_type="DELETED", before=before_snapshot, after=None,
+    )
     db.delete(expense)
+    db.flush()
+    if group:
+        _reconcile_latest_weekly_lock(db, group, period, actor=account)
+    _bump_group_revision(db, group_id)
     _record_activity(db, group_id, account, "expense_deleted", f"{account.display_name} deleted {store_name}", "expense", expense_id)
     text = f"{account.display_name} {'corrected the period by deleting' if was_locked else 'deleted'} {store_name}."
     if was_locked:
-        text += " Recorded payments stay applied; any overpay is now credit on the balance."
+        text += " Recorded payments stay applied; any overpay is now credit on the balance. Locked Friends instructions for this week were updated."
     _notify_group_members(db, group_id, text, _group_focus_link(group_id, "expenses", "expensesBody"), exclude_account_id=account.id)
     db.commit()
     notify_group_change(group_id, "expense-deleted")
@@ -5888,6 +6488,84 @@ def list_group_activity(group_id: int, limit: int = Query(30, ge=1, le=100), acc
     require_group_member(group_id, account, db)
     rows = db.query(models.GroupActivity).filter_by(group_id=group_id).order_by(models.GroupActivity.created_at.desc(), models.GroupActivity.id.desc()).limit(limit).all()
     return [schemas.GroupActivityOut(id=row.id, event_type=row.event_type, summary=row.summary, actor_name=row.actor.display_name if row.actor else None, entity_type=row.entity_type, entity_id=row.entity_id, created_at=row.created_at) for row in rows]
+
+
+def _audit_event_out(row: models.ExpenseAuditEvent) -> schemas.ExpenseAuditEventOut:
+    return schemas.ExpenseAuditEventOut(
+        id=row.id, expense_id=row.expense_id, event_type=row.event_type, revision=row.revision,
+        actor_name=row.actor.display_name if row.actor else None,
+        before=json.loads(row.before_json) if row.before_json else None,
+        after=json.loads(row.after_json) if row.after_json else None,
+        changed_fields=json.loads(row.changed_fields_json or "[]"), event_hash=row.event_hash,
+        previous_hash=row.previous_hash, created_at=row.created_at,
+    )
+
+
+@app.get("/api/groups/{group_id}/expenses/{expense_id}/audit", response_model=list[schemas.ExpenseAuditEventOut])
+def list_expense_audit(group_id: int, expense_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    require_group_member(group_id, account, db)
+    # A deleted bill deliberately has no Expense row, but its audit remains readable.
+    rows = db.query(models.ExpenseAuditEvent).filter_by(group_id=group_id, expense_id=expense_id).order_by(models.ExpenseAuditEvent.revision.asc()).all()
+    if not rows and not _group_expense_or_404(db, group_id, expense_id):
+        raise HTTPException(404, "Expense not found")
+    return [_audit_event_out(row) for row in rows]
+
+
+@app.get("/api/groups/{group_id}/audit/integrity", response_model=schemas.AuditIntegrityOut)
+def verify_group_audit_integrity(group_id: int, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    require_group_member(group_id, account, db)
+    rows = db.query(models.ExpenseAuditEvent).filter_by(group_id=group_id).order_by(models.ExpenseAuditEvent.id.asc()).all()
+    prior_hash = None
+    for row in rows:
+        before = json.loads(row.before_json) if row.before_json else None
+        after = json.loads(row.after_json) if row.after_json else None
+        changed = json.loads(row.changed_fields_json or "[]")
+        timestamp = _as_utc(row.created_at).isoformat()
+        material = {"group_id": row.group_id, "expense_id": row.expense_id, "event_type": row.event_type,
+                    "revision": row.revision, "before": before, "after": after, "changed_fields": changed,
+                    "previous_hash": prior_hash, "created_at": timestamp}
+        calculated = hashlib.sha256(_audit_json(material).encode("utf-8")).hexdigest()
+        if row.previous_hash != prior_hash or row.event_hash != calculated:
+            return schemas.AuditIntegrityOut(valid=False, checked_events=len(rows), issue=f"Audit chain mismatch at event {row.id}")
+        prior_hash = row.event_hash
+    return schemas.AuditIntegrityOut(valid=True, checked_events=len(rows))
+
+
+def _weekly_batch_out(db: Session, batch: models.WeeklySettlementBatch) -> schemas.WeeklySettlementBatchOut:
+    period = db.query(models.MonthlyPeriod).get(batch.period_id)
+    legs = db.query(models.WeeklySettlementLeg).filter_by(batch_id=batch.id).all()
+    return schemas.WeeklySettlementBatchOut(
+        id=batch.id, period_key=period.period_key if period else "", window_starts_at=batch.window_starts_at,
+        window_ends_at=batch.window_ends_at, status=batch.status, batch_hash=batch.batch_hash,
+        created_at=batch.created_at,
+        legs=[schemas.WeeklySettlementLegOut(payer_member_id=leg.payer_member_id, recipient_member_id=leg.recipient_member_id, amount=float(leg.amount), currency=leg.currency) for leg in legs],
+    )
+
+
+@app.get("/api/groups/{group_id}/periods/{period_key}/weekly-settlements", response_model=list[schemas.WeeklySettlementBatchOut])
+def list_weekly_settlement_batches(group_id: int, period_key: str, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    require_group_member(group_id, account, db)
+    period = db.query(models.MonthlyPeriod).filter_by(group_id=group_id, period_key=period_key).first()
+    if not period:
+        return []
+    rows = db.query(models.WeeklySettlementBatch).filter_by(group_id=group_id, period_id=period.id).order_by(models.WeeklySettlementBatch.window_ends_at.asc()).all()
+    return [_weekly_batch_out(db, row) for row in rows]
+
+
+@app.post("/api/groups/{group_id}/periods/{period_key}/weekly-settlements/lock", response_model=schemas.WeeklySettlementBatchOut)
+def lock_weekly_settlement_now(group_id: int, period_key: str, account: models.Account = Depends(get_current_account), db: Session = Depends(get_db)):
+    require_group_member(group_id, account, db)
+    group = db.query(models.Group).get(group_id)
+    period = get_or_create_period(db, group_id, period_key)
+    # Manual mid-week lock: freeze current residual for Friends now.
+    # Later bill edits reconcile this same locked batch instead of waiting a week.
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    batch = _lock_weekly_settlement_batch(db, group, period, window_ends_at=now, created_by=account)
+    _bump_group_revision(db, group_id)
+    db.commit()
+    db.refresh(batch)
+    notify_group_change(group_id, "weekly-settlement-locked")
+    return _weekly_batch_out(db, batch)
 
 
 @app.get("/api/notifications", response_model=list[schemas.NotificationOut])

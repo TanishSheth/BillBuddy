@@ -17,7 +17,7 @@ def _normalize_database_url(url: str) -> str:
     return url
 
 
-APP_VERSION = os.environ.get("APP_VERSION", "20261020smtpFromName")
+APP_VERSION = os.environ.get("APP_VERSION", "20261026weeklyAudit")
 ENVIRONMENT = os.environ.get("BILLBUDDY_ENV", "development").strip().lower()
 IS_DEVELOPMENT = ENVIRONMENT == "development"
 DISABLE_SCHEDULER = _is_truthy(os.environ.get("DISABLE_SCHEDULER"))
@@ -45,8 +45,8 @@ DATABASE_URL = _normalize_database_url(
 
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8001")
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-only-change-me-in-production")
-# Sliding session: each authenticated API call refreshes a token that lasts this long.
-ACCESS_TOKEN_EXPIRE_DAYS = int(os.environ.get("ACCESS_TOKEN_EXPIRE_DAYS", "30"))
+# Absolute JWT lifetime (no sliding refresh). Password/security changes bump session_version.
+ACCESS_TOKEN_EXPIRE_DAYS = int(os.environ.get("ACCESS_TOKEN_EXPIRE_DAYS", "7"))
 
 PORT = int(os.environ.get("PORT", "8000"))
 

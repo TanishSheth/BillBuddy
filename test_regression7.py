@@ -54,6 +54,22 @@ def test_dashboard_does_not_probe_demo_sandbox():
     assert 'sharesquad_demo_sandbox") === "1"' in js
 
 
+def test_demo_preserves_real_session_on_exit():
+    api_js = open(
+        os.path.join(os.path.dirname(__file__), "app", "static", "api.js"),
+        encoding="utf-8",
+    ).read()
+    landing = open(
+        os.path.join(os.path.dirname(__file__), "app", "static", "landing.html"),
+        encoding="utf-8",
+    ).read()
+    assert "sharesquad_pre_demo_token" in api_js
+    assert "function beginDemoSession" in api_js
+    assert "function exitDemoSession" in api_js
+    assert "beginDemoSession(" in landing
+    assert "exitDemoSession()" in api_js
+
+
 def test_smtp_timeout_default_is_short():
     src = open(
         os.path.join(os.path.dirname(__file__), "app", "emailer.py"),

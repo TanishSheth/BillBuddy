@@ -8,12 +8,14 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.database import SessionLocal
 from app import models
+from app.redis_support import clear_memory_rate_limits
 import json
 
 client = TestClient(app)
 
 
 def test_consolidated_payment_marks_private_bill_paid():
+    clear_memory_rate_limits()
     pid = os.getpid()
     email_a = f"lyft_a_{pid}@example.com"
     email_b = f"lyft_b_{pid}@gmail.com"
@@ -52,17 +54,29 @@ def test_consolidated_payment_marks_private_bill_paid():
     )
     assert paid.status_code == 200, paid.text
     payment = paid.json()
-    assert payment["status"] == "CONFIRMED"
-    assert any(alloc.get("quick_split_id") == split["id"] for alloc in payment.get("allocations") or []), payment
+    # Debtor-marked payments stay PENDING until the lender confirms.
+    assert payment["status"] == "PENDING", payment
+
+    confirmed = client.post(
+        f"/api/friends/{bob}/consolidated-payments/{payment['id']}/confirm",
+        headers=ha,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    confirmed_body = confirmed.json()
+    assert confirmed_body["status"] == "CONFIRMED"
+    assert any(
+        alloc.get("quick_split_id") == split["id"] for alloc in confirmed_body.get("allocations") or []
+    ), confirmed_body
 
     detail = client.get(f"/api/quick-splits/{split['id']}", headers=ha)
     assert detail.status_code == 200, detail.text
     participant = detail.json()["participants"][0]
     assert participant["payment_status"] == "CONFIRMED", participant
-    print("  [PASS] consolidated payment marks Lyft private bill CONFIRMED")
+    print("  [PASS] debtor payment pending then lender confirm marks Lyft private bill CONFIRMED")
 
 
 def test_repair_marks_legacy_month_allocation():
+    clear_memory_rate_limits()
     pid = os.getpid() + 17
     email_a = f"legacy_a_{pid}@example.com"
     email_b = f"legacy_b_{pid}@gmail.com"
