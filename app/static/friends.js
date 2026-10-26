@@ -163,18 +163,18 @@ function indexPaidDirectBills(friend) {
 }
 
 function isDirectBillSettled(row, friend) {
-  // A private bill can be closed by its own confirmed payment before (or
-  // independently of) the monthly Friend settlement. Keep it visibly paid in
-  // either case so the ledger never loses its strike-through state.
+  // Fully cleared bills belong under "Paid private bills" with strikethrough.
+  // Bills with money left stay in the open Private bills list — never archive
+  // them just because another month's Direct cancelled the net to $0.
   if (["PAID", "CONFIRMED"].includes(String(row.person?.payment_status || "").toUpperCase())) return true;
   if (String(row.split?.status || "").toUpperCase() === "SETTLED") return true;
   if (friend.paidDirectSplitIds?.has(Number(row.split.id))) return true;
   if (Math.abs(Number(row.balance || 0)) < 0.005) return true;
-  // Still owes money on this row — never file it as Paid because another
-  // month's Direct cancelled the display total (Sep +$19.50 vs Oct −$19.50).
   const monthKey = String(row.split.bill_date).slice(0, 7);
   const currency = row.split.currency || friend.currency || "USD";
-  if (monthDirectFullyCovered(friend, monthKey, currency)) return true;
+  // Month Direct is fully covered only when this row also has no open balance
+  // (indexPaidDirectBills / payment_status should already have caught it).
+  if (Math.abs(Number(row.balance || 0)) < 0.005 && monthDirectFullyCovered(friend, monthKey, currency)) return true;
   const settlement = friend.settlements?.get(monthKey);
   if (!settlement) return false;
   if (settlement.status === "SETTLED") return true;
@@ -536,19 +536,24 @@ function renderLedger(friend) {
     return `<button type="button" class="member-row group-ledger-row w-full text-left" data-group-id="${group.groupId}"><div><p class="font-semibold text-sm">Group settlement · ${ShareSquad.escapeHtml(group.name)}</p><p class="text-xs text-ink/55">${expenseNote}</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${amountTone}">${amountText}</p><p class="text-[10px] text-ink/50">${status}</p></div></button>`;
   }).join("")}</section>` : "";
   const hasPrivate = openRows.length || paidRows.length;
-  // Header must match the lists below — never show "Settled" while open rows remain
-  // (cross-month Direct nets can cancel in the summary while bills are still unpaid).
+  // Header matches the lists: Settled only when nothing is open. If open bills
+  // net to $0 across months, show "N open" — never look settled while rows remain.
   const openPrivateTotal = openRows.reduce((sum, row) => sum + Number(row.balance || 0), 0);
   const privateHeaderTone = !openRows.length
     ? "text-ink/50"
     : openPrivateTotal > 0.005 ? "text-green-700" : openPrivateTotal < -0.005 ? "text-red-700" : "text-ink/50";
-  const privateHeaderValue = !openRows.length
-    ? "Settled"
-    : (directSummary.length
-      ? directSummary.map((item) => signedMoney(item.amount, item.currency)).join(" · ")
-      : signedMoney(openPrivateTotal, openRows[0]?.split?.currency || friend.currency || "USD"));
+  let privateHeaderValue = "Settled";
+  if (openRows.length) {
+    if (directSummary.length) {
+      privateHeaderValue = directSummary.map((item) => signedMoney(item.amount, item.currency)).join(" · ");
+    } else if (Math.abs(openPrivateTotal) >= 0.005) {
+      privateHeaderValue = signedMoney(openPrivateTotal, openRows[0]?.split?.currency || friend.currency || "USD");
+    } else {
+      privateHeaderValue = `${openRows.length} open`;
+    }
+  }
   const directHeader = hasPrivate ? `<div class="flex items-center justify-between gap-3"><p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Private bills</p><span class="text-[10px] font-mono ${privateHeaderTone}">${privateHeaderValue}</span></div>` : "";
-  const privateHtml = hasPrivate ? `<section class="space-y-2 ${groupHtml ? "pt-4 mt-4 border-t border-ink/10" : ""}">${directHeader}${openRows.map((row) => directLedgerRow(row, friend)).join("")}${paidRows.length ? `<details class="pt-2"><summary class="cursor-pointer text-xs font-semibold text-ink/60">Paid private bills · ${paidRows.length}</summary><div class="space-y-2 mt-2">${paidRows.map((row) => directLedgerRow(row, friend)).join("")}</div></details>` : ""}</section>` : "";
+  const privateHtml = hasPrivate ? `<section class="space-y-2 ${groupHtml ? "pt-4 mt-4 border-t border-ink/10" : ""}">${directHeader}${openRows.map((row) => directLedgerRow(row, friend)).join("")}${paidRows.length ? `<details class="pt-2"><summary class="cursor-pointer text-xs font-semibold text-ink/60">Paid private bills · ${paidRows.length}</summary><div class="space-y-2 mt-2 paid-private-bills">${paidRows.map((row) => directLedgerRow(row, friend)).join("")}</div></details>` : ""}</section>` : "";
   $("#friendLedger").innerHTML = groupHtml || privateHtml ? `${groupHtml}${privateHtml}` : '<p class="text-sm text-ink/55 py-3">No open group settlements or private bills with this person.</p>';
   $("#friendLedger").querySelectorAll(".group-ledger-row").forEach((button) => button.addEventListener("click", () => {
     ShareSquad.setStoredGroupId(button.dataset.groupId);
