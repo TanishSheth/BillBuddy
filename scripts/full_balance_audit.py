@@ -113,38 +113,37 @@ def main() -> None:
                             live = _pair_settlement_source_for_period(
                                 db, group, period, mine, theirs, currency, settlement_ready=True,
                             )
-                            weekly = _weekly_pair_settlement_sources(db, group, period, mine, theirs, currency)
-                            # Friends effective for this period = weekly or live fallback
-                            if weekly:
-                                eff = sum((Decimal(str(w["amount"])) for w in weekly), Decimal("0"))
-                                kind = "weekly"
-                            else:
-                                eff = Decimal(str(live["amount"])) if live else Decimal("0")
-                                kind = "live"
+                            # Friends GROUP now mirrors live smart Who-pays-whom.
                             live_amt = Decimal(str(live["amount"])) if live else Decimal("0")
-                            # After repair, weekly remaining should match live for unpaid residual
-                            # (allowing for multi-week history). Flag sign flips always.
-                            if abs(eff) < Decimal("0.02") and abs(live_amt) < Decimal("0.02"):
+                            friend_group = sum(
+                                (
+                                    Decimal(str(s["amount"]))
+                                    for s in atomic
+                                    if s.get("kind") == "GROUP"
+                                    and s.get("group_id") == gid
+                                    and s.get("period_key") == period.period_key
+                                ),
+                                Decimal("0"),
+                            )
+                            if abs(friend_group) < Decimal("0.02") and abs(live_amt) < Decimal("0.02"):
                                 continue
-                            if eff * live_amt < 0 and abs(eff) >= Decimal("0.01") and abs(live_amt) >= Decimal("0.01"):
+                            if friend_group * live_amt < 0 and abs(friend_group) >= Decimal("0.01") and abs(live_amt) >= Decimal("0.01"):
                                 flips += 1
                                 mismatches += 1
                                 print(
-                                    "SIGN_FLIP %r->%r group=%r period=%s eff(%s)=%s live=%s weekly=%s"
+                                    "SIGN_FLIP %r->%r group=%r period=%s friends=%s live=%s"
                                     % (
                                         viewer.display_name, friend.display_name, group.name, period.period_key,
-                                        kind, float(eff), float(live_amt),
-                                        [(w.get("kind"), w.get("amount")) for w in weekly],
+                                        float(friend_group), float(live_amt),
                                     )
                                 )
-                            elif kind == "weekly" and abs(eff - live_amt) >= Decimal("1.00"):
+                            elif abs(friend_group - live_amt) >= Decimal("0.02"):
                                 mismatches += 1
                                 print(
-                                    "GAP %r->%r group=%r period=%s weekly=%s live=%s delta=%s kinds=%s"
+                                    "GAP %r->%r group=%r period=%s friends=%s live=%s delta=%s"
                                     % (
                                         viewer.display_name, friend.display_name, group.name, period.period_key,
-                                        float(eff), float(live_amt), float(eff - live_amt),
-                                        [(w.get("kind"), w.get("amount")) for w in weekly],
+                                        float(friend_group), float(live_amt), float(friend_group - live_amt),
                                     )
                                 )
 

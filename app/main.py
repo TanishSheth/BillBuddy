@@ -3852,15 +3852,10 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
                 continue
             if period.id not in expense_period_ids and period.status != "SETTLED":
                 continue
-            # Prefer locked weekly legs (immutable after cash). If nothing is
-            # locked yet, fall back to the same live smart Who-pays-whom edge
-            # the group Balances card shows — otherwise Friends goes blank.
-            weekly = _weekly_pair_settlement_sources(
-                db, group, period, mine_id, theirs_id, currency,
-            )
-            if weekly:
-                sources.extend(weekly)
-                continue
+            # Friends payable group amounts must match the group Balances
+            # Who-pays-whom card. Stacked weekly lock leftovers were inventing
+            # Extra pay lines and flipping signs (e.g. Kuku / Bk). Weekly locks
+            # remain for audit + payment allocation targeting only.
             live = _pair_settlement_source_for_period(
                 db, group, period, mine_id, theirs_id, currency, settlement_ready=True,
             )
