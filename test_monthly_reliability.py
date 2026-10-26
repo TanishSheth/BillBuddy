@@ -177,3 +177,50 @@ def test_weekly_overpay_reverse_shows_as_extra_pay_credit_not_group():
         assert any(row["kind"] == "CREDIT" and row["label"] == "Extra pay" for row in display), display
     finally:
         session.close()
+
+
+def test_weekly_remaining_is_not_extra_pay_when_live_pair_edge_is_smaller():
+    """Locked weekly cash stays GROUP even if live Who-pays-whom is smaller.
+
+    Live graphs often disagree with frozen weekly legs (multi-person netting,
+    bill edits). That gap is still group debt — not Extra pay.
+    """
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    try:
+        one = models.Account(email="a@audit.test", password_hash="x", display_name="One")
+        two = models.Account(email="b@audit.test", password_hash="x", display_name="Bk")
+        session.add_all([one, two]); session.flush()
+        group = models.Group(name="Apt 4107", currency="USD", created_by_id=one.id)
+        session.add(group); session.flush()
+        member_one = models.GroupMember(group_id=group.id, account_id=one.id, display_name="One", role="owner")
+        member_two = models.GroupMember(group_id=group.id, account_id=two.id, display_name="Bk")
+        session.add_all([member_one, member_two]); session.flush()
+        period = models.MonthlyPeriod(group_id=group.id, period_key="2026-10")
+        session.add(period); session.flush()
+        expense = models.Expense(
+            period_id=period.id, store_name="Utilities", bill_date=date(2026, 10, 1),
+            total_amount=Decimal("161.34"), currency="USD", payer_member_id=member_two.id,
+        )
+        session.add(expense); session.flush()
+        session.add(models.ExpenseSplit(expense_id=expense.id, member_id=member_one.id, share_amount=Decimal("161.34")))
+        session.flush()
+        _lock_weekly_settlement_batch(
+            session, group, period, window_ends_at=datetime(2026, 10, 8, tzinfo=timezone.utc), created_by=one,
+        )
+        # Live edge shrinks; do not reconcile — Friends must keep the locked week.
+        expense.total_amount = Decimal("83.06")
+        session.query(models.ExpenseSplit).filter_by(expense_id=expense.id).one().share_amount = Decimal("83.06")
+        session.flush()
+        sources = _weekly_pair_settlement_sources(session, group, period, member_one.id, member_two.id, "USD")
+        assert sources, sources
+        assert all(row["kind"] == "GROUP" for row in sources), sources
+        assert not any(row["kind"] == "CREDIT" for row in sources), sources
+        assert abs(sum(row["amount"] for row in sources) + 161.34) < 0.005
+        display = _aggregate_friend_display_sources(sources)
+        assert len(display) == 1 and display[0]["kind"] == "GROUP"
+        assert display[0]["label"] == "Apt 4107"
+        assert abs(display[0]["amount"] + 161.34) < 0.005
+    finally:
+        session.close()

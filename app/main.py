@@ -3541,9 +3541,10 @@ def _weekly_pair_settlement_sources(
     (manually or on schedule). Bill edits after a lock rewrite that week's
     latest locked batch so Friends updates in the same timeframe.
 
-    Remaining cash that no longer matches live Who-pays-whom (overpay after a
-    bill shrink, or payments missing batch_id) is Extra pay credit — a private
-    Friends balance — not a phantom group line.
+    Extra pay is only for true reverse overpay: cash already moved one way on
+    this pair/period, then a reverse residual appears (bill shrink). Locked
+    weekly remaining must NOT be reclassified just because live Who-pays-whom
+    differs — multi-person netting often makes those graphs disagree.
     """
     if _normalize_currency(group.currency, "USD") != _normalize_currency(currency, "USD"):
         return []
@@ -3584,7 +3585,7 @@ def _weekly_pair_settlement_sources(
         key = (int(payment.payer_member_id), int(payment.recipient_member_id))
         period_cash_left[key] = period_cash_left.get(key, Decimal("0.00")) + cash
 
-    remainings: list[dict] = []
+    results: list[dict] = []
     for leg, batch in rows:
         # Pair payments are allocated to a precise frozen leg.  This is vital:
         # recording a payment must reduce that leg, not make a new graph pass
@@ -3617,60 +3618,34 @@ def _weekly_pair_settlement_sources(
             applied += take
             period_cash_left[same_key] -= take
         opposite_pool = period_cash_left.get(opp_key, Decimal("0.00"))
+        # Only treat as Extra pay when opposite cash still sits unused on this
+        # period (true overpay). Do not consume the pool here — multiple reverse
+        # leftovers are the same credit event.
         opposite_applied = opposite_from_alloc + opposite_pool
         remaining = max(Decimal("0.00"), Decimal(str(leg.amount)) - applied).quantize(Decimal("0.01"))
         if remaining <= 0:
             continue
         signed = remaining if leg.payer_member_id == friend_member_id else -remaining
-        remainings.append({
-            "signed": signed,
-            "force_credit": opposite_applied > Decimal("0.005"),
-            "batch": batch,
-            "leg": leg,
-            "currency": _normalize_currency(leg.currency, "USD"),
+        if opposite_applied > Decimal("0.005"):
+            results.append({
+                "kind": "CREDIT", "label": "Extra pay",
+                "amount": float(signed), "currency": _normalize_currency(leg.currency, "USD"),
+                "period_key": period.period_key, "group_id": None, "period_id": period.id,
+                "batch_id": batch.id, "payer_member_id": leg.payer_member_id,
+                "recipient_member_id": leg.recipient_member_id, "settlement_ready": True,
+            })
+            continue
+        results.append({
+            "kind": "GROUP",
+            "label": (
+                f"{group.name} · week ending "
+                f"{batch.window_ends_at.astimezone(BUSINESS_TIMEZONE).date().isoformat()}"
+            ),
+            "amount": float(signed), "currency": _normalize_currency(leg.currency, "USD"),
+            "period_key": period.period_key, "group_id": group.id, "period_id": period.id,
+            "batch_id": batch.id, "payer_member_id": leg.payer_member_id,
+            "recipient_member_id": leg.recipient_member_id, "settlement_ready": True,
         })
-
-    live = _pair_settlement_source_for_period(
-        db, group, period, my_member_id, friend_member_id, currency, settlement_ready=True,
-    )
-    live_budget = Decimal(str(live["amount"])) if live else Decimal("0.00")
-    results: list[dict] = []
-    for item in remainings:
-        signed = Decimal(str(item["signed"])).quantize(Decimal("0.01"))
-        if abs(signed) < Decimal("0.005"):
-            continue
-        batch = item["batch"]
-        leg = item["leg"]
-        week_label = (
-            f"{group.name} · week ending "
-            f"{batch.window_ends_at.astimezone(BUSINESS_TIMEZONE).date().isoformat()}"
-        )
-        credit_meta = {
-            "kind": "CREDIT", "label": "Extra pay",
-            "currency": item["currency"], "period_key": period.period_key,
-            "group_id": None, "period_id": period.id, "batch_id": batch.id,
-            "payer_member_id": leg.payer_member_id, "recipient_member_id": leg.recipient_member_id,
-            "settlement_ready": True,
-        }
-        group_meta = {
-            "kind": "GROUP", "label": week_label,
-            "currency": item["currency"], "period_key": period.period_key,
-            "group_id": group.id, "period_id": period.id, "batch_id": batch.id,
-            "payer_member_id": leg.payer_member_id, "recipient_member_id": leg.recipient_member_id,
-            "settlement_ready": True,
-        }
-        # No live Who-pays-whom edge (or opposite cash) → private Extra pay.
-        if item["force_credit"] or live_budget * signed <= 0:
-            results.append({**credit_meta, "amount": float(signed)})
-            continue
-        group_part = min(abs(signed), abs(live_budget)).quantize(Decimal("0.01"))
-        sign = Decimal("1") if signed > 0 else Decimal("-1")
-        live_budget -= sign * group_part
-        credit_part = (abs(signed) - group_part).quantize(Decimal("0.01"))
-        if group_part > Decimal("0.005"):
-            results.append({**group_meta, "amount": float(sign * group_part)})
-        if credit_part > Decimal("0.005"):
-            results.append({**credit_meta, "amount": float(sign * credit_part)})
     return results
 
 

@@ -561,7 +561,7 @@ function renderConsolidated(friend) {
     .filter((total) => Math.abs(Number(total.balance || 0)) >= 0.005 || (total.payments || []).length);
   if (!totals.length) { breakdown.innerHTML = ""; payments.innerHTML = '<p class="text-xs text-ink/55">No balance to settle with this person.</p>'; return; }
   const multiple = totals.length > 1;
-  breakdown.innerHTML = `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/50 mb-2">Balance breakdown</p><p class="text-[10px] text-ink/55 mb-3">Balances are separated by currency. Remaining = one Direct total (all unpaid months) + one total per shared group (all unpaid months) + Extra pay when someone overpaid. Shared group expenses in the ledger are view-only.</p>${totals.map((total) => {
+  breakdown.innerHTML = `<p class="text-[10px] font-mono uppercase tracking-widest text-ink/50 mb-2">Balance breakdown</p><p class="text-[10px] text-ink/55 mb-3">Balances are separated by currency. Remaining = one Direct total + one total per shared group from locked weekly settlements. Extra pay appears only when someone paid more than they owed. Shared group expenses in the ledger are view-only.</p>${totals.map((total) => {
     const sources = total.sources || [];
     return `<section class="${multiple ? "pt-3 mt-3 border-t border-ink/10" : ""}">${multiple ? `<p class="text-xs font-mono font-bold text-brand mb-2">${ShareSquad.escapeHtml(total.currency)} balance</p>` : ""}<div class="space-y-2">${sources.length ? sources.map((source) => {
       const label = source.label || (source.kind === "CREDIT" ? "Extra pay" : source.kind === "GROUP" ? "Group" : "Direct splits");
