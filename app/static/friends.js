@@ -536,22 +536,15 @@ function renderLedger(friend) {
     return `<button type="button" class="member-row group-ledger-row w-full text-left" data-group-id="${group.groupId}"><div><p class="font-semibold text-sm">Group settlement · ${ShareSquad.escapeHtml(group.name)}</p><p class="text-xs text-ink/55">${expenseNote}</p></div><div class="text-right"><p class="text-xs font-mono font-bold ${amountTone}">${amountText}</p><p class="text-[10px] text-ink/50">${status}</p></div></button>`;
   }).join("")}</section>` : "";
   const hasPrivate = openRows.length || paidRows.length;
-  // Header matches the lists: Settled only when nothing is open. If open bills
-  // net to $0 across months, show "N open" — never look settled while rows remain.
   const openPrivateTotal = openRows.reduce((sum, row) => sum + Number(row.balance || 0), 0);
   const privateHeaderTone = !openRows.length
     ? "text-ink/50"
     : openPrivateTotal > 0.005 ? "text-green-700" : openPrivateTotal < -0.005 ? "text-red-700" : "text-ink/50";
-  let privateHeaderValue = "Settled";
-  if (openRows.length) {
-    if (directSummary.length) {
-      privateHeaderValue = directSummary.map((item) => signedMoney(item.amount, item.currency)).join(" · ");
-    } else if (Math.abs(openPrivateTotal) >= 0.005) {
-      privateHeaderValue = signedMoney(openPrivateTotal, openRows[0]?.split?.currency || friend.currency || "USD");
-    } else {
-      privateHeaderValue = `${openRows.length} open`;
-    }
-  }
+  const privateHeaderValue = !openRows.length
+    ? "Settled"
+    : (directSummary.length
+      ? directSummary.map((item) => signedMoney(item.amount, item.currency)).join(" · ")
+      : signedMoney(openPrivateTotal, openRows[0]?.split?.currency || friend.currency || "USD"));
   const directHeader = hasPrivate ? `<div class="flex items-center justify-between gap-3"><p class="text-[10px] font-mono uppercase tracking-widest text-ink/50">Private bills</p><span class="text-[10px] font-mono ${privateHeaderTone}">${privateHeaderValue}</span></div>` : "";
   const privateHtml = hasPrivate ? `<section class="space-y-2 ${groupHtml ? "pt-4 mt-4 border-t border-ink/10" : ""}">${directHeader}${openRows.map((row) => directLedgerRow(row, friend)).join("")}${paidRows.length ? `<details class="pt-2"><summary class="cursor-pointer text-xs font-semibold text-ink/60">Paid private bills · ${paidRows.length}</summary><div class="space-y-2 mt-2 paid-private-bills">${paidRows.map((row) => directLedgerRow(row, friend)).join("")}</div></details>` : ""}</section>` : "";
   $("#friendLedger").innerHTML = groupHtml || privateHtml ? `${groupHtml}${privateHtml}` : '<p class="text-sm text-ink/55 py-3">No open group settlements or private bills with this person.</p>';
