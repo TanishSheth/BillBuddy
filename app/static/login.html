@@ -37,7 +37,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
-<link rel="stylesheet" href="/styles.css?v=20261015uiFixes">
+<link rel="stylesheet" href="/styles.css?v=20261027demoSession">
 </head>
 <body class="bb-bg text-ink min-h-screen flex items-center justify-center px-5 py-12">
 
@@ -86,7 +86,7 @@
     </div>
   </div>
 
-  <script src="/api.js?v=20261020loginFix"></script>
+  <script src="/api.js?v=20261027demoSession"></script>
   <script>
     const PENDING_INVITE_KEY = "sharesquad_pending_invite";
     const PENDING_QUICK_SPLIT_KEY = "sharesquad_pending_quick_split";
@@ -180,9 +180,9 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ email }),
           });
-          const data = await res.json();
+          const data = await res.json().catch(() => ({}));
           if (!res.ok) {
-            throw new Error(data.detail || "Request failed");
+            throw new Error(data.detail || res.statusText || "Request failed");
           }
 
           let successText = data.message || "Check your email for a reset link.";
@@ -225,10 +225,10 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           const detail = data.detail;
-          const errMsg = typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map((d) => d.msg).join(", ") : "Request failed";
+          const errMsg = typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map((d) => d.msg).join(", ") : (res.statusText || "Request failed");
           throw new Error(errMsg);
         }
 

@@ -289,13 +289,23 @@ class TestPaymentsAndSettlements:
         bal = client.get(f"/api/friends/{friend_id}/consolidated-balance?currency=USD", headers=ctx["ha"])
         assert bal.status_code == 200, bal.text
         assert abs(bal.json()["balance"]) >= 49.0
-        # Friend owes owner → friend records a partial payment
+        # Friend owes owner → friend marks a partial payment (PENDING until lender confirms)
         pay = client.post(
             f"/api/friends/{owner_account_id}/consolidated-payments",
             json={"amount": 20.0, "currency": "USD"},
             headers=ctx["hb"],
         )
         assert pay.status_code == 200, pay.text
+        assert pay.json()["status"] == "PENDING"
+        pending_bal = client.get(f"/api/friends/{friend_id}/consolidated-balance?currency=USD", headers=ctx["ha"])
+        assert pending_bal.status_code == 200
+        assert abs(abs(pending_bal.json()["balance"]) - 50.0) < 0.51
+        confirm = client.post(
+            f"/api/friends/{friend_id}/consolidated-payments/{pay.json()['id']}/confirm",
+            headers=ctx["ha"],
+        )
+        assert confirm.status_code == 200, confirm.text
+        assert confirm.json()["status"] == "CONFIRMED"
         after = client.get(f"/api/friends/{friend_id}/consolidated-balance?currency=USD", headers=ctx["ha"])
         assert after.status_code == 200
         assert abs(abs(after.json()["balance"]) - 30.0) < 0.51

@@ -10,7 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20261015uiFixes">
+<link rel="stylesheet" href="/styles.css?v=20261027demoSession">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
@@ -199,7 +199,7 @@
                     </div>
                   </div>
 
-                  <div id="splitStatusNotice" class="text-[10px] font-mono mb-2 text-ink/60"></div>
+                  <div id="splitStatusNotice" class="text-[10px] font-mono mb-2 text-ink/55" aria-live="polite"></div>
                   <div id="f_splitwith" class="space-y-2"></div>
                 </div>
               </div>
@@ -217,7 +217,7 @@
                 <i data-lucide="check" class="w-4 h-4"></i> Save Expense
               </button>
               <button id="cancelEditBtn" type="button" class="bb-btn-secondary w-full mt-2 hidden">Cancel edit</button>
-              <p id="saveMsg" class="text-xs mt-2 font-mono"></p>
+              <p id="saveMsg" class="text-xs mt-2 font-mono text-ink" role="status" aria-live="polite"></p>
             </div>
           </div>
         </div>
@@ -483,8 +483,8 @@
     Add expense
   </button>
 
-  <script src="/api.js?v=20261026paidBills4"></script>
-  <script src="/group.js?v=20261026paidBills4"></script>
+  <script src="/api.js?v=20261027demoSession"></script>
+  <script src="/group.js?v=20261027demoSession"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

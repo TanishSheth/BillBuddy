@@ -640,7 +640,7 @@ function renderSplitOptions() {
       <span class="font-semibold text-ink">${label}</span>
       <div class="flex items-center gap-1.5 w-36">
         <input type="text" step="${state.splitType === 'SHARES' ? '1' : '0.01'}" min="0" inputmode="decimal"
-               class="split-val-input bb-input !p-1 text-right font-bold bg-white rounded border border-line" 
+               class="split-val-input bb-input !p-1 text-right font-bold"
                data-id="${m.id}" value="${val}">
         <span class="text-ink/60 text-[11px] font-bold w-10">${unit}</span>
       </div>
@@ -1290,7 +1290,7 @@ async function loadInsights() {
     const monthLabel = periodOptionLabel(periodKey, periodKey === calendarPeriodKey());
     root.innerHTML = `
       <div class="insight-kpis w-full"><article class="bb-card"><p class="insight-label">Total spending</p><p class="insight-value">${ShareSquad.formatMoney(data.total_spent, data.currency)}</p><p class="text-xs text-ink/45">${ShareSquad.escapeHtml(monthLabel)}</p></article><article class="bb-card"><p class="insight-label">Top category</p><p class="insight-value text-lg"><span ${ShareSquad.categoryMark(categoryRows[0]?.[0] || "General")}>${ShareSquad.escapeHtml(categoryRows[0]?.[0] || "No expenses")}</span></p><p class="text-xs text-ink/45">${categoryRows[0] ? ShareSquad.formatMoney(categoryRows[0][1], data.currency) : ""}</p></article></div>
-      <div class="grid md:grid-cols-2 gap-4 w-full"><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">By category</h3>${chart}</article><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Largest expenses</h3>${top.length ? top.map((expense) => `<div class="insight-row cat-row"><span class="inline-flex items-center gap-2 min-w-0"><span ${ShareSquad.categoryMark(expense.category || "General")}>${ShareSquad.escapeHtml(expense.category || "General")}</span><span class="truncate">${ShareSquad.escapeHtml(expense.store_name)}</span></span><strong class="money-amount" dir="ltr">${ShareSquad.formatMoney(expense.total_amount, expense.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses saved in this month.</p>'}</article></div>`;
+      <div class="grid md:grid-cols-2 gap-4 w-full"><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">By category</h3>${chart}</article><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Largest expenses</h3>${top.length ? top.map((expense) => `<div class="insight-row cat-row"><span class="inline-flex items-center gap-2 min-w-0"><span ${ShareSquad.categoryMark(expense.category || "General")}>${ShareSquad.escapeHtml(expense.category || "General")}</span><span class="truncate">${ShareSquad.escapeHtml(expense.store_name)}</span></span><strong>${ShareSquad.formatMoney(expense.total_amount, expense.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses saved in this month.</p>'}</article></div>`;
   } catch (err) { root.innerHTML = `<div class="bb-card balance-negative">${ShareSquad.escapeHtml(err.message)}</div>`; }
 }
 

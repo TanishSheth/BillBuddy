@@ -67,16 +67,44 @@ function removeToken() {
   clearPreDemoSession();
 }
 
+function isDemoSandboxSession() {
+  return localStorage.getItem("sharesquad_demo_sandbox") === "1";
+}
+
+function hasPreDemoSession() {
+  return Boolean(localStorage.getItem(PRE_DEMO_TOKEN_KEY));
+}
+
+/** Demo auth failure: restore stash when present; never wipe a real account into login. */
+function handleDemoAuthFailure(message) {
+  const restored = exitDemoSession();
+  showToast(message || (restored ? "Demo ended. Your account is signed in again." : "Demo ended."), restored ? "success" : "error");
+  setTimeout(() => {
+    if (restored) window.location.replace("/");
+    else {
+      allowLoginOnce();
+      goToLogin({ replace: true, keepNext: false });
+    }
+  }, 800);
+  return restored;
+}
+
+function leaveDemoToLanding() {
+  exitDemoSession();
+  window.location.replace("/");
+}
+
 function renderDemoBanner() {
-  if (localStorage.getItem("sharesquad_demo_sandbox") !== "1" || document.getElementById("demoModeBanner")) return;
+  if (!isDemoSandboxSession() || document.getElementById("demoModeBanner")) return;
   const header = document.querySelector(".page-header");
   if (!header) return;
   const banner = document.createElement("aside");
   banner.id = "demoModeBanner";
   banner.className = "tone-banner tone-banner-success rounded-none border-x-0";
   banner.setAttribute("role", "status");
-  banner.innerHTML = '<div class="max-w-5xl mx-auto px-4 sm:px-5 py-2 text-center text-xs sm:text-sm w-full"><strong>Demo mode</strong> · Same current ShareSquad as a regular account, filled with sample group data. Sandboxes expire after two hours. <a class="tone-banner-action font-semibold underline underline-offset-2" href="/login.html?mode=signup">Sign up free</a> to keep your own data. <button type="button" id="resetDemoSandbox" class="ml-1 tone-banner-action font-semibold underline underline-offset-2">Reset demo</button></div>';
+  banner.innerHTML = '<div class="max-w-5xl mx-auto px-4 sm:px-5 py-2 text-center text-xs sm:text-sm w-full"><strong>Demo mode</strong> · Same current ShareSquad as a regular account, filled with sample group data. Sandboxes expire after two hours. <a class="tone-banner-action font-semibold underline underline-offset-2" href="/login.html?mode=signup">Sign up free</a> to keep your own data. <button type="button" id="resetDemoSandbox" class="ml-1 tone-banner-action font-semibold underline underline-offset-2">Reset demo</button> <button type="button" id="exitDemoSandbox" class="ml-1 tone-banner-action font-semibold underline underline-offset-2">Exit demo</button></div>';
   header.insertAdjacentElement("afterend", banner);
+  banner.querySelector("#exitDemoSandbox")?.addEventListener("click", () => leaveDemoToLanding());
   banner.querySelector("#resetDemoSandbox")?.addEventListener("click", async () => {
     if (!await confirmDialog({
       title: "Reset this demo?",
@@ -392,7 +420,7 @@ function initMobileQuickAction() {
     const actions = document.createElement("div");
     actions.className = "mobile-quick-actions";
     actions.innerHTML = '<button type="button" class="mobile-quick-action quick-split">＋ <span>Quick split</span></button><button type="button" class="mobile-quick-action create-group">＋ <span>Create group</span></button>';
-    actions.querySelector(".quick-split").addEventListener("click", () => { window.location.href = "/quick-split.html"; });
+    actions.querySelector(".quick-split").addEventListener("click", () => { window.location.href = "/friends.html?new=1"; });
     actions.querySelector(".create-group").addEventListener("click", () => $("#newGroupBtn")?.click());
     document.body.appendChild(actions);
     return;
@@ -463,11 +491,8 @@ function bindLogoutButton() {
   if (button.dataset.boundLogout === "1") return;
   button.dataset.boundLogout = "1";
   button.addEventListener("click", () => {
-    const leavingDemo = localStorage.getItem("sharesquad_demo_sandbox") === "1";
-    if (leavingDemo) {
-      exitDemoSession();
-      // Landing shows Open app when the real session was restored.
-      window.location.replace("/");
+    if (isDemoSandboxSession()) {
+      leaveDemoToLanding();
       return;
     }
     removeToken();
@@ -498,13 +523,17 @@ async function api(path, opts = {}) {
     const res = await fetch(`/api${path}`, { ...opts, headers });
     
     if (res.status === 401) {
-      // If we are already on login or reset password page, do not infinite redirect
+      // Demo sandboxes expire; restore any stashed real account instead of wiping it.
       if (!isLoginPath() && !window.location.pathname.includes("reset-password.html")) {
-        removeToken();
-        showToast("Session expired. Please sign in again.", "error");
-        setTimeout(() => {
-          goToLogin({ replace: true, keepNext: true });
-        }, 800);
+        if (isDemoSandboxSession() || hasPreDemoSession()) {
+          handleDemoAuthFailure("This demo expired or is no longer valid.");
+        } else {
+          removeToken();
+          showToast("Session expired. Please sign in again.", "error");
+          setTimeout(() => {
+            goToLogin({ replace: true, keepNext: true });
+          }, 800);
+        }
       }
       throw new Error("Session expired. Please sign in.");
     }
@@ -521,7 +550,10 @@ async function api(path, opts = {}) {
     if (refreshed) setToken(refreshed);
 
     const ct = res.headers.get("content-type") || "";
-    return ct.includes("application/json") ? res.json() : res;
+    if (!ct.includes("application/json")) return res;
+    return res.json().catch(() => {
+      throw new Error("Server returned invalid JSON");
+    });
   } catch (err) {
     throw err;
   }
@@ -1530,6 +1562,10 @@ window.ShareSquad = {
   removeToken,
   beginDemoSession,
   exitDemoSession,
+  leaveDemoToLanding,
+  isDemoSandboxSession,
+  hasPreDemoSession,
+  handleDemoAuthFailure,
   renderDemoBanner,
   getStoredGroupId,
   setStoredGroupId,

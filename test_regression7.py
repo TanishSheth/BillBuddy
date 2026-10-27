@@ -66,8 +66,10 @@ def test_demo_preserves_real_session_on_exit():
     assert "sharesquad_pre_demo_token" in api_js
     assert "function beginDemoSession" in api_js
     assert "function exitDemoSession" in api_js
+    assert "function handleDemoAuthFailure" in api_js
+    assert 'id="exitDemoSandbox"' in api_js
     assert "beginDemoSession(" in landing
-    assert "exitDemoSession()" in api_js
+    assert "leaveDemoToLanding()" in api_js
 
 
 def test_smtp_timeout_default_is_short():

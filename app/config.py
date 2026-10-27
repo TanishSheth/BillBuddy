@@ -63,6 +63,20 @@ CORS_ORIGINS = [
     if origin.strip()
 ]
 
+# Phase 7: ledger is always unified bills. Legacy dual-write flags retained only
+# for freeze/ops diagnostics; writers use bill_ops (not legacy tables).
+BILL_LEDGER_WRITE = (
+    os.environ.get("BILL_LEDGER_WRITE", "unified").strip().lower()
+)
+BILL_LEDGER_READ = (
+    os.environ.get("BILL_LEDGER_READ", "unified").strip().lower()
+)
+BILL_LEDGER_FREEZE = _is_truthy(os.environ.get("BILL_LEDGER_FREEZE"))
+# Phase 7: legacy mirror off — do not write expenses/quick_splits/personal_expenses.
+BILL_LEDGER_LEGACY_MIRROR = _is_truthy(
+    os.environ.get("BILL_LEDGER_LEGACY_MIRROR", "false")
+)
+
 
 def _validate_production_configuration() -> None:
     """Fail closed when a production container is missing its security basics."""

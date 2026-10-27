@@ -1,6 +1,7 @@
 import secrets
 from sqlalchemy import (
-    Column, Integer, String, Numeric, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, Text, func
+    Column, Integer, String, Numeric, Date, DateTime, Boolean, ForeignKey,
+    UniqueConstraint, CheckConstraint, Text, Index, func,
 )
 from sqlalchemy.orm import relationship
 from .database import Base
@@ -611,3 +612,137 @@ class FriendBalanceSnapshot(Base):
     currency = Column(String(10), nullable=False)
     payload_json = Column(Text, nullable=False, default="{}")
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+# --- Unified bill ledger (Phase 1+). Dual-write lands in later phases; empty until backfill. ---
+
+class Bill(Base):
+    """Single bill path: GROUP | PAIR | PERSONAL. People keyed by account_id only."""
+    __tablename__ = "bills"
+    __table_args__ = (
+        CheckConstraint(
+            "(scope = 'GROUP' AND group_id IS NOT NULL AND period_id IS NOT NULL) OR "
+            "(scope IN ('PAIR', 'PERSONAL') AND group_id IS NULL AND period_id IS NULL)",
+            name="chk_bills_scope_integrity",
+        ),
+        CheckConstraint("scope IN ('GROUP', 'PAIR', 'PERSONAL')", name="chk_bills_scope_values"),
+        Index("ix_bills_scope_bill_date", "scope", "bill_date"),
+        Index("ix_bills_group_period", "group_id", "period_id"),
+        Index("ix_bills_currency", "currency"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    scope = Column(String(20), nullable=False, index=True)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=True, index=True)
+    period_id = Column(Integer, ForeignKey("monthly_periods.id", ondelete="CASCADE"), nullable=True, index=True)
+    created_by_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False, index=True)
+    title = Column(String(150), nullable=False)
+    bill_date = Column(Date, nullable=False)
+    total_amount = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="USD")
+    category = Column(String(50), default="General")
+    split_type = Column(String(20), default="EQUAL", nullable=False)
+    invite_code = Column(String(64), unique=True, nullable=True)
+    status = Column(String(20), nullable=True)
+    image_path = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    fx_rate_to_group = Column(Numeric(12, 6), nullable=True)
+    recurring_template_id = Column(Integer, nullable=True, index=True)
+    adjustment_of_bill_id = Column(Integer, nullable=True, index=True)
+    edited_after_payment = Column(Boolean, default=False, nullable=False)
+    edit_history_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    participants = relationship("BillParticipant", back_populates="bill", cascade="all, delete-orphan")
+    payers = relationship("BillPayer", back_populates="bill", cascade="all, delete-orphan")
+
+
+class BillParticipant(Base):
+    """Share row. PAIR invitees may have null account_id until claim."""
+    __tablename__ = "bill_participants"
+    __table_args__ = (
+        # Partial uniques created in Alembic (account / invite_token / email).
+        Index("ix_bill_participants_bill_id", "bill_id"),
+        Index("ix_bill_participants_account_id", "account_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    bill_id = Column(Integer, ForeignKey("bills.id", ondelete="CASCADE"), nullable=False)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=True)
+    share_amount = Column(Numeric(12, 2), nullable=False)
+    paid_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    split_value = Column(Numeric(12, 2), nullable=True)
+    email = Column(String(255), nullable=True)
+    display_name = Column(String(100), nullable=True)
+    invite_token = Column(String(64), nullable=True)
+    payment_status = Column(String(20), nullable=True)
+    payment_marked_at = Column(DateTime, nullable=True)
+
+    bill = relationship("Bill", back_populates="participants")
+
+
+class BillPayer(Base):
+    """Funding source of truth — always >=1 row; single payer pays total_amount."""
+    __tablename__ = "bill_payers"
+    __table_args__ = (
+        UniqueConstraint("bill_id", "account_id", name="uq_bill_payer"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    bill_id = Column(Integer, ForeignKey("bills.id", ondelete="CASCADE"), nullable=False, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False)
+    amount_paid = Column(Numeric(12, 2), nullable=False)
+
+    bill = relationship("Bill", back_populates="payers")
+
+
+class PaymentAllocation(Base):
+    """First-class Friend settlement lines (replaces pair_payments.allocations_json)."""
+    __tablename__ = "payment_allocations"
+    __table_args__ = (
+        CheckConstraint("kind IN ('DIRECT', 'GROUP', 'CREDIT')", name="chk_payment_allocation_kind"),
+        CheckConstraint(
+            "(kind = 'DIRECT' AND bill_id IS NOT NULL AND period_id IS NULL) OR "
+            "(kind = 'GROUP' AND period_id IS NOT NULL AND from_account_id IS NOT NULL "
+            "AND to_account_id IS NOT NULL AND bill_id IS NULL) OR "
+            "(kind = 'CREDIT' AND bill_id IS NULL AND period_id IS NULL)",
+            name="chk_payment_allocation_shape",
+        ),
+        Index("ix_payment_allocations_pair_payment_id", "pair_payment_id"),
+        Index("ix_payment_allocations_bill_id", "bill_id"),
+        Index("ix_payment_allocations_period_id", "period_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    pair_payment_id = Column(Integer, ForeignKey("pair_payments.id", ondelete="CASCADE"), nullable=False)
+    kind = Column(String(20), nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="USD")
+    bill_id = Column(Integer, ForeignKey("bills.id", ondelete="RESTRICT"), nullable=True)
+    month_key = Column(String(7), nullable=True)
+    group_id = Column(Integer, ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
+    period_id = Column(Integer, ForeignKey("monthly_periods.id", ondelete="CASCADE"), nullable=True)
+    batch_id = Column(Integer, ForeignKey("weekly_settlement_batches.id", ondelete="SET NULL"), nullable=True)
+    from_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=True)
+    to_account_id = Column(Integer, ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=True)
+    payment_kind = Column(String(20), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class BillIdMap(Base):
+    """Legacy id → bills.id for dual-write / rollback."""
+    __tablename__ = "bill_id_map"
+    __table_args__ = (
+        UniqueConstraint("legacy_kind", "legacy_id", name="uq_bill_id_map_legacy"),
+        CheckConstraint(
+            "legacy_kind IN ('EXPENSE', 'QUICK_SPLIT', 'PERSONAL')",
+            name="chk_bill_id_map_kind",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    legacy_kind = Column(String(20), nullable=False)
+    legacy_id = Column(Integer, nullable=False)
+    bill_id = Column(Integer, ForeignKey("bills.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, server_default=func.now())
+

@@ -1653,6 +1653,13 @@ html.theme-dark .balance-positive { color: #4ADE80; }
 html.theme-dark .balance-negative { color: #F87171; }
 html.theme-dark .split-outcome.is-lent { color: #86efac; }
 html.theme-dark .split-outcome.is-owed { color: #ef4444; }
+html.theme-dark .split-outcome.is-neutral { color: var(--ink); }
+/* Expense form split amount fields must stay readable on dark surfaces */
+html.theme-dark .split-val-input.bb-input {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--line);
+}
 html.theme-dark .insight-value { color: var(--brand); }
 html.theme-dark .ui-skeleton-card { background: var(--surface); border-color: var(--line); }
 html.theme-dark .onboarding-card { border-color: rgba(45,212,191,.4); background: linear-gradient(135deg, #1E293B 0%, #0F766E33 100%); }

@@ -18,6 +18,7 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
+from . import bill_ledger
 from . import models
 from .auth import create_access_token_for_account, hash_password
 from .config import APP_VERSION
@@ -198,6 +199,7 @@ def ensure_template(db: Session) -> models.DemoTemplate:
         members.append(member)
     db.flush()
     _seed_apartment_template(db, accounts, members, group)
+    _mirror_account_ledger(db, [account.id for account in accounts])
     template = models.DemoTemplate(version=TEMPLATE_VERSION, group_id=group.id)
     db.add(template)
     db.commit()
@@ -501,10 +503,28 @@ def _copy_template_group(db: Session, template: models.DemoTemplate, sandbox_id:
         event_type="expense_added", summary="Alex added Costco run",
         entity_type="expense",
     ))
-    db.add_all([
-        models.PersonalExpense(account_id=owner.id, store_name="Whole Foods", bill_date=date.today(), total_amount=Decimal("64.20"), currency="USD", category="Groceries", notes="Demo personal expense"),
-        models.PersonalExpense(account_id=owner.id, store_name="Metro pass", bill_date=date.today() - timedelta(days=12), total_amount=Decimal("28.00"), currency="USD", category="Travel", notes="Saved this month; older receipt date"),
-    ])
+    from . import bill_ops as _bill_ops
+
+    _bill_ops.create_personal(
+        db,
+        account_id=owner.id,
+        store_name="Whole Foods",
+        bill_date=date.today(),
+        total_amount=Decimal("64.20"),
+        currency="USD",
+        category="Groceries",
+        notes="Demo personal expense",
+    )
+    _bill_ops.create_personal(
+        db,
+        account_id=owner.id,
+        store_name="Metro pass",
+        bill_date=date.today() - timedelta(days=12),
+        total_amount=Decimal("28.00"),
+        currency="USD",
+        category="Travel",
+        notes="Saved this month; older receipt date",
+    )
     db.add(models.Notification(
         account_id=owner.id, group_id=group.id,
         message="Welcome to your ShareSquad demo — same features as a real account, with sample data across several months.",
@@ -519,6 +539,7 @@ def _copy_template_group(db: Session, template: models.DemoTemplate, sandbox_id:
         period_map=period_map,
         source_group=source_group,
     )
+    _mirror_account_ledger(db, [account.id for account in cloned_accounts])
     return owner, group, cloned_accounts
 
 
@@ -558,6 +579,122 @@ def _unlink(path: str | None) -> None:
             pass
 
 
+def _mirror_account_ledger(db: Session, account_ids: list[int]) -> None:
+    """Phase 6: dual/unified-write demo rows into bills (no-op when write=legacy)."""
+    if not bill_ledger.dual_write_enabled() or not account_ids:
+        return
+    period_ids = [
+        row.id
+        for row in db.query(models.MonthlyPeriod.id)
+        .join(models.Group, models.MonthlyPeriod.group_id == models.Group.id)
+        .filter(models.Group.created_by_id.in_(account_ids))
+        .all()
+    ]
+    if period_ids:
+        for expense in db.query(models.Expense).filter(models.Expense.period_id.in_(period_ids)).all():
+            bill_ledger.sync_expense(db, expense)
+    for split in db.query(models.QuickSplit).filter(
+        models.QuickSplit.created_by_account_id.in_(account_ids)
+    ).all():
+        bill_ledger.sync_quick_split(db, split)
+    for personal in db.query(models.PersonalExpense).filter(
+        models.PersonalExpense.account_id.in_(account_ids)
+    ).all():
+        bill_ledger.sync_personal(db, personal)
+    for payment in db.query(models.PairPayment).filter(
+        (models.PairPayment.account_one_id.in_(account_ids))
+        | (models.PairPayment.account_two_id.in_(account_ids))
+    ).all():
+        bill_ledger.sync_pair_payment(db, payment)
+
+
+def _purge_unified_bills_for_accounts(db: Session, account_ids: list[int]) -> None:
+    """Delete mirrored bills before hard-deleting sandbox accounts (RESTRICT-safe)."""
+    if not account_ids:
+        return
+    bill_ids = {
+        row.id
+        for row in db.query(models.Bill.id)
+        .filter(models.Bill.created_by_account_id.in_(account_ids))
+        .all()
+    }
+    # PAIR bills may be created_by owner but also include friend payers — catch via map.
+    legacy_expense_ids = [
+        row.id
+        for row in db.query(models.Expense.id)
+        .join(models.MonthlyPeriod, models.Expense.period_id == models.MonthlyPeriod.id)
+        .join(models.Group, models.MonthlyPeriod.group_id == models.Group.id)
+        .filter(models.Group.created_by_id.in_(account_ids))
+        .all()
+    ]
+    quick_ids = [
+        row.id
+        for row in db.query(models.QuickSplit.id)
+        .filter(models.QuickSplit.created_by_account_id.in_(account_ids))
+        .all()
+    ]
+    personal_ids = [
+        row.id
+        for row in db.query(models.PersonalExpense.id)
+        .filter(models.PersonalExpense.account_id.in_(account_ids))
+        .all()
+    ]
+    map_rows = []
+    if legacy_expense_ids:
+        map_rows += (
+            db.query(models.BillIdMap)
+            .filter(
+                models.BillIdMap.legacy_kind == "EXPENSE",
+                models.BillIdMap.legacy_id.in_(legacy_expense_ids),
+            )
+            .all()
+        )
+    if quick_ids:
+        map_rows += (
+            db.query(models.BillIdMap)
+            .filter(
+                models.BillIdMap.legacy_kind == "QUICK_SPLIT",
+                models.BillIdMap.legacy_id.in_(quick_ids),
+            )
+            .all()
+        )
+    if personal_ids:
+        map_rows += (
+            db.query(models.BillIdMap)
+            .filter(
+                models.BillIdMap.legacy_kind == "PERSONAL",
+                models.BillIdMap.legacy_id.in_(personal_ids),
+            )
+            .all()
+        )
+    bill_ids.update(row.bill_id for row in map_rows)
+    if not bill_ids:
+        return
+    payment_ids = [
+        row.id
+        for row in db.query(models.PairPayment.id)
+        .filter(
+            (models.PairPayment.account_one_id.in_(account_ids))
+            | (models.PairPayment.account_two_id.in_(account_ids))
+        )
+        .all()
+    ]
+    if payment_ids:
+        db.query(models.PaymentAllocation).filter(
+            models.PaymentAllocation.pair_payment_id.in_(payment_ids)
+        ).delete(synchronize_session=False)
+    db.query(models.BillIdMap).filter(models.BillIdMap.bill_id.in_(bill_ids)).delete(
+        synchronize_session=False
+    )
+    db.query(models.BillPayer).filter(models.BillPayer.bill_id.in_(bill_ids)).delete(
+        synchronize_session=False
+    )
+    db.query(models.BillParticipant).filter(
+        models.BillParticipant.bill_id.in_(bill_ids)
+    ).delete(synchronize_session=False)
+    db.query(models.Bill).filter(models.Bill.id.in_(bill_ids)).delete(synchronize_session=False)
+
+
 def purge_sandbox(db: Session, sandbox: models.DemoSandbox) -> None:
     """Remove only records mapped to this sandbox; never touch the template."""
     account_ids = [row.account_id for row in db.query(models.DemoSandboxAccount).filter_by(sandbox_id=sandbox.id)]
@@ -578,6 +715,9 @@ def purge_sandbox(db: Session, sandbox: models.DemoSandbox) -> None:
         _unlink(path)
     for path, in db.query(models.MonthlyPeriod.pdf_path).filter(models.MonthlyPeriod.id.in_(period_ids)).all() if period_ids else []:
         _unlink(path)
+
+    # Unified bills first (RESTRICT / soft-delete parity for Phase 6).
+    _purge_unified_bills_for_accounts(db, account_ids)
 
     if expense_ids:
         db.query(models.ExpenseComment).filter(models.ExpenseComment.expense_id.in_(expense_ids)).delete(synchronize_session=False)
