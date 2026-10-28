@@ -3005,6 +3005,10 @@ def _friend_month_balance(db: Session, account_id: int, friend_id: int, month_ke
         for allocation in json.loads(payment.allocations_json or "[]"):
             if allocation.get("kind") != "DIRECT" or allocation.get("month_key") != month_key:
                 continue
+            # Bill-linked cash already reduced paid_amount, so it must not be
+            # subtracted once more from the monthly balance.
+            if allocation.get("private_applied") and allocation.get("quick_split_id"):
+                continue
             amount = Decimal(str(allocation.get("amount", 0)))
             balance += amount if payment.payer_account_id == account_id else -amount
     return balance.quantize(Decimal("0.01")), currency
@@ -3435,9 +3439,6 @@ def _consolidated_balance_out(
     one, two = _friend_pair(account.id, friend_id)
     normalized_currency = _normalize_currency(currency, "USD")
     _reconcile_recipient_reported_pair_payments(db, one, two, normalized_currency)
-    # Paid Friend cash must also mark the covered private bills so the ledger
-    # can move them into Paid private bills instead of leaving them open.
-    _repair_paid_direct_bills_for_pair(db, one, two, normalized_currency)
     balance, atomic_sources = _consolidated_friend_balance(db, account.id, friend_id, normalized_currency)
     display_sources = _aggregate_friend_display_sources(atomic_sources)
     # Friend payments are allowed for the live Who-pays-whom result even while
@@ -3607,8 +3608,8 @@ def _pair_payment_out(payment: models.PairPayment) -> schemas.PairPaymentOut:
 def _apply_confirmed_pair_payment(db: Session, payment: models.PairPayment) -> None:
     """Apply a recipient-confirmed pair payment exactly once to group sources."""
     if payment.status == "CONFIRMED":
-        # Still reconcile private-bill paid markers for older already-confirmed rows.
-        _sync_direct_bills_covered_by_pair_payment(db, payment)
+        # A read or retry must never reallocate an already-recorded payment.
+        # Month totals can net unrelated bills together.
         return
     for allocation in json.loads(payment.allocations_json or "[]"):
         if allocation.get("kind") != "GROUP":
@@ -4101,30 +4102,26 @@ def confirm_friend_settlement(friend_id: int, payload: schemas.FriendSettlementC
             raise HTTPException(403, "Only the person receiving payment can record receipt")
         settlement.recipient_confirmed = True
     # Either person recording settles the month immediately — no second confirmation.
+    was_settled = settlement.status == "SETTLED"
     settlement.payer_confirmed = True
     settlement.recipient_confirmed = True
     settlement.status = "SETTLED"
     settlement.settled_at = datetime.now(timezone.utc)
-    try:
-        start, end = _month_date_bounds(payload.month_key)
-    except ValueError:
-        start = end = None
-    if start and end:
-        rows = (
-            db.query(models.QuickSplit, models.QuickSplitParticipant)
-            .join(models.QuickSplitParticipant)
-            .filter(
-                models.QuickSplit.bill_date >= start,
-                models.QuickSplit.bill_date < end,
-                or_(
-                    (models.QuickSplit.payer_account_id == account.id) & (models.QuickSplitParticipant.account_id == friend_id),
-                    (models.QuickSplit.payer_account_id == friend_id) & (models.QuickSplitParticipant.account_id == account.id),
-                ),
-            )
-            .all()
+    if not was_settled:
+        # This is a transfer for the net monthly debt, not evidence that every
+        # bill was paid. Record and allocate only its actual amount so every
+        # struck-through bill has a matching payment record.
+        payment = _record_direct_pair_payment(
+            db,
+            settlement.payer_account_id,
+            settlement.recipient_account_id,
+            Decimal(str(settlement.amount)),
+            settlement.currency,
+            payload.month_key,
+            account.id,
         )
-        for split, _participant in rows:
-            _mark_quick_split_debtor_paid(split, settlement.payer_account_id)
+        if payment:
+            _sync_direct_bills_covered_by_pair_payment(db, payment)
     db.commit()
     db.refresh(settlement)
     return _friend_settlement_out(settlement)

@@ -99,81 +99,18 @@ function indexPaidDirectBills(friend) {
       allocations.filter((allocation) => allocation.quick_split_id).forEach((allocation) => {
         addCoverage(allocation.quick_split_id, allocation.amount);
       });
-      // Older payments predate bill IDs in allocations. Reconcile them using
-      // the same auditable rules everywhere: same currency, month, debtor,
-      // and bill existence at payment time. An exact outstanding amount wins;
-      // any remaining amount pays the newest eligible bills first.
-      allocations.filter((allocation) => !allocation.quick_split_id).forEach((allocation) => {
-        let remaining = Math.abs(Number(allocation.amount || 0));
-        if (remaining < 0.005) return;
-        const monthKey = String(allocation.month_key || allocation.period_key || "");
-        const candidates = rows.filter((row) => {
-          const split = row.split;
-          const expectedPayerId = split.is_payer ? friend.friend.id : me?.account?.id;
-          const intrinsicStatus = String(row.person?.payment_status || "").toUpperCase();
-          if (["PAID", "CONFIRMED"].includes(intrinsicStatus)) return false;
-          if (String(split.bill_date || "").slice(0, 7) !== monthKey) return false;
-          if (String(split.currency || "USD") !== String(payment.currency || "USD")) return false;
-          if (Number(payment.payer_account_id) !== Number(expectedPayerId)) return false;
-          if (payment.created_at && split.created_at && new Date(split.created_at) > new Date(payment.created_at)) return false;
-          return amountFor(row) - (coveredBySplit.get(Number(split.id)) || 0) >= 0.005;
-        }).sort((a, b) => (
-          String(b.split.bill_date || "").localeCompare(String(a.split.bill_date || "")) ||
-          String(b.split.created_at || "").localeCompare(String(a.split.created_at || "")) ||
-          Number(b.split.id) - Number(a.split.id)
-        ));
-        const exact = candidates.find((row) => Math.abs(amountFor(row) - (coveredBySplit.get(Number(row.split.id)) || 0) - remaining) < 0.005);
-        if (exact) {
-          addCoverage(exact.split.id, remaining);
-          return;
-        }
-        candidates.forEach((row) => {
-          if (remaining < 0.005) return;
-          const due = amountFor(row) - (coveredBySplit.get(Number(row.split.id)) || 0);
-          const applied = Math.min(remaining, due);
-          addCoverage(row.split.id, applied);
-          remaining -= applied;
-        });
-      });
+      // A legacy month-level allocation proves that money moved, not which
+      // bill it covered. Only an allocation naming a bill may strike it out.
     });
   friend.paidDirectSplitIds = paidIds;
 }
 
 function isDirectBillSettled(row, friend) {
-  // A private bill can be closed by its own confirmed payment before (or
-  // independently of) the monthly Friend settlement. Keep it visibly paid in
-  // either case so the ledger never loses its strike-through state.
+  // Paid status requires bill-level evidence. A net-zero month or pair can
+  // merely mean different bills offset each other.
   if (["PAID", "CONFIRMED"].includes(String(row.person?.payment_status || "").toUpperCase())) return true;
-  if (String(row.split?.status || "").toUpperCase() === "SETTLED") return true;
   if (friend.paidDirectSplitIds?.has(Number(row.split.id))) return true;
-  if (Math.abs(Number(row.balance || 0)) < 0.005) return true;
-  const monthKey = String(row.split.bill_date).slice(0, 7);
-  const currency = row.split.currency || friend.currency || "USD";
-  if (monthDirectFullyCovered(friend, monthKey, currency)) return true;
-  const settlement = friend.settlements?.get(monthKey);
-  if (!settlement) return false;
-  if (settlement.status === "SETTLED") return true;
-  return Boolean(settlement.settled_at && row.split.created_at && new Date(row.split.created_at) <= new Date(settlement.settled_at));
-}
-
-function monthDirectFullyCovered(friend, monthKey, currency) {
-  // When confirmed Friend payments have already zeroed this month's direct
-  // source, every private bill in that month belongs in Paid private bills —
-  // even if an older payment never wrote quick_split_id / payment_status.
-  const totals = friend.consolidatedBalances?.balances || (friend.consolidated ? [friend.consolidated] : []);
-  const total = totals.find((item) => String(item.currency || "USD") === String(currency || "USD"));
-  if (!total) return false;
-  const remaining = (total.sources || [])
-    .filter((source) => source.kind === "DIRECT" && String(source.period_key || "") === String(monthKey))
-    .reduce((sum, source) => sum + Number(source.amount || 0), 0);
-  if (Math.abs(remaining) >= 0.005) return false;
-  return (total.payments || []).some((payment) => (
-    payment.status === "CONFIRMED"
-    && (payment.allocations || []).some((allocation) => (
-      allocation.kind === "DIRECT"
-      && String(allocation.month_key || allocation.period_key || "") === String(monthKey)
-    ))
-  ));
+  return false;
 }
 
 function renderList() {
