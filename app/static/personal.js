@@ -239,7 +239,7 @@ function setScanBusy(on) {
   $("#dropzone")?.classList.toggle("is-busy", on);
 }
 
-async function handleReceiptUpload(file) {
+async function handleReceiptUpload(file, opts = {}) {
   if (!file) return;
   if (!ShareSquad.isReceiptImageFile(file)) {
     ShareSquad.showToast("Please choose a photo or image file.", "error");
@@ -247,13 +247,24 @@ async function handleReceiptUpload(file) {
   }
   setScanBusy(true);
 
+  let prepared = file;
+  try {
+    // Camera captures need harder downscale — gallery picks are often already shrunk.
+    prepared = await ShareSquad.prepareReceiptFile(file, opts);
+  } catch (err) {
+    setScanBusy(false);
+    ShareSquad.showToast(err.message || "Could not read that photo.", "error");
+    return;
+  }
+
   const preview = $("#previewImg");
   if (preview.src && preview.src.startsWith("blob:")) URL.revokeObjectURL(preview.src);
-  preview.src = URL.createObjectURL(file);
+  // Preview the compressed copy — never the full phone-camera original.
+  preview.src = URL.createObjectURL(prepared);
   preview.classList.remove("hidden");
 
   try {
-    const data = await ShareSquad.uploadReceipt("/personal/receipts/upload", file);
+    const data = await ShareSquad.uploadReceipt("/personal/receipts/upload", prepared, opts);
     $("#uploadId").value = data.upload_id;
     if (data.extraction) {
       const ex = data.extraction;
@@ -335,7 +346,7 @@ async function submitExpenseForm(e) {
 
 (async function init() {
   if (!ShareSquad.getToken()) {
-    window.location.href = "/login.html";
+    ShareSquad.goToLogin({ replace: true });
     return;
   }
 
@@ -371,18 +382,27 @@ async function submitExpenseForm(e) {
   const galleryInput = $("#receiptGalleryInput");
   const cameraInput = $("#receiptCameraInput");
   dropzone.addEventListener("click", () => galleryInput?.click());
-  galleryInput?.addEventListener("change", (e) => {
-    handleReceiptUpload(e.target.files[0]);
-    e.target.value = "";
+  galleryInput?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    // Clear only after we finish — clearing early can drop camera temp files mid-read.
+    try {
+      if (file) await handleReceiptUpload(file);
+    } finally {
+      e.target.value = "";
+    }
   });
-  cameraInput?.addEventListener("change", (e) => {
-    handleReceiptUpload(e.target.files[0]);
-    e.target.value = "";
+  cameraInput?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    try {
+      if (file) await handleReceiptUpload(file, { fromCamera: true });
+    } finally {
+      e.target.value = "";
+    }
   });
   ShareSquad.bindReceiptCamera({
     openBtn: "#pickCameraBtn",
     fileInput: "#receiptCameraInput",
-    onCapture: handleReceiptUpload,
+    onCapture: (file) => handleReceiptUpload(file, { fromCamera: true }),
   });
 
   dropzone.addEventListener("dragover", (e) => {
@@ -436,7 +456,7 @@ async function submitExpenseForm(e) {
     } finally { btn.disabled = false; }
   });
 
-  $("#settingsBtn")?.addEventListener("click", () => { window.location.href = "/settings.html"; });
+  $("#settingsBtn")?.addEventListener("click", () => { ShareSquad.navigateWithReturn("/settings.html"); });
 
   function navigateMainScreen(screen, direction = -1) {
     const destination = screen === "groups" ? "/index.html?view=groups" : "/index.html?view=friends";

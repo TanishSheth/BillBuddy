@@ -28,7 +28,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.main import (
     app,
-    _RATE_LIMIT_BUCKET,
     _build_account_monthly_digest,
     _business_today,
     _period_key_for,
@@ -36,6 +35,7 @@ from app.main import (
 )
 from app.database import SessionLocal
 from app import models
+from app.redis_support import clear_memory_rate_limits
 from app.split_logic import compute_balances, equal_split, graph_constrained_settlements, simplify_debts
 from app.ocr_extractor import _find_date
 from app.fx_service import convert_amount
@@ -51,7 +51,7 @@ def _uid(prefix: str = "user") -> str:
 
 
 def _auth_pair(name_a: str = "Alex", name_b: str = "Blake"):
-    _RATE_LIMIT_BUCKET.clear()
+    clear_memory_rate_limits()
     email_a, email_b = _uid("a"), _uid("b")
     ra = client.post("/api/auth/register", json={"email": email_a, "password": "Password12!", "display_name": name_a})
     assert ra.status_code == 200, ra.text
@@ -93,7 +93,7 @@ class TestAuthAndHealth:
         assert r.json() is not None
 
     def test_register_login_me_and_reject_weak_password_on_register(self):
-        _RATE_LIMIT_BUCKET.clear()
+        clear_memory_rate_limits()
         email = _uid("auth")
         weak = client.post("/api/auth/register", json={"email": email, "password": "short", "display_name": "Weak"})
         assert weak.status_code in (400, 422)
@@ -105,7 +105,7 @@ class TestAuthAndHealth:
         assert me.json()["account"]["email"] == email
 
     def test_login_allows_existing_account(self):
-        _RATE_LIMIT_BUCKET.clear()
+        clear_memory_rate_limits()
         email = _uid("login")
         client.post("/api/auth/register", json={"email": email, "password": "Password12!", "display_name": "L"})
         r = client.post("/api/auth/login", json={"email": email, "password": "Password12!"})
@@ -296,6 +296,13 @@ class TestPaymentsAndSettlements:
             headers=ctx["hb"],
         )
         assert pay.status_code == 200, pay.text
+        assert pay.json()['status'] == 'PENDING'
+        pending_balance = client.get(f"/api/friends/{friend_id}/consolidated-balance?currency=USD", headers=ctx['ha'])
+        assert pending_balance.json()['balance'] == 50.0
+        confirmed = client.post(
+            f"/api/friends/{friend_id}/consolidated-payments/{pay.json()['id']}/confirm", headers=ctx['ha'],
+        )
+        assert confirmed.status_code == 200, confirmed.text
         after = client.get(f"/api/friends/{friend_id}/consolidated-balance?currency=USD", headers=ctx["ha"])
         assert after.status_code == 200
         assert abs(abs(after.json()["balance"]) - 30.0) < 0.51

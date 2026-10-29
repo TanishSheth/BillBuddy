@@ -1,25 +1,129 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#F6F3EC">
-<script>(function(){try{var k="sharesquad_theme",p=localStorage.getItem(k)||"system",d=p==="dark"||(p!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("theme-dark",d);document.documentElement.classList.toggle("theme-light",!d);document.documentElement.dataset.theme=d?"dark":"light";var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",d?"#0B1220":"#F8FAFC");}catch(e){}})();</script><title>ShareSquad — Split with someone</title>
+<script>(function(){try{var k="sharesquad_theme",p=localStorage.getItem(k)||"system",d=p==="dark"||(p!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.classList.toggle("theme-dark",d);document.documentElement.classList.toggle("theme-light",!d);document.documentElement.dataset.theme=d?"dark":"light";var m=document.querySelector('meta[name="theme-color"]');if(m)m.setAttribute("content",d?"#0B1220":"#F8FAFC");}catch(e){}})();</script>
+<script>
+(function () {
+  try {
+    if (!new URLSearchParams(location.search).get("id")) {
+      location.replace("/friends.html?new=1");
+    }
+  } catch (e) {
+    location.replace("/friends.html?new=1");
+  }
+})();
+</script>
+<title>ShareSquad — Private split</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="/styles.css?v=20261010moneyGlyphs">
+<script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="/styles.css?v=20261027demoReset1">
 </head><body class="bb-bg text-ink min-h-screen">
-<header class="page-header border-b-2 border-ink/10"><div class="max-w-3xl mx-auto px-4 py-3 flex items-center gap-3"><a href="/index.html" class="bb-btn-secondary !py-1.5 !px-2.5" aria-label="Back to home" title="Back to home"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg></a><div><h1 class="font-mono font-bold text-lg text-brand">Split with someone</h1><p class="text-[10px] uppercase tracking-widest text-ink/50 font-mono">A one-to-one expense</p></div></div></header>
-<main class="max-w-3xl mx-auto px-4 py-7">
-  <section id="createPane" class="bb-card"><h2 class="font-mono font-bold text-base text-ink">Who are you splitting with?</h2><p class="text-sm text-ink/60 mt-1 mb-5">Create a simple expense between you and one other person. For 3 or more people, use a group so everyone’s balances stay together.</p>
-    <form id="quickSplitForm" class="space-y-4">
-      <div><label class="bb-label">What was this for?</label><input id="qsTitle" class="bb-input" placeholder="e.g. Dinner at Saffron" required></div>
-      <div class="grid sm:grid-cols-2 gap-4"><div><label class="bb-label">Total bill</label><input id="qsAmount" type="number" min="0.01" step="0.01" class="bb-input" placeholder="0.00" required></div><div><label class="bb-label">Currency</label><select id="qsCurrency" class="bb-input" data-currency-select></select></div></div>
-      <div class="grid sm:grid-cols-2 gap-4"><div><label class="bb-label">Date</label><input id="qsDate" type="date" class="bb-input" required></div><div><label class="bb-label">Category</label><select id="qsCategory" class="bb-input" data-category-select></select><div class="custom-category-wrap hidden mt-2"><label class="bb-label" for="qsCategoryCustom">Custom category</label><input id="qsCategoryCustom" data-category-custom class="bb-input" maxlength="50" placeholder="e.g. PETS, GIFTS" style="text-transform:uppercase"></div></div></div>
-      <div><label class="bb-label">Who are you splitting with?</label><select id="qsInviteMode" class="bb-input"><option value="group">Someone from my groups</option><option value="links">Share a private link</option><option value="email">Invite by email</option></select><p id="qsInviteHelp" class="text-[10px] text-ink/40 mt-1">Choose an existing group member to add them directly.</p></div>
-      <div id="qsEmailsWrap" class="hidden"><label class="bb-label">Their email</label><input id="qsEmails" type="email" class="bb-input" placeholder="friend@email.com"><p class="text-[10px] text-ink/40 mt-1">We will send the invitation to this person.</p></div>
-      <div id="qsGroupPeopleWrap" class="hidden"><label class="bb-label">Choose someone from your groups</label><select id="qsGroupPerson" class="bb-input"><option value="">Loading people…</option></select><p class="text-[10px] text-ink/40 mt-1">They are added directly—no email or private link is needed.</p></div>
-      <div class="rounded border border-ink/10 bg-ink/[0.03] p-3 flex flex-wrap items-center justify-between gap-3"><p class="text-xs text-ink/65">Splitting with 3 or more people?</p><button id="createGroupFromSplit" type="button" class="bb-btn-secondary !py-1.5 !px-3 text-[10px]">Create a group instead</button></div>
-      <div class="pt-2 border-t border-ink/10"><label class="bb-label">Who should share this cost, and how?</label><p class="text-[10px] text-ink/55 mt-1">You paid upfront for this private bill; choose how the cost should be shared with the other person.</p><div id="qsSplitType" class="flex gap-1 flex-wrap mt-2"><button type="button" class="split-type-pill active" data-type="EQUAL">Equal</button><button type="button" class="split-type-pill" data-type="PERCENTAGE">Percent</button><button type="button" class="split-type-pill" data-type="EXACT">Exact</button><button type="button" class="split-type-pill" data-type="SHARES">Shares</button></div><p id="qsSplitHint" class="text-[10px] text-ink/50 mt-2">You and every invited person will pay an equal share.</p><div id="qsSplitValues" class="space-y-2 mt-3 hidden"></div></div>
-      <p id="qsMsg" class="text-xs font-mono"></p><button class="bb-btn-primary w-full" type="submit">Create one-to-one split</button>
-    </form>
+<header class="page-header border-b-2 border-ink/10"><div class="max-w-3xl mx-auto px-4 py-3 flex items-center gap-3"><a href="/friends.html" class="bb-btn-secondary !py-1.5 !px-2.5" aria-label="Back to Friends" title="Back to Friends"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg></a><div><h1 class="font-mono font-bold text-lg text-brand">Private split</h1><p class="text-[10px] uppercase tracking-widest text-ink/50 font-mono">Invite or payment details</p></div></div></header>
+<main class="page-main max-w-3xl mx-auto px-4 py-7">
+  <section id="detailPane" class="hidden space-y-5">
+    <div class="bb-card">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <p class="text-[10px] uppercase tracking-widest text-brand font-mono">One-to-one split</p>
+          <h2 id="detailTitle" class="font-mono font-bold text-xl mt-1"></h2>
+          <p id="detailMeta" class="text-sm text-ink/60 mt-1"></p>
+        </div>
+        <span id="detailStatus" class="bb-chip"></span>
+      </div>
+      <div class="mt-5 pt-4 border-t border-ink/10">
+        <p id="detailPayer" class="text-sm"></p>
+        <p id="detailTotal" class="font-mono font-bold text-xl text-brand mt-1"></p>
+        <div class="flex flex-wrap gap-2 mt-3">
+          <button id="editQuickSplit" type="button" class="bb-btn-secondary !py-1.5 !px-3 text-[10px] hidden">Edit split</button>
+          <button id="deleteQuickSplit" type="button" class="bb-btn-secondary !py-1.5 !px-3 text-[10px] text-stamp border-stamp/30 hover:bg-stamp/5 hidden">Delete split</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Same private-bill form as Friends (#friendExpensePanel) -->
+    <aside id="friendExpensePanel" class="bb-card h-fit hidden">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <h2 id="friendExpenseHeading" class="font-mono font-bold text-sm text-brand">Edit bill</h2>
+          <p id="friendExpenseHelp" class="text-xs text-ink/60 mt-1">Same private-bill form as Friends. The invite link stays the same.</p>
+        </div>
+        <button type="button" id="cancelFriendExpenseEdit" class="bb-btn-secondary !py-1 !px-2 text-[10px]">Cancel</button>
+      </div>
+      <form id="friendExpenseForm" class="space-y-3 mt-4">
+        <input type="hidden" id="friendExpenseEditId" value="">
+        <input id="friendExpenseTitle" class="bb-input" placeholder="What was this for?" required>
+        <div class="grid grid-cols-2 gap-3">
+          <input id="friendExpenseAmount" class="bb-input" type="number" min="0.01" step="0.01" placeholder="Amount" required>
+          <select id="friendExpenseCurrency" class="bb-input" data-currency-select></select>
+        </div>
+        <input id="friendExpenseDate" class="bb-input" type="date" required>
+        <div>
+          <label class="bb-label">Category / label</label>
+          <select id="friendExpenseCategory" class="bb-input" data-category-select data-custom-input="friendExpenseCategoryCustom" data-custom-wrap="friendCustomCategoryWrap"></select>
+          <div id="friendCustomCategoryWrap" class="custom-category-wrap hidden mt-2">
+            <label class="bb-label" for="friendExpenseCategoryCustom">Custom label</label>
+            <input id="friendExpenseCategoryCustom" data-category-custom class="bb-input" maxlength="50" placeholder="e.g. PETS, GIFTS" style="text-transform:uppercase">
+          </div>
+        </div>
+        <div>
+          <label class="bb-label">1. Who paid upfront?</label>
+          <p class="text-[10px] text-ink/55 mb-1">This records who put down cash. It does not decide who owes a share.</p>
+          <select id="friendPaidBy" class="bb-input">
+            <option value="me">I paid the full bill</option>
+            <option value="friend">Friend paid the full bill</option>
+            <option value="both">We both paid</option>
+          </select>
+          <div id="friendPaySplit" class="hidden space-y-2">
+            <label class="bb-label">You paid</label>
+            <input id="friendMyPaid" class="bb-input" type="number" min="0.01" step="0.01" placeholder="Your cash">
+            <label class="bb-label">Friend paid</label>
+            <input id="friendTheirPaid" class="bb-input" type="number" min="0.01" step="0.01" placeholder="Their cash">
+            <p id="friendPayNotice" class="text-[10px] font-mono text-ink/60"></p>
+          </div>
+        </div>
+        <div id="friendSharePeople">
+          <p class="text-[10px] font-mono mb-1 text-ink/60">2. Who should share this cost?</p>
+          <p class="text-[10px] text-ink/55 mb-2">Select everyone whose portion belongs in this bill. This is separate from who paid upfront.</p>
+          <div class="flex flex-wrap gap-2">
+            <button id="friendShareMe" type="button" class="bb-chip selected" data-selected="true">You</button>
+            <button id="friendShareFriend" type="button" class="bb-chip selected" data-selected="true">Friend</button>
+          </div>
+          <p id="friendShareNotice" class="text-[10px] font-mono text-brand mt-2"></p>
+        </div>
+        <div id="friendSplitTypeWrap">
+          <label class="bb-label">3. How should the selected people split it?</label>
+          <select id="friendExpenseType" class="bb-input">
+            <option value="EQUAL">Split equally</option>
+            <option value="PERCENTAGE">Custom percentage</option>
+            <option value="EXACT">Custom amounts</option>
+            <option value="SHARES">Share ratio</option>
+          </select>
+        </div>
+        <div id="friendValues" class="hidden space-y-2">
+          <label id="friendPayerValueLabel" class="bb-label">Your value</label>
+          <input id="friendPayerValue" class="bb-input" type="number" min="0" step="0.01">
+          <label id="friendOtherValueLabel" class="bb-label">Friend's value</label>
+          <input id="friendOtherValue" class="bb-input" type="number" min="0" step="0.01">
+        </div>
+        <p id="friendMsg" class="text-xs font-mono"></p>
+        <button id="friendExpenseSubmit" class="bb-btn-primary w-full" type="submit">Save changes</button>
+      </form>
+    </aside>
+
+    <div class="bb-card">
+      <h3 class="font-mono text-xs uppercase tracking-widest text-brand font-bold">Payment</h3>
+      <div id="participantList" class="mt-3 space-y-2"></div>
+    </div>
+    <div id="sharePanel" class="bb-card hidden">
+      <h3 class="font-mono text-xs uppercase tracking-widest text-brand font-bold">Share this split</h3>
+      <p class="text-sm text-ink/60 mt-2">Send this private link to the one person you are splitting with.</p>
+      <div class="flex gap-2 mt-3">
+        <input id="shareLink" class="bb-input text-xs flex-1" readonly>
+        <button id="copyShareLink" class="bb-btn-secondary !py-2">Copy link</button>
+      </div>
+    </div>
   </section>
-  <section id="detailPane" class="hidden space-y-5"><div class="bb-card"><div class="flex items-start justify-between gap-3"><div><p class="text-[10px] uppercase tracking-widest text-brand font-mono">One-to-one split</p><h2 id="detailTitle" class="font-mono font-bold text-xl mt-1"></h2><p id="detailMeta" class="text-sm text-ink/60 mt-1"></p></div><span id="detailStatus" class="bb-chip"></span></div><div class="mt-5 pt-4 border-t border-ink/10"><p id="detailPayer" class="text-sm"></p><p id="detailTotal" class="font-mono font-bold text-xl text-brand mt-1"></p><div class="flex flex-wrap gap-2 mt-3"><button id="editQuickSplit" class="bb-btn-secondary !py-1.5 !px-3 text-[10px] hidden">Edit split</button><button id="deleteQuickSplit" class="bb-btn-secondary !py-1.5 !px-3 text-[10px] text-stamp border-stamp/30 hover:bg-stamp/5 hidden">Delete split</button></div></div></div><div class="bb-card"><h3 class="font-mono text-xs uppercase tracking-widest text-brand font-bold">Payment</h3><div id="participantList" class="mt-3 space-y-2"></div></div><div id="sharePanel" class="bb-card hidden"><h3 class="font-mono text-xs uppercase tracking-widest text-brand font-bold">Share this split</h3><p class="text-sm text-ink/60 mt-2">Send this private link to the one person you are splitting with.</p><div class="flex gap-2 mt-3"><input id="shareLink" class="bb-input text-xs flex-1" readonly><button id="copyShareLink" class="bb-btn-secondary !py-2">Copy link</button></div></div></section>
-</main><script src="/api.js?v=20260925nodate"></script><script src="/quick-split.js?v=20260925nodate"></script></body></html>
+</main>
+<script src="/api.js?v=20261027demoReset1"></script>
+<script src="/quick-split.js?v=20261027audit1"></script>
+</body></html>

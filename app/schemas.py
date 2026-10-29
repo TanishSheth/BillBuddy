@@ -264,6 +264,12 @@ class ConsolidatedSourceOut(BaseModel):
     group_id: Optional[int] = None
     # False = open group period preview (matches Who pays whom, not payment-ready).
     settlement_ready: bool = True
+    period_id: Optional[int] = None
+    expense_id: Optional[int] = None
+    bill_title: Optional[str] = None
+    obligation_key: Optional[str] = None
+    payer_member_id: Optional[int] = None
+    recipient_member_id: Optional[int] = None
 
 
 class ConsolidatedFriendBalanceOut(BaseModel):
@@ -328,6 +334,17 @@ class FriendInviteOut(BaseModel):
     invite_url: Optional[str] = None
     email_sent: bool = False
     message: str
+
+
+class PaymentReminderAmountOut(BaseModel):
+    currency: str
+    amount: float
+
+
+class PaymentReminderOut(BaseModel):
+    email_sent: bool
+    message: str
+    amounts: List[PaymentReminderAmountOut] = []
 
 
 # ---------- VLM Extraction ----------
@@ -433,6 +450,44 @@ class ExpenseOut(BaseModel):
     splits: List[SplitOut]
     recurring_template_id: Optional[int] = None
     recurring_active: bool = False
+
+
+class ExpenseAuditEventOut(BaseModel):
+    id: int
+    expense_id: Optional[int] = None
+    event_type: str
+    revision: int
+    actor_name: Optional[str] = None
+    before: Optional[Dict] = None
+    after: Optional[Dict] = None
+    changed_fields: List[str] = []
+    event_hash: str
+    previous_hash: Optional[str] = None
+    created_at: datetime
+
+
+class AuditIntegrityOut(BaseModel):
+    valid: bool
+    checked_events: int
+    issue: Optional[str] = None
+
+
+class WeeklySettlementLegOut(BaseModel):
+    payer_member_id: int
+    recipient_member_id: int
+    amount: float
+    currency: str
+
+
+class WeeklySettlementBatchOut(BaseModel):
+    id: int
+    period_key: str
+    window_starts_at: datetime
+    window_ends_at: datetime
+    status: str
+    legs: List[WeeklySettlementLegOut] = []
+    batch_hash: str
+    created_at: datetime
 
 
 class RecurringExpenseOut(BaseModel):

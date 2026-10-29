@@ -117,12 +117,16 @@ def extract_receipt_data(
 ) -> tuple[ReceiptExtraction, str, str | None, dict]:
     """
     Cascaded extraction:
-      1. Local OCR (PSM 11 + EXIF, with PSM 6 only if that read is weak).
-      2. If OCR is confident and fields look complete → keep OCR (skip VLM).
-      3. If OCR is weak/missing fields and an API key is configured → VLM.
-      4. Without a key, keep OCR-only.
+      1. Normalize image (fixed max edge + JPEG) so Personal/Group see the same bytes.
+      2. Local OCR (PSM 11 + EXIF, with PSM 6 only if that read is weak).
+      3. If OCR is confident and fields look complete → keep OCR (skip VLM / no AI cost).
+      4. If OCR is weak/missing fields and an API key is configured → VLM (temperature 0).
+      5. Without a key, keep OCR-only.
     """
-    from .ocr_extractor import extract_receipt_data_ocr
+    from .ocr_extractor import extract_receipt_data_ocr, normalize_receipt_image
+
+    # Same photo → same scan pixels whether uploaded from Personal or a Group.
+    image_bytes, mime_type = normalize_receipt_image(image_bytes)
 
     ocr_result, ocr_confident, fingerprint = extract_receipt_data_ocr(
         image_bytes, learned_vendors=learned_vendors,
@@ -147,6 +151,48 @@ def extract_receipt_data(
         )
         return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
 
+    def _call_vlm(cfg: ResolvedVlmConfig) -> dict:
+        if cfg.provider == "google":
+            return _extract_google(image_bytes, mime_type, cfg.api_key, cfg.model)
+        if cfg.provider == "openai":
+            return _extract_openai_compatible(
+                image_bytes, mime_type, cfg.api_key, cfg.model,
+                "https://api.openai.com/v1/chat/completions",
+            )
+        if cfg.provider == "anthropic":
+            return _extract_anthropic(image_bytes, mime_type, cfg.api_key, cfg.model)
+        if cfg.provider == "mistral":
+            return _extract_openai_compatible(
+                image_bytes, mime_type, cfg.api_key, cfg.model,
+                "https://api.mistral.ai/v1/chat/completions",
+            )
+        if cfg.provider == "groq":
+            return _extract_openai_compatible(
+                image_bytes, mime_type, cfg.api_key, cfg.model,
+                "https://api.groq.com/openai/v1/chat/completions",
+            )
+        raise ValueError(f"Unsupported VLM provider: {cfg.provider}")
+
+    def _server_vlm_fallback() -> ResolvedVlmConfig | None:
+        """If the user's saved key is rejected, try the server Gemini key once."""
+        if getattr(config, "source", "") == "server":
+            return None
+        import os
+        from .vlm_providers import DEFAULT_MODEL, normalize_model_id
+
+        server_key = (
+            os.environ.get("SERVER_VLM_API_KEY", "").strip()
+            or os.environ.get("GEMINI_API_KEY", "").strip()
+        )
+        if not server_key:
+            return None
+        server_provider = os.environ.get("SERVER_VLM_PROVIDER", "google")
+        server_model = normalize_model_id(
+            server_provider,
+            os.environ.get("SERVER_VLM_MODEL", os.environ.get("GEMINI_MODEL", DEFAULT_MODEL)),
+        )
+        return ResolvedVlmConfig(server_provider, server_model, server_key, "server")
+
     try:
         logger.info(
             "OCR weak — VLM fallback (%s/%s, source=%s, ocr_confident=%s, missing=%s)",
@@ -156,34 +202,39 @@ def extract_receipt_data(
             ocr_confident,
             missing,
         )
-        if config.provider == "google":
-            data = _extract_google(image_bytes, mime_type, config.api_key, config.model)
-        elif config.provider == "openai":
-            data = _extract_openai_compatible(
-                image_bytes, mime_type, config.api_key, config.model,
-                "https://api.openai.com/v1/chat/completions",
+        try:
+            data = _call_vlm(config)
+        except Exception as primary_exc:
+            blob = f"{primary_exc}".lower()
+            key_bad = (
+                "api_key_invalid" in blob
+                or "api key not valid" in blob
+                or "invalid api key" in blob
             )
-        elif config.provider == "anthropic":
-            data = _extract_anthropic(image_bytes, mime_type, config.api_key, config.model)
-        elif config.provider == "mistral":
-            data = _extract_openai_compatible(
-                image_bytes, mime_type, config.api_key, config.model,
-                "https://api.mistral.ai/v1/chat/completions",
+            server_cfg = _server_vlm_fallback() if key_bad else None
+            if not server_cfg:
+                raise
+            logger.warning(
+                "Account/group VLM key rejected — retrying with server key (%s/%s)",
+                server_cfg.provider,
+                server_cfg.model,
             )
-        elif config.provider == "groq":
-            data = _extract_openai_compatible(
-                image_bytes, mime_type, config.api_key, config.model,
-                "https://api.groq.com/openai/v1/chat/completions",
-            )
-        else:
-            return ocr_result, "ocr", _message_for_extraction(ocr_result), fingerprint
+            data = _call_vlm(server_cfg)
 
         result = _to_extraction(data)
         return result, "vlm", _message_for_extraction(result), fingerprint
     except Exception as exc:
         logger.exception("VLM extraction failed (%s/%s): %s", config.provider, config.model, exc)
         msg = _message_for_extraction(ocr_result)
-        fail = f"AI scan failed ({config.provider}). Using local OCR — check the fields."
+        blob = f"{exc}".lower()
+        if "api_key_invalid" in blob or "api key not valid" in blob or "invalid api key" in blob:
+            fail = (
+                "Your AI API key was rejected by the provider. "
+                "Open Settings → paste a valid Gemini key again (Use my own AI), then rescan. "
+                "Using local OCR for now."
+            )
+        else:
+            fail = f"AI scan failed ({config.provider}). Using local OCR — check the fields."
         return ocr_result, "ocr", f"{fail} {msg}".strip() if msg else fail, fingerprint
 
 
@@ -226,6 +277,8 @@ def _extract_google_once(image_bytes: bytes, mime_type: str, api_key: str, model
         config={
             "response_mime_type": "application/json",
             "response_schema": _VlmReceiptSchema,
+            # Lock sampling so the same receipt image does not invent new totals/merchants.
+            "temperature": 0.0,
         },
     )
     return json.loads(response.text)
@@ -294,6 +347,7 @@ def _extract_openai_compatible(
         ],
         "response_format": {"type": "json_object"},
         "max_tokens": 500,
+        "temperature": 0,
     }
     with httpx.Client(timeout=60.0) as client:
         res = client.post(
@@ -311,6 +365,7 @@ def _extract_anthropic(image_bytes: bytes, mime_type: str, api_key: str, model: 
     payload = {
         "model": model,
         "max_tokens": 500,
+        "temperature": 0,
         "messages": [
             {
                 "role": "user",

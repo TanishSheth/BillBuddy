@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -10,14 +10,14 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
-<link rel="stylesheet" href="/styles.css?v=20261010moneyGlyphs">
+<link rel="stylesheet" href="/styles.css?v=20261027demoReset1">
 </head>
 <body class="bb-bg text-ink min-h-screen flex flex-col">
 
   <header class="page-header border-b-2 border-ink/10 sticky top-0 z-30 bb-bg/95 backdrop-blur">
     <div class="max-w-5xl mx-auto px-4 sm:px-5 py-2.5 sm:py-3 flex items-center justify-between gap-2 sm:gap-3">
       <div class="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
-        <a href="/index.html" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] shrink-0" title="Back to groups">
+        <a href="/index.html?view=groups" class="bb-btn-secondary !py-1.5 !px-2.5 text-[11px] shrink-0" title="Back to groups">
           <i data-lucide="arrow-left" class="w-3.5 h-3.5"></i>
         </a>
         <a href="/index.html" class="flex items-center gap-2">
@@ -86,6 +86,9 @@
     <div id="appContent">
 
       <div id="periodBar" class="period-bar flex items-center justify-end mb-6 font-mono text-sm flex-wrap gap-2">
+        <button id="lockWeeklySettlementBtn" type="button" class="bb-btn-secondary !py-1 !px-2.5 text-[11px] flex items-center gap-1.5">
+          <i data-lucide="file-clock" class="w-3.5 h-3.5"></i> <span>Save weekly snapshot</span>
+        </button>
         <button id="openAddExpenseBtn" type="button" class="bb-btn-primary !py-1 !px-2.5 text-[11px] flex items-center gap-1.5">
           <i data-lucide="plus" class="w-3.5 h-3.5"></i> <span>Add expense</span>
         </button>
@@ -196,7 +199,7 @@
                     </div>
                   </div>
 
-                  <div id="splitStatusNotice" class="text-[10px] font-mono mb-2 text-ink/60"></div>
+                  <div id="splitStatusNotice" class="text-[10px] font-mono mb-2 text-ink/55" aria-live="polite"></div>
                   <div id="f_splitwith" class="space-y-2"></div>
                 </div>
               </div>
@@ -214,7 +217,7 @@
                 <i data-lucide="check" class="w-4 h-4"></i> Save Expense
               </button>
               <button id="cancelEditBtn" type="button" class="bb-btn-secondary w-full mt-2 hidden">Cancel edit</button>
-              <p id="saveMsg" class="text-xs mt-2 font-mono"></p>
+              <p id="saveMsg" class="text-xs mt-2 font-mono text-ink" role="status" aria-live="polite"></p>
             </div>
           </div>
         </div>
@@ -450,29 +453,19 @@
   <div id="commentsModal" class="modal-overlay hidden">
     <div class="bb-card modal-card"><div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3"><h2 id="commentsTitle" class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Expense comments</h2><button type="button" id="closeCommentsBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button></div><div id="commentsList" class="space-y-3 max-h-[45vh] overflow-y-auto mb-4"></div><form id="commentForm" class="flex gap-2"><input id="commentInput" class="bb-input flex-1" maxlength="1000" placeholder="Optional note or question"><button class="bb-btn-primary !px-3" type="submit">Post</button></form></div>
   </div>
-
-  <div id="liveCameraModal" class="modal-overlay hidden">
-    <div class="bb-card modal-card">
-      <h2 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Take photo</h2>
-      <video id="liveCameraVideo" class="live-camera-video" playsinline autoplay muted></video>
-      <p class="text-[10px] text-ink/50 font-mono mt-2">Hold the receipt flat and fill the frame. If this fails, use the phone camera.</p>
-      <div class="flex flex-wrap gap-2 mt-4">
-        <button type="button" id="liveCameraCapture" class="bb-btn-primary flex-1">Capture</button>
-        <button type="button" id="liveCameraFallback" class="bb-btn-secondary">Phone camera</button>
-        <button type="button" id="liveCameraCancel" class="bb-btn-secondary">Cancel</button>
-      </div>
-    </div>
+  <div id="auditModal" class="modal-overlay hidden">
+    <div class="bb-card modal-card max-w-2xl"><div class="flex items-center justify-between mb-4 border-b border-ink/10 pb-3"><div><h2 id="auditTitle" class="font-mono uppercase text-xs tracking-widest text-brand font-bold">Bill change history</h2><p class="text-xs text-ink/55 mt-1">Each bill change is preserved. Locked Friends weeks refresh in place when a bill in that period changes.</p></div><button type="button" id="closeAuditBtn" class="text-ink/40 hover:text-ink font-bold">&times;</button></div><div id="auditList" class="space-y-3 max-h-[55vh] overflow-y-auto"></div></div>
   </div>
 
   <!-- Bottom nav bar (mobile) -->
   <nav class="bottom-nav">
-    <a href="/index.html" class="active">
-      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-      Expenses
-    </a>
     <a href="/index.html?view=friends">
       <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       Friends
+    </a>
+    <a href="/index.html?view=groups" class="active">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg>
+      Groups
     </a>
     <a href="/personal.html">
       <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
@@ -490,8 +483,8 @@
     Add expense
   </button>
 
-  <script src="/api.js?v=20261014sessionRecurring"></script>
-  <script src="/group.js?v=20261014sessionRecurring"></script>
+  <script src="/api.js?v=20261027demoReset1"></script>
+  <script src="/group.js?v=20261027demoReset1"></script>
   <script>lucide.createIcons();</script>
 </body>
 </html>

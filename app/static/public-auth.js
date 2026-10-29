@@ -14,8 +14,13 @@
     const loginLinks = document.querySelectorAll(
       'a[href="/login.html"], a[href="/login.html?mode=signup"], a.landing-login, #signupLink, #heroSignup'
     );
+    const isDemo = (() => {
+      try { return localStorage.getItem("sharesquad_demo_sandbox") === "1"; } catch (_) { return false; }
+    })();
+    // Demo sessions should land on the app dashboard (Groups), never deep-link a stored group.
+    const appHref = isDemo ? "/app?view=groups&demo=1" : "/app";
     loginLinks.forEach((link) => {
-      link.href = "/app";
+      link.href = appHref;
       if (link.id === "signupLink" || link.id === "heroSignup" || /sign up|create (a )?free account|create your account/i.test(link.textContent || "")) {
         if (link.querySelector(".signup-full")) {
           link.innerHTML = '<span class="signup-full">Open my dashboard</span><span class="signup-short">Open app</span>';

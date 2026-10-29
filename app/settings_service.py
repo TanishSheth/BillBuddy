@@ -59,7 +59,7 @@ def _usable_api_key(encrypted: str | None) -> str | None:
     """Return plaintext key only when Fernet decrypt succeeds."""
     if not encrypted:
         return None
-    key = decrypt_secret(encrypted)
+    key = (decrypt_secret(encrypted) or "").strip()
     if key:
         return key
     # Blob present but SECRET_KEY changed (common after cloud re-deploy / new .env).

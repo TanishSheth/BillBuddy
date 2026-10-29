@@ -101,7 +101,7 @@ function syncExpenseCurrencyUI() {
 const GROUP_PAGE_HELP = {
   upload: "<strong>Add / Scan:</strong> Upload a receipt or enter a bill, choose who paid and who shares it, then save it to this month.",
   expenses: "<strong>Expenses:</strong> Newest saves on top. The date column is the receipt date. Filter by the month you added a bill, category, member, or search.",
-  balances: "<strong>Balances & settlement:</strong> Overall who owes whom across every month in this group. Record payments on Friends — amounts here update when a payment is saved.",
+  balances: "<strong>Balances & settlement:</strong> Each bill records who owes whom when it is saved. New bills cannot move an earlier bill's debt to someone else. Corrections and confirmed payments update these balances immediately and remain in history.",
   insights: "<strong>Insights:</strong> Pick a month to see total spending, top category, and largest bills saved that month.",
   activity: "<strong>Activity:</strong> Follow group changes, expenses, comments, and payment updates in time order.",
   reports: "<strong>PDF Reports:</strong> Generate or download a PDF for the current calendar month, and reopen past PDFs below.",
@@ -113,38 +113,81 @@ function updateGroupPageHelp(tabName) {
   if (help) help.innerHTML = GROUP_PAGE_HELP[tabName] || GROUP_PAGE_HELP.upload;
 }
 
-function switchTab(tabName) {
-  $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tabName));
-  $$(".tab-panel").forEach((p) => p.classList.toggle("hidden", p.id !== `tab-${tabName}`));
-  const tabSelect = $("#groupTabSelect");
-  if (tabSelect && tabSelect.value !== tabName) tabSelect.value = tabName;
-  updateGroupPageHelp(tabName);
-
-  if (tabName === "expenses") loadExpenses();
-  if (tabName === "balances") loadBalances();
-  if (tabName === "reports") loadReports();
-  if (tabName === "members") loadMembers();
-  if (tabName === "insights") loadInsights();
-  if (tabName === "activity") loadActivity();
+function syncGroupTabInUrl(tabName) {
+  // Keep ?tab= in the address bar so Settings → Back (and reloads) restore
+  // Insights / Expenses / etc., not always Balances.
+  try {
+    const url = new URL(window.location.href);
+    const current = url.searchParams.get("tab");
+    if (current === tabName) return;
+    if (tabName && tabName !== "balances") url.searchParams.set("tab", tabName);
+    else url.searchParams.delete("tab");
+    history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  } catch (_) {
+    /* ignore */
+  }
 }
 
-function focusNotificationTarget() {
+function switchTab(tabName) {
+  const next = GROUP_PAGE_HELP[tabName] ? tabName : "balances";
+  $$(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === next));
+  $$(".tab-panel").forEach((p) => p.classList.toggle("hidden", p.id !== `tab-${next}`));
+  const tabSelect = $("#groupTabSelect");
+  if (tabSelect && tabSelect.value !== next) tabSelect.value = next;
+  updateGroupPageHelp(next);
+  syncGroupTabInUrl(next);
+
+  if (next === "expenses") loadExpenses();
+  if (next === "balances") loadBalances();
+  if (next === "reports") loadReports();
+  if (next === "members") loadMembers();
+  if (next === "insights") loadInsights();
+  if (next === "activity") loadActivity();
+  if (next === "upload") {
+    /* upload panel is opened on demand; no extra loader */
+  }
+}
+
+async function focusNotificationTarget() {
   const params = new URLSearchParams(window.location.search);
   const requestedTab = params.get("tab");
   const focus = params.get("focus");
-  if (requestedTab && GROUP_PAGE_HELP[requestedTab]) switchTab(requestedTab);
+  const targetsExpense = focus && (focus.startsWith("expense-") || focus === "expensesBody");
+  if (!targetsExpense && requestedTab && GROUP_PAGE_HELP[requestedTab]) switchTab(requestedTab);
   if (!focus) return;
-  setTimeout(() => {
+  if (focus.startsWith("expense-") || focus === "expensesBody") {
+    const search = document.querySelector("#expenseSearch");
+    if (search) search.value = "";
+    const month = document.querySelector("#expenseMonthFilter");
+    if (month) month.value = "";
+    const category = document.querySelector("#groupCategoryFilter");
+    if (category) category.value = "All";
+    const member = document.querySelector("#expenseMemberFilter");
+    if (member) member.value = "";
+    const involved = document.querySelector("#onlyMyExpenses");
+    if (involved) involved.checked = false;
+    switchTab("expenses");
+    await loadExpenses();
+  }
+  const highlight = () => {
     // Older notifications only identify the expense list. Highlight its most
     // recent visible item so the user still lands on a concrete change.
     const target = focus === "expensesBody"
       ? document.querySelector("#expensesBody tr, #expensesMobileList [data-expense-id]") || document.getElementById("expensesBody")
-      : document.getElementById(focus) || document.querySelector(`[data-expense-id="${CSS.escape(focus.replace("expense-", ""))}"]`);
-    if (!target) return;
+      : document.getElementById(focus) || [...document.querySelectorAll(`[data-expense-id="${CSS.escape(focus.replace("expense-", ""))}"]`)].find((item) => item.getClientRects().length > 0);
+    if (!target) return false;
     target.scrollIntoView({ behavior: "smooth", block: "center" });
     target.classList.add("notification-focus");
     setTimeout(() => target.classList.remove("notification-focus"), 2100);
-  }, 280);
+    return true;
+  };
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (highlight()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (/^expense-\d+$/.test(focus)) {
+    await openExpenseAudit(Number(focus.replace("expense-", "")));
+  }
 }
 
 function applyDraftGroupState() {
@@ -550,6 +593,7 @@ function renderMultiPayers() {
       input.addEventListener("input", () => {
         state.payerAmounts = state.payerAmounts || {};
         state.payerAmounts[input.dataset.member] = input.value;
+        renderSplitOptions();
       });
     });
   }
@@ -620,7 +664,7 @@ function renderSplitOptions() {
       <span class="font-semibold text-ink">${label}</span>
       <div class="flex items-center gap-1.5 w-36">
         <input type="text" step="${state.splitType === 'SHARES' ? '1' : '0.01'}" min="0" inputmode="decimal"
-               class="split-val-input bb-input !p-1 text-right font-bold bg-white rounded border border-line" 
+               class="split-val-input bb-input !p-1 text-right font-bold"
                data-id="${m.id}" value="${val}">
         <span class="text-ink/60 text-[11px] font-bold w-10">${unit}</span>
       </div>
@@ -766,6 +810,7 @@ async function loadExpenses() {
       <td class="py-2.5 text-right">
         <div class="flex items-center justify-end gap-1">
           <button class="edit-exp p-1 hover:text-brand" data-id="${e.id}" title="Edit"><i data-lucide="edit-2" class="w-3.5 h-3.5"></i></button>
+          <button class="audit-exp p-1 hover:text-brand" data-id="${e.id}" title="Change history"><i data-lucide="history" class="w-3.5 h-3.5"></i></button>
           <button class="comment-exp p-1 hover:text-brand" data-id="${e.id}" title="Comments"><i data-lucide="message-circle" class="w-3.5 h-3.5"></i></button>
           <button class="delete-exp p-1 hover:text-stamp" data-id="${e.id}" data-name="${ShareSquad.escapeHtml(e.store_name)}" title="Delete"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
         </div>
@@ -792,6 +837,7 @@ async function loadExpenses() {
       </div>
       <div class="card-actions">
         <button class="edit-exp bb-btn-secondary !py-1 !px-2 text-xs flex-1" data-id="${e.id}"><i data-lucide="edit-2" class="w-3 h-3"></i> Edit</button>
+        <button class="audit-exp bb-btn-secondary !py-1 !px-2 text-xs flex-1" data-id="${e.id}"><i data-lucide="history" class="w-3 h-3"></i> History</button>
         <button class="comment-exp bb-btn-secondary !py-1 !px-2 text-xs flex-1" data-id="${e.id}"><i data-lucide="message-circle" class="w-3 h-3"></i> Notes</button>
         <button class="delete-exp bb-btn-secondary !py-1 !px-2 text-xs text-stamp border-stamp/30 hover:bg-stamp/5 flex-1" data-id="${e.id}" data-name="${ShareSquad.escapeHtml(e.store_name)}"><i data-lucide="trash-2" class="w-3 h-3"></i> Delete</button>
       </div>
@@ -840,6 +886,7 @@ async function loadExpenses() {
   });
 
   $$(".comment-exp").forEach((btn) => btn.addEventListener("click", () => openComments(Number(btn.dataset.id))));
+  $$(".audit-exp").forEach((btn) => btn.addEventListener("click", () => openExpenseAudit(Number(btn.dataset.id))));
 }
 
 function startEditExpense(exp) {
@@ -897,6 +944,47 @@ async function openComments(expenseId) {
   $("#commentsTitle").textContent = `Notes - ${expense?.store_name || "Expense"}`;
   $("#commentsModal").classList.remove("hidden");
   await loadComments();
+}
+
+async function openExpenseAudit(expenseId) {
+  const expense = state.currentExpenses.find((item) => item.id === expenseId);
+  $("#auditTitle").textContent = `Bill change history — ${expense?.store_name || "Expense"}`;
+  const list = $("#auditList");
+  list.innerHTML = '<p class="text-xs font-mono text-ink/40 py-3">Loading…</p>';
+  $("#auditModal").classList.remove("hidden");
+  try {
+    const events = await ShareSquad.api(`/groups/${gid()}/expenses/${expenseId}/audit`);
+    if (!events.length) {
+      list.innerHTML = '<p class="text-xs font-mono text-ink/40 py-3">No change history yet for this bill.</p>';
+      return;
+    }
+    list.innerHTML = events.map((event) => {
+      const when = ShareSquad.formatDate(event.created_at);
+      const actor = ShareSquad.escapeHtml(event.actor_name || "System");
+      const fields = (event.changed_fields || []).map((field) => ShareSquad.escapeHtml(field)).join(", ");
+      const detail = fields ? `Changed: ${fields}` : (event.event_type || "");
+      return `<article class="p-3 rounded-lg bg-ink/5"><p class="text-xs font-mono uppercase tracking-widest text-brand">${ShareSquad.escapeHtml(event.event_type || "EVENT")} · rev ${event.revision}</p><p class="text-sm text-ink mt-1">${detail}</p><p class="text-[10px] font-mono text-ink/45 mt-1">${actor} · ${when}</p></article>`;
+    }).join("");
+  } catch (err) {
+    list.innerHTML = `<p class="text-xs balance-negative py-3">${ShareSquad.escapeHtml(err.message || "Could not load history")}</p>`;
+  }
+}
+
+async function lockCurrentWeekSettlement() {
+  if (!await ShareSquad.confirmDialog({
+    title: "Save a weekly snapshot?",
+    message: "Save a reporting snapshot of this week's balances. Bill debts and payments are recorded immediately; saving a snapshot does not change them.",
+    confirmLabel: "Save snapshot",
+    danger: false,
+  })) return;
+  try {
+    const periodKey = state.currentPeriod || calendarPeriodKey();
+    await ShareSquad.api(`/groups/${gid()}/periods/${periodKey}/weekly-settlements/lock`, { method: "POST" });
+    ShareSquad.showToast("Weekly reporting snapshot saved.", "success");
+    if (typeof loadBalances === "function") await loadBalances();
+  } catch (err) {
+    ShareSquad.showToast(err.message || "Could not lock this week", "error");
+  }
 }
 
 async function loadComments() {
@@ -1037,7 +1125,7 @@ async function saveExpense() {
         body: JSON.stringify(payload),
       });
       ShareSquad.showToast(
-        recurringMonthly ? "Expense updated · repeats every month" : "Expense updated successfully",
+        recurringMonthly ? "Expense updated · repeats every month" : "Expense updated · locked Friends instructions for this week were refreshed.",
         "success",
       );
     } else {
@@ -1225,8 +1313,8 @@ async function loadInsights() {
     const chart = ShareSquad.renderCategoryPieChart(categoryRows, data.total_spent, data.currency);
     const monthLabel = periodOptionLabel(periodKey, periodKey === calendarPeriodKey());
     root.innerHTML = `
-      <div class="insight-kpis"><article class="bb-card"><p class="insight-label">Total spending</p><p class="insight-value">${ShareSquad.formatMoney(data.total_spent, data.currency)}</p><p class="text-xs text-ink/45">${ShareSquad.escapeHtml(monthLabel)}</p></article><article class="bb-card"><p class="insight-label">Top category</p><p class="insight-value text-lg"><span ${ShareSquad.categoryMark(categoryRows[0]?.[0] || "General")}>${ShareSquad.escapeHtml(categoryRows[0]?.[0] || "No expenses")}</span></p><p class="text-xs text-ink/45">${categoryRows[0] ? ShareSquad.formatMoney(categoryRows[0][1], data.currency) : ""}</p></article></div>
-      <div class="grid md:grid-cols-2 gap-4"><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">By category</h3>${chart}</article><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Largest expenses</h3>${top.length ? top.map((expense) => `<div class="insight-row cat-row"><span class="inline-flex items-center gap-2 min-w-0"><span ${ShareSquad.categoryMark(expense.category || "General")}>${ShareSquad.escapeHtml(expense.category || "General")}</span><span class="truncate">${ShareSquad.escapeHtml(expense.store_name)}</span></span><strong>${ShareSquad.formatMoney(expense.total_amount, expense.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses saved in this month.</p>'}</article></div>`;
+      <div class="insight-kpis w-full"><article class="bb-card"><p class="insight-label">Total spending</p><p class="insight-value">${ShareSquad.formatMoney(data.total_spent, data.currency)}</p><p class="text-xs text-ink/45">${ShareSquad.escapeHtml(monthLabel)}</p></article><article class="bb-card"><p class="insight-label">Top category</p><p class="insight-value text-lg"><span ${ShareSquad.categoryMark(categoryRows[0]?.[0] || "General")}>${ShareSquad.escapeHtml(categoryRows[0]?.[0] || "No expenses")}</span></p><p class="text-xs text-ink/45">${categoryRows[0] ? ShareSquad.formatMoney(categoryRows[0][1], data.currency) : ""}</p></article></div>
+      <div class="grid md:grid-cols-2 gap-4 w-full"><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">By category</h3>${chart}</article><article class="bb-card"><h3 class="font-mono uppercase text-xs tracking-widest text-brand font-bold mb-3">Largest expenses</h3>${top.length ? top.map((expense) => `<div class="insight-row cat-row"><span class="inline-flex items-center gap-2 min-w-0"><span ${ShareSquad.categoryMark(expense.category || "General")}>${ShareSquad.escapeHtml(expense.category || "General")}</span><span class="truncate">${ShareSquad.escapeHtml(expense.store_name)}</span></span><strong>${ShareSquad.formatMoney(expense.total_amount, expense.currency)}</strong></div>`).join("") : '<p class="text-sm text-ink/45">No expenses saved in this month.</p>'}</article></div>`;
   } catch (err) { root.innerHTML = `<div class="bb-card balance-negative">${ShareSquad.escapeHtml(err.message)}</div>`; }
 }
 
@@ -1457,7 +1545,7 @@ function setScanBusy(on) {
   $("#dropzone")?.classList.toggle("is-busy", on);
 }
 
-async function handleReceiptUpload(file) {
+async function handleReceiptUpload(file, opts = {}) {
   if (state.isDraft) { ShareSquad.showToast("Invite at least one member before adding shared expenses", "info"); return; }
   if (!file) return;
   if (!ShareSquad.isReceiptImageFile(file)) {
@@ -1465,14 +1553,25 @@ async function handleReceiptUpload(file) {
     return;
   }
 
+  setScanBusy(true);
+  let prepared = file;
+  try {
+    // Camera captures need harder downscale — gallery picks are often already shrunk.
+    prepared = await ShareSquad.prepareReceiptFile(file, opts);
+  } catch (err) {
+    setScanBusy(false);
+    ShareSquad.showToast(err.message || "Could not read that photo.", "error");
+    return;
+  }
+
   const preview = $("#previewImg");
   if (preview.src && preview.src.startsWith("blob:")) URL.revokeObjectURL(preview.src);
-  preview.src = URL.createObjectURL(file);
+  // Preview the compressed copy — never the full phone-camera original.
+  preview.src = URL.createObjectURL(prepared);
   preview.classList.remove("hidden");
-  setScanBusy(true);
 
   try {
-    const data = await ShareSquad.uploadReceipt(`/groups/${gid()}/receipts/upload`, file);
+    const data = await ShareSquad.uploadReceipt(`/groups/${gid()}/receipts/upload`, prepared, opts);
 
     state.currentUploadId = data.upload_id;
     state.editingExpenseId = null;
@@ -1532,7 +1631,7 @@ async function handleReceiptUpload(file) {
 // ---------------------------------------------------------------------------
 (async function init() {
   if (!ShareSquad.getToken()) {
-    window.location.href = "/login.html";
+    ShareSquad.goToLogin({ replace: true });
     return;
   }
 
@@ -1580,6 +1679,7 @@ async function handleReceiptUpload(file) {
     renderSplitOptions();
     if (state.payMode === "multi") renderMultiPayers();
   });
+  $("#f_payer")?.addEventListener("change", renderSplitOptions);
   $("#f_currency")?.addEventListener("change", () => {
     syncExpenseCurrencyUI();
     renderSplitOptions();
@@ -1620,6 +1720,11 @@ async function handleReceiptUpload(file) {
     switchTab("upload");
     $("#tab-upload")?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
+  $("#lockWeeklySettlementBtn")?.addEventListener("click", () => lockCurrentWeekSettlement());
+  $("#closeAuditBtn")?.addEventListener("click", () => $("#auditModal").classList.add("hidden"));
+  $("#auditModal")?.addEventListener("click", (e) => {
+    if (e.target.id === "auditModal") $("#auditModal").classList.add("hidden");
+  });
 
   $("#cancelEditBtn").addEventListener("click", cancelEdit);
   $("#saveExpenseBtn")?.addEventListener("click", (e) => {
@@ -1632,18 +1737,27 @@ async function handleReceiptUpload(file) {
   const galleryInput = $("#fileInputGallery");
   const cameraInput = $("#fileInputCamera");
   dropzone.addEventListener("click", () => galleryInput?.click());
-  galleryInput?.addEventListener("change", (e) => {
-    handleReceiptUpload(e.target.files[0]);
-    e.target.value = "";
+  galleryInput?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    // Clear only after we finish — clearing early can drop camera/gallery temp files mid-read.
+    try {
+      if (file) await handleReceiptUpload(file);
+    } finally {
+      e.target.value = "";
+    }
   });
-  cameraInput?.addEventListener("change", (e) => {
-    handleReceiptUpload(e.target.files[0]);
-    e.target.value = "";
+  cameraInput?.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    try {
+      if (file) await handleReceiptUpload(file, { fromCamera: true });
+    } finally {
+      e.target.value = "";
+    }
   });
   ShareSquad.bindReceiptCamera({
     openBtn: "#pickCameraBtn",
     fileInput: "#fileInputCamera",
-    onCapture: handleReceiptUpload,
+    onCapture: (file) => handleReceiptUpload(file, { fromCamera: true }),
   });
   $("#renameGroupBtn")?.addEventListener("click", (e) => {
     e.preventDefault();
@@ -1893,7 +2007,8 @@ async function handleReceiptUpload(file) {
   await loadGroup();
   restoreExpenseFilters();
   await loadPeriods();
-  switchTab("balances");
+  const bootTab = new URLSearchParams(window.location.search).get("tab");
+  switchTab(bootTab && GROUP_PAGE_HELP[bootTab] ? bootTab : "balances");
   await loadNotificationCount();
   startGroupSync();
   focusNotificationTarget();

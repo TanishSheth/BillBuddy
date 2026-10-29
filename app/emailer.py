@@ -4,12 +4,14 @@ SMTP email for group invitations and monthly report delivery in ShareSquad.
 If SMTP_HOST is not set in .env, invites are saved as pending in the database
 but no email is sent — use the invite link instead.
 """
+import html as html_lib
 import logging
 import os
 import smtplib
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr, parseaddr
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +25,19 @@ def _smtp_settings() -> tuple[str, int, str, str, str, bool]:
     port = int(os.environ.get("SMTP_PORT", "587"))
     user = os.environ.get("SMTP_USER", "").strip()
     password = os.environ.get("SMTP_PASSWORD", "")
-    from_addr = os.environ.get("SMTP_FROM", user or "noreply@sharesquad.local")
+    from_addr = os.environ.get("SMTP_FROM", user or "noreply@sharesquad.local").strip()
     use_tls = os.environ.get("SMTP_TLS", "true").lower() in ("1", "true", "yes")
     return host, port, user, password, from_addr, use_tls
+
+
+def _from_header(from_addr: str) -> str:
+    """Prefer a clear product display name: ShareSquad <addr@…>."""
+    display_name = (os.environ.get("SMTP_FROM_NAME") or "ShareSquad").strip() or "ShareSquad"
+    name, addr = parseaddr(from_addr)
+    address = (addr or from_addr).strip()
+    # If SMTP_FROM already includes a display name, keep it unless empty.
+    label = (name or display_name).strip() or display_name
+    return formataddr((label, address))
 
 
 def _send_message(msg: MIMEMultipart, to_email: str) -> None:
@@ -33,7 +45,9 @@ def _send_message(msg: MIMEMultipart, to_email: str) -> None:
     if not host:
         raise RuntimeError("SMTP is not configured")
 
-    msg["From"] = from_addr
+    _name, envelope_from = parseaddr(from_addr)
+    envelope_from = (envelope_from or from_addr).strip()
+    msg["From"] = _from_header(from_addr)
     msg["To"] = to_email
 
     # Keep invites snappy when SMTP is misconfigured or unreachable (QA: ~30s hangs).
@@ -43,7 +57,7 @@ def _send_message(msg: MIMEMultipart, to_email: str) -> None:
             server.starttls()
         if user and password:
             server.login(user, password)
-        server.sendmail(from_addr, [to_email], msg.as_string())
+        server.sendmail(envelope_from, [to_email], msg.as_string())
 
 
 def _period_label(period_key: str) -> str:
@@ -221,6 +235,62 @@ This PDF includes the complete itemized expenses, category breakdown, balance su
         return True
     except Exception:
         logger.exception("Failed to email monthly report to %s", to_email)
+        raise
+
+
+def send_payment_reminder_email(
+    to_email: str,
+    friend_name: str,
+    sender_name: str,
+    amount_lines: list[str],
+) -> bool:
+    """Polite one-to-one reminder that friend_name owes sender_name the listed totals."""
+    if not is_email_configured():
+        return False
+    if not amount_lines:
+        raise ValueError("amount_lines is required")
+
+    safe_friend = html_lib.escape(friend_name or "there")
+    safe_sender = html_lib.escape(sender_name or "a friend")
+    amounts_text = "\n".join(f"  • {line}" for line in amount_lines)
+    amounts_html = "".join(
+        f'<li style="margin:4px 0;"><strong>{html_lib.escape(line)}</strong></li>'
+        for line in amount_lines
+    )
+    subject = f"Friendly reminder from {sender_name} on ShareSquad"
+    text_body = f"""Hi {friend_name},
+
+This is a polite reminder from {sender_name} on ShareSquad.
+
+You currently owe:
+{amounts_text}
+
+Whenever you can, please settle up at your earliest convenience. Thank you!
+
+— ShareSquad
+(Sent only to you by {sender_name})
+"""
+    html_body = f"""<html><body style="font-family:sans-serif;color:#18221B;max-width:560px;">
+<p>Hi <strong>{safe_friend}</strong>,</p>
+<p>This is a polite reminder from <strong>{safe_sender}</strong> on ShareSquad.</p>
+<p>You currently owe:</p>
+<ul style="padding-left:18px;">{amounts_html}</ul>
+<p>Whenever you can, please settle up at your earliest convenience. Thank you!</p>
+<p style="color:#0F766E;font-size:13px;font-weight:bold;">— ShareSquad</p>
+<p style="color:#64748B;font-size:12px;">Sent only to you by {safe_sender}.</p>
+</body></html>"""
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        _send_message(msg, to_email)
+        logger.info("Payment reminder emailed to %s from %s", to_email, sender_name)
+        return True
+    except Exception:
+        logger.exception("Failed to send payment reminder to %s", to_email)
         raise
 
 

@@ -4,6 +4,8 @@ const TOKEN_KEY = "sharesquad_token";
 const LEGACY_TOKEN_KEY = "billbuddy_token";
 const GROUP_KEY = "sharesquad_group_id";
 const LEGACY_GROUP_KEY = "billbuddy_group_id";
+const PRE_DEMO_TOKEN_KEY = "sharesquad_pre_demo_token";
+const PRE_DEMO_GROUP_KEY = "sharesquad_pre_demo_group_id";
 
 function getToken() {
   return localStorage.getItem(TOKEN_KEY) || localStorage.getItem(LEGACY_TOKEN_KEY);
@@ -14,35 +16,114 @@ function setToken(token) {
   localStorage.setItem(LEGACY_TOKEN_KEY, token);
 }
 
+function clearPreDemoSession() {
+  localStorage.removeItem(PRE_DEMO_TOKEN_KEY);
+  localStorage.removeItem(PRE_DEMO_GROUP_KEY);
+}
+
+function stashRealSessionForDemo() {
+  // Already in a sandbox (e.g. Reset demo) — keep the original stash intact.
+  if (localStorage.getItem("sharesquad_demo_sandbox") === "1") return;
+  const token = getToken();
+  if (!token) {
+    clearPreDemoSession();
+    return;
+  }
+  localStorage.setItem(PRE_DEMO_TOKEN_KEY, token);
+  const groupId = getStoredGroupId();
+  if (groupId) localStorage.setItem(PRE_DEMO_GROUP_KEY, groupId);
+  else localStorage.removeItem(PRE_DEMO_GROUP_KEY);
+}
+
+function beginDemoSession(accessToken, groupId) {
+  stashRealSessionForDemo();
+  setToken(accessToken);
+  localStorage.setItem("sharesquad_demo_sandbox", "1");
+  if (groupId != null && groupId !== "") setStoredGroupId(groupId);
+}
+
+/** Leave demo; restore the pre-demo account when one was stashed. Returns true if restored. */
+function exitDemoSession() {
+  const savedToken = localStorage.getItem(PRE_DEMO_TOKEN_KEY);
+  const savedGroup = localStorage.getItem(PRE_DEMO_GROUP_KEY);
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(LEGACY_TOKEN_KEY);
+  localStorage.removeItem("sharesquad_demo_sandbox");
+  clearPreDemoSession();
+  if (savedToken) {
+    setToken(savedToken);
+    if (savedGroup) setStoredGroupId(savedGroup);
+    else removeStoredGroupId();
+    return true;
+  }
+  removeStoredGroupId();
+  return false;
+}
+
 function removeToken() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(LEGACY_TOKEN_KEY);
   localStorage.removeItem("sharesquad_demo_sandbox");
+  clearPreDemoSession();
+}
+
+function isDemoSandboxSession() {
+  return localStorage.getItem("sharesquad_demo_sandbox") === "1";
+}
+
+function hasPreDemoSession() {
+  return Boolean(localStorage.getItem(PRE_DEMO_TOKEN_KEY));
+}
+
+/** Demo auth failure: restore stash when present; never wipe a real account into login. */
+function handleDemoAuthFailure(message) {
+  const restored = exitDemoSession();
+  showToast(message || (restored ? "Demo ended. Your account is signed in again." : "Demo ended."), restored ? "success" : "error");
+  setTimeout(() => {
+    if (restored) window.location.replace("/");
+    else {
+      allowLoginOnce();
+      goToLogin({ replace: true, keepNext: false });
+    }
+  }, 800);
+  return restored;
+}
+
+function leaveDemoToLanding() {
+  exitDemoSession();
+  window.location.replace("/");
 }
 
 function renderDemoBanner() {
-  if (localStorage.getItem("sharesquad_demo_sandbox") !== "1" || document.getElementById("demoModeBanner")) return;
+  if (!isDemoSandboxSession() || document.getElementById("demoModeBanner")) return;
   const header = document.querySelector(".page-header");
   if (!header) return;
   const banner = document.createElement("aside");
   banner.id = "demoModeBanner";
   banner.className = "tone-banner tone-banner-success rounded-none border-x-0";
   banner.setAttribute("role", "status");
-  banner.innerHTML = '<div class="max-w-5xl mx-auto px-4 sm:px-5 py-2 text-center text-xs sm:text-sm w-full"><strong>Demo mode</strong> · Same current ShareSquad as a regular account, filled with sample group data. Sandboxes expire after two hours. <a class="tone-banner-action font-semibold underline underline-offset-2" href="/login.html?mode=signup">Sign up free</a> to keep your own data. <button type="button" id="resetDemoSandbox" class="ml-1 tone-banner-action font-semibold underline underline-offset-2">Reset demo</button></div>';
+  banner.innerHTML = '<div class="max-w-5xl mx-auto px-4 sm:px-5 py-2 text-center text-xs sm:text-sm w-full"><strong>Demo mode</strong> · Same current ShareSquad as a regular account, filled with sample group data. Sandboxes expire after two hours. <a class="tone-banner-action font-semibold underline underline-offset-2" href="/login.html?mode=signup">Sign up free</a> to keep your own data. <button type="button" id="resetDemoSandbox" class="ml-1 tone-banner-action font-semibold underline underline-offset-2">Reset demo</button> <button type="button" id="exitDemoSandbox" class="ml-1 tone-banner-action font-semibold underline underline-offset-2">Exit demo</button></div>';
   header.insertAdjacentElement("afterend", banner);
-  banner.querySelector("#resetDemoSandbox")?.addEventListener("click", async () => {
+  banner.querySelector("#exitDemoSandbox")?.addEventListener("click", () => leaveDemoToLanding());
+  const resetBtn = banner.querySelector("#resetDemoSandbox");
+  resetBtn?.addEventListener("click", async () => {
+    if (resetBtn.disabled) return;
     if (!await confirmDialog({
       title: "Reset this demo?",
       message: "Your demo changes will be removed and a fresh sample workspace will open.",
       confirmLabel: "Reset demo",
+      danger: false,
     })) return;
+    resetBtn.disabled = true;
     try {
       const result = await api("/demo/sandbox/reset", { method: "POST" });
       setToken(result.access_token);
       localStorage.setItem("sharesquad_demo_sandbox", "1");
       setStoredGroupId(result.group_id);
-      window.location.href = `/group?group=${encodeURIComponent(result.group_id)}&tab=balances&demo=1`;
+      // Return to the app dashboard so Reset demo matches Try the full demo.
+      window.location.href = "/app?view=groups&demo=1";
     } catch (error) {
+      resetBtn.disabled = false;
       showToast(error.message || "Could not reset the demo", "error");
     }
   });
@@ -344,7 +425,7 @@ function initMobileQuickAction() {
     const actions = document.createElement("div");
     actions.className = "mobile-quick-actions";
     actions.innerHTML = '<button type="button" class="mobile-quick-action quick-split">＋ <span>Quick split</span></button><button type="button" class="mobile-quick-action create-group">＋ <span>Create group</span></button>';
-    actions.querySelector(".quick-split").addEventListener("click", () => { window.location.href = "/quick-split.html"; });
+    actions.querySelector(".quick-split").addEventListener("click", () => { window.location.href = "/friends.html?new=1"; });
     actions.querySelector(".create-group").addEventListener("click", () => $("#newGroupBtn")?.click());
     document.body.appendChild(actions);
     return;
@@ -403,19 +484,27 @@ function bindLogoutButton() {
   }
   const button = $("#logoutBtn");
   if (!button) return;
+  const inDemo = localStorage.getItem("sharesquad_demo_sandbox") === "1";
+  const label = inDemo ? "Exit demo" : "Sign out";
   // Always restore the same icon + label (covers stale cached HTML that was icon-only).
   button.className = "bb-btn-secondary !py-1.5 !px-2.5 text-[11px] hover:text-stamp hover:border-stamp/40";
   button.type = "button";
-  button.title = "Sign out";
-  button.setAttribute("aria-label", "Sign out");
-  button.innerHTML = '<i data-lucide="log-out" class="w-3.5 h-3.5" aria-hidden="true"></i><span>Sign out</span>';
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.innerHTML = `<i data-lucide="log-out" class="w-3.5 h-3.5" aria-hidden="true"></i><span>${label}</span>`;
   if (window.lucide?.createIcons) window.lucide.createIcons();
   if (button.dataset.boundLogout === "1") return;
   button.dataset.boundLogout = "1";
   button.addEventListener("click", () => {
+    if (isDemoSandboxSession()) {
+      leaveDemoToLanding();
+      return;
+    }
     removeToken();
     removeStoredGroupId();
-    window.location.href = "/login";
+    allowLoginOnce();
+    // Replace so browser Back cannot return to a signed-in screen after logout.
+    window.location.replace("/login.html");
   });
 }
 
@@ -439,13 +528,17 @@ async function api(path, opts = {}) {
     const res = await fetch(`/api${path}`, { ...opts, headers });
     
     if (res.status === 401) {
-      // If we are already on login or reset password page, do not infinite redirect
-      if (!window.location.pathname.includes("login.html") && !window.location.pathname.includes("reset-password.html")) {
-        removeToken();
-        showToast("Session expired. Please sign in again.", "error");
-        setTimeout(() => {
-          window.location.href = "/login.html";
-        }, 800);
+      // Demo sandboxes expire; restore any stashed real account instead of wiping it.
+      if (!isLoginPath() && !window.location.pathname.includes("reset-password.html")) {
+        if (isDemoSandboxSession() || hasPreDemoSession()) {
+          handleDemoAuthFailure("This demo expired or is no longer valid.");
+        } else {
+          removeToken();
+          showToast("Session expired. Please sign in again.", "error");
+          setTimeout(() => {
+            goToLogin({ replace: true, keepNext: true });
+          }, 800);
+        }
       }
       throw new Error("Session expired. Please sign in.");
     }
@@ -462,7 +555,10 @@ async function api(path, opts = {}) {
     if (refreshed) setToken(refreshed);
 
     const ct = res.headers.get("content-type") || "";
-    return ct.includes("application/json") ? res.json() : res;
+    if (!ct.includes("application/json")) return res;
+    return res.json().catch(() => {
+      throw new Error("Server returned invalid JSON");
+    });
   } catch (err) {
     throw err;
   }
@@ -525,7 +621,8 @@ function formatMoney(amount, currency = "USD") {
   const num = Number(amount || 0);
   const meta = currencyMeta(currency);
   const formatted = num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `<span class="currency-sym">${escapeHtml(meta.symbol)}</span>${formatted}`;
+  // Isolate LTR so RTL glyphs (e.g. AED د.إ) cannot reorder amount vs following %.
+  return `<span class="money-amount" dir="ltr"><span class="currency-sym">${escapeHtml(meta.symbol)}</span>${formatted}</span>`;
 }
 
 function formatMoneyText(amount, currency = "USD") {
@@ -566,32 +663,212 @@ function isReceiptImageFile(file) {
   return /\.(jpe?g|png|webp|gif|bmp|heic|heif|tif{1,2})$/i.test(file.name || "");
 }
 
-async function prepareReceiptFile(file) {
-  if (!file) return file;
-  const type = (file.type || "").toLowerCase();
-  if (type.includes("heic") || type.includes("heif")) return file;
-  if (!type.startsWith("image/") && !isReceiptImageFile(file)) return file;
+function _isPhoneClient() {
+  if (typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches) return true;
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+}
+
+/** Read width/height from JPEG/PNG headers without decoding pixels (cheap). */
+async function _sniffImageSize(file) {
   try {
-    const bitmap = await createImageBitmap(file);
-    const maxEdge = 1600;
-    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
-    if (scale >= 1 && file.size < 1.2 * 1024 * 1024) {
-      if (bitmap.close) bitmap.close();
+    const head = new Uint8Array(await file.slice(0, 65536).arrayBuffer());
+    // PNG: IHDR after 8-byte signature
+    if (head.length >= 24 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) {
+      const w = (head[16] << 24) | (head[17] << 16) | (head[18] << 8) | head[19];
+      const h = (head[20] << 24) | (head[21] << 16) | (head[22] << 8) | head[23];
+      if (w > 0 && h > 0) return { w, h };
+    }
+    // JPEG: scan for SOF0/SOF2
+    if (head.length > 4 && head[0] === 0xff && head[1] === 0xd8) {
+      let i = 2;
+      while (i + 9 < head.length) {
+        if (head[i] !== 0xff) { i += 1; continue; }
+        const marker = head[i + 1];
+        if (marker === 0xd9 || marker === 0xda) break;
+        const size = (head[i + 2] << 8) | head[i + 3];
+        if (size < 2) break;
+        // SOF0..SOF3, SOF5..SOF7, SOF9..SOF11, SOF13..SOF15
+        if (
+          (marker >= 0xc0 && marker <= 0xc3)
+          || (marker >= 0xc5 && marker <= 0xc7)
+          || (marker >= 0xc9 && marker <= 0xcb)
+          || (marker >= 0xcd && marker <= 0xcf)
+        ) {
+          const h = (head[i + 5] << 8) | head[i + 6];
+          const w = (head[i + 7] << 8) | head[i + 8];
+          if (w > 0 && h > 0) return { w, h };
+          break;
+        }
+        i += 2 + size;
+      }
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return null;
+}
+
+async function _decodeReceiptBitmap(file, maxEdge) {
+  // Prefer decode-time resize — avoids holding a full 12MP camera frame in RAM.
+  // Gallery picks are often already downsized by the OS; camera captures are not.
+  const dims = await _sniffImageSize(file);
+  const resizeOpts = { resizeQuality: "medium" };
+  try {
+    resizeOpts.imageOrientation = "from-image";
+  } catch (_) {
+    /* older browsers */
+  }
+  if (dims) {
+    if (dims.w >= dims.h) resizeOpts.resizeWidth = maxEdge;
+    else resizeOpts.resizeHeight = maxEdge;
+  } else if (_isPhoneClient()) {
+    // Phone camera receipts are usually portrait — cap height when size unknown.
+    resizeOpts.resizeHeight = maxEdge;
+  } else {
+    resizeOpts.resizeWidth = maxEdge;
+  }
+
+  if (typeof createImageBitmap === "function") {
+    try {
+      return await createImageBitmap(file, resizeOpts);
+    } catch (_) {
+      /* try the other edge, still resized — never full-res on phones */
+    }
+    const alt = { ...resizeOpts };
+    if (alt.resizeWidth) {
+      delete alt.resizeWidth;
+      alt.resizeHeight = maxEdge;
+    } else {
+      delete alt.resizeHeight;
+      alt.resizeWidth = maxEdge;
+    }
+    try {
+      return await createImageBitmap(file, alt);
+    } catch (_) {
+      /* fall through */
+    }
+    // Desktop-only last resort: full decode. Phones must not do this.
+    if (!_isPhoneClient()) {
+      try {
+        return await createImageBitmap(file);
+      } catch (_) {
+        /* fall through to <img> */
+      }
+    }
+  }
+
+  if (_isPhoneClient()) {
+    throw new Error("MEMORY");
+  }
+
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("Could not read that photo."));
+      el.src = url;
+    });
+    return img;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function _compressReceiptAttempt(file, maxEdge, quality) {
+  const bitmap = await _decodeReceiptBitmap(file, maxEdge);
+  const srcW = bitmap.width || bitmap.naturalWidth || 0;
+  const srcH = bitmap.height || bitmap.naturalHeight || 0;
+  if (!srcW || !srcH) {
+    if (bitmap.close) bitmap.close();
+    throw new Error("Could not read that photo.");
+  }
+  const scale = Math.min(1, maxEdge / Math.max(srcW, srcH));
+  const outW = Math.max(1, Math.round(srcW * scale));
+  const outH = Math.max(1, Math.round(srcH * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = outW;
+  canvas.height = outH;
+  try {
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) throw new Error("MEMORY");
+    ctx.drawImage(bitmap, 0, 0, outW, outH);
+  } finally {
+    if (bitmap.close) bitmap.close();
+  }
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+  canvas.width = 0;
+  canvas.height = 0;
+  if (!blob) throw new Error("MEMORY");
+  const base = (file.name || "receipt").replace(/\.[^.]+$/, "") || "receipt";
+  const out = new File([blob], `${base}.jpg`, { type: "image/jpeg", lastModified: Date.now() });
+  out._sharesquadPrepared = true;
+  return out;
+}
+
+/**
+ * Downscale/compress receipt images before preview + upload.
+ * @param {File} file
+ * @param {{ fromCamera?: boolean }} [opts] - camera captures need harder limits:
+ *   the OS photo picker often already shrinks gallery images, but the camera
+ *   returns a full-sensor frame while the WebView is still memory-tight.
+ */
+async function prepareReceiptFile(file, opts = {}) {
+  if (!file) return file;
+  if (file._sharesquadPrepared) return file;
+  if (!isReceiptImageFile(file)) return file;
+
+  const fromCamera = Boolean(opts.fromCamera);
+  const phone = _isPhoneClient();
+
+  // Camera: memory-safe ladder. Gallery (Personal + Group): one shared profile so
+  // the same photo is not re-encoded differently per tab before upload.
+  if (fromCamera) {
+    await new Promise((r) => setTimeout(r, 120));
+  }
+
+  const attempts = fromCamera
+    ? [
+        { maxEdge: 960, quality: 0.68 },
+        { maxEdge: 720, quality: 0.62 },
+        { maxEdge: 560, quality: 0.55 },
+      ]
+    : [
+        // Match server normalize intent (1600 / ~0.85). Phones use 1280 to avoid OOM.
+        { maxEdge: phone ? 1280 : 1600, quality: phone ? 0.75 : 0.85 },
+        { maxEdge: phone ? 960 : 1200, quality: 0.7 },
+      ];
+
+  // Gallery: always run the shared profile (do not keep the original bytes),
+  // so Personal and Group upload the same encoding for the same pick.
+  // Already-prepared files short-circuit above via _sharesquadPrepared.
+  if (!fromCamera && (file.type || "").toLowerCase().includes("jpeg") && file.size <= 350 * 1024) {
+    const dims = await _sniffImageSize(file);
+    const edgeCap = phone ? 1280 : 1600;
+    if (dims && Math.max(dims.w, dims.h) <= edgeCap) {
+      file._sharesquadPrepared = true;
       return file;
     }
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    if (bitmap.close) bitmap.close();
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
-    if (!blob) return file;
-    const base = (file.name || "receipt").replace(/\.[^.]+$/, "");
-    return new File([blob], `${base}.jpg`, { type: "image/jpeg" });
-  } catch (err) {
-    return file;
   }
+
+  let lastErr;
+  for (const attempt of attempts) {
+    try {
+      return await _compressReceiptAttempt(file, attempt.maxEdge, attempt.quality);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  const msg = String(lastErr?.message || lastErr || "");
+  if (/memory|allocat|MEMORY/i.test(msg)) {
+    throw new Error(
+      fromCamera
+        ? "Camera photo was too large for this phone. Try again, hold a bit farther away, or pick the photo from your gallery."
+        : "That photo is too large for this device. Try a smaller picture, or pick it from your gallery."
+    );
+  }
+  throw new Error(lastErr?.message || "Could not read that photo.");
 }
 
 async function waitForScanJob(jobId, { timeoutMs = 120000, intervalMs = 700 } = {}) {
@@ -622,8 +899,9 @@ async function waitForScanJob(jobId, { timeoutMs = 120000, intervalMs = 700 } = 
   throw new Error("Receipt scan timed out. Enter the details manually, or try again.");
 }
 
-async function uploadReceipt(path, file) {
-  const prepared = await prepareReceiptFile(file);
+async function uploadReceipt(path, file, prepareOpts = {}) {
+  // Skip a second compress when the caller already prepared (camera path).
+  const prepared = file?._sharesquadPrepared ? file : await prepareReceiptFile(file, prepareOpts);
   let lastErr;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const formData = new FormData();
@@ -672,82 +950,221 @@ document.addEventListener("dragstart", (event) => {
 });
 
 function bindReceiptCamera(opts) {
-  const modal = $(opts.modalId || "#liveCameraModal");
-  const video = $(opts.videoId || "#liveCameraVideo");
-  const captureBtn = $(opts.captureBtn || "#liveCameraCapture");
-  const cancelBtn = $(opts.cancelBtn || "#liveCameraCancel");
-  const fallbackBtn = $(opts.fallbackBtn || "#liveCameraFallback");
+  // Always use the native camera / file picker (capture=environment). The old
+  // in-app live-preview modal could not focus or use flash and produced poor
+  // scans; the system camera app is sharper and supports flash.
   const openBtn = $(opts.openBtn);
   const fileInput = $(opts.fileInput);
-  let stream = null;
-
-  async function stopCamera() {
-    if (stream) {
-      stream.getTracks().forEach((t) => t.stop());
-      stream = null;
-    }
-    if (video) video.srcObject = null;
-    modal?.classList.add("hidden");
-  }
-
-  async function startCamera() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      fileInput?.click();
-      return;
-    }
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-      });
-      if (video) {
-        video.srcObject = stream;
-        await video.play().catch(() => {});
-      }
-      modal?.classList.remove("hidden");
-    } catch (err) {
-      showToast("Could not open the in-app camera. Using the phone camera instead.", "info");
-      fileInput?.click();
-    }
-  }
-
   openBtn?.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    startCamera();
-  });
-  cancelBtn?.addEventListener("click", (e) => {
-    e.preventDefault();
-    stopCamera();
-  });
-  fallbackBtn?.addEventListener("click", (e) => {
-    e.preventDefault();
-    stopCamera();
-    fileInput?.click();
-  });
-  captureBtn?.addEventListener("click", async (e) => {
-    e.preventDefault();
-    if (!video || !video.videoWidth) {
-      showToast("Camera is not ready yet. Try again.", "info");
+    if (!fileInput) {
+      showToast("Camera is not available on this device.", "error");
       return;
     }
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext("2d").drawImage(video, 0, 0);
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
-    await stopCamera();
-    if (!blob) {
-      showToast("Could not capture the photo.", "error");
+    fileInput.click();
+  });
+}
+
+const RETURN_PATH_KEY = "sharesquad_return_path";
+
+function isLoginPath(pathname = location.pathname) {
+  const path = (pathname || "/").replace(/\/+$/, "") || "/";
+  return path === "/login" || path === "/login.html";
+}
+
+function isAuthedAppPath(pathname = location.pathname) {
+  const path = (pathname || "/").replace(/\/+$/, "") || "/";
+  if (isLoginPath(path) || path === "/" || path === "/landing" || path === "/landing.html") return false;
+  // Public marketing / legal / join pages stay reachable without a session.
+  if (/\/(about|contact|help|privacy|terms|receipt-scanning|shared-groups|clear-balances|friend-join|reset-password)(?:\.html)?$/.test(path)) {
+    return false;
+  }
+  if (/\/(join|quick-join)(?:\.html)?$/.test(path)) return false;
+  return true;
+}
+
+function isBackForwardNavigation() {
+  try {
+    const nav = performance.getEntriesByType("navigation")[0];
+    if (nav && nav.type === "back_forward") return true;
+  } catch (_) {
+    /* ignore */
+  }
+  try {
+    // Legacy PerformanceNavigation.TYPE_BACK_FORWARD === 2
+    if (performance.navigation && performance.navigation.type === 2) return true;
+  } catch (_) {
+    /* ignore */
+  }
+  return false;
+}
+
+function safeAppRedirect(rawNext) {
+  const next = String(rawNext || "").trim();
+  // Never bounce signed-in users to the marketing home page.
+  if (!next || next === "/" || next === "/landing.html" || next.startsWith("//") || !next.startsWith("/")) {
+    return "/app";
+  }
+  if (isLoginPath(next.split("?")[0])) return "/app";
+  return next;
+}
+
+function goToLogin({ replace = true, keepNext = false, search = "" } = {}) {
+  allowLoginOnce();
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  if (keepNext && !params.has("next") && !isLoginPath()) {
+    const here = `${location.pathname}${location.search}`;
+    if (here && here !== "/" && !here.startsWith("/landing")) params.set("next", here);
+  }
+  const qs = params.toString();
+  const url = `/login.html${qs ? `?${qs}` : ""}`;
+  if (replace) location.replace(url);
+  else location.href = url;
+}
+
+const ALLOW_LOGIN_KEY = "sharesquad_allow_login";
+
+function allowLoginOnce() {
+  try {
+    sessionStorage.setItem(ALLOW_LOGIN_KEY, "1");
+  } catch (_) {
+    /* private mode */
+  }
+}
+
+function consumeAllowLogin() {
+  try {
+    const ok = sessionStorage.getItem(ALLOW_LOGIN_KEY) === "1";
+    if (ok) sessionStorage.removeItem(ALLOW_LOGIN_KEY);
+    return ok;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * While signed in, block accidental return to login via browser Back / bfcache.
+ * Intentional visits still work: Sign out, typing /login or /login.html, or following a login link.
+ */
+function initLoginHistoryGuard() {
+  const bounceAway = () => {
+    if (!getToken() || !isLoginPath()) return false;
+    // Sign out (and similar) set a one-shot allow flag so login stays reachable.
+    if (consumeAllowLogin()) return false;
+    const next = new URLSearchParams(location.search).get("next");
+    location.replace(safeAppRedirect(next));
+    return true;
+  };
+
+  if (isLoginPath()) {
+    // Only block real Back/Forward (or bfcache). Never bounce typed /login or Sign out.
+    if (isBackForwardNavigation()) bounceAway();
+    window.addEventListener("pageshow", (event) => {
+      if (!getToken() || !event.persisted) return;
+      bounceAway();
+    });
+    return;
+  }
+
+  // After logout, a bfcache Back into an app page must not stay open as if signed in.
+  if (!isAuthedAppPath()) return;
+  window.addEventListener("pageshow", (event) => {
+    if (getToken() || !event.persisted) return;
+    allowLoginOnce();
+    goToLogin({ replace: true });
+  });
+}
+
+function currentAppPath() {
+  // Prefer the live group tab from the DOM when the address bar is briefly stale
+  // (e.g. right after a swipe before replaceState lands).
+  try {
+    if (/\/group(?:\.html)?$/.test(location.pathname)) {
+      const active = document.querySelector(".tab-btn.active[data-tab]");
+      if (active?.dataset?.tab) {
+        const url = new URL(location.href);
+        if (active.dataset.tab !== "balances") url.searchParams.set("tab", active.dataset.tab);
+        else url.searchParams.delete("tab");
+        return `${url.pathname}${url.search}${url.hash}`;
+      }
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return `${location.pathname}${location.search}${location.hash}`;
+}
+
+function rememberReturnPath(url = currentAppPath()) {
+  try {
+    sessionStorage.setItem(RETURN_PATH_KEY, url);
+  } catch (_) {
+    /* private mode / quota */
+  }
+}
+
+function consumeReturnPath() {
+  try {
+    const value = sessionStorage.getItem(RETURN_PATH_KEY);
+    sessionStorage.removeItem(RETURN_PATH_KEY);
+    return value;
+  } catch (_) {
+    return null;
+  }
+}
+
+function navigateWithReturn(url) {
+  // Don't overwrite the saved origin when already on Settings / Account.
+  if (!/\/settings(?:\.html)?(?:$|[?#])/.test(location.pathname + location.search)) {
+    const live = currentAppPath();
+    // Sync the live path (e.g. group ?tab=insights) into this history entry so
+    // browser Back from Settings restores the same screen as the in-app Back.
+    try {
+      const here = `${location.pathname}${location.search}${location.hash}`;
+      if (live !== here) history.replaceState(history.state, "", live);
+    } catch (_) {
+      /* ignore */
+    }
+    rememberReturnPath(live);
+  }
+  location.href = url;
+}
+
+function bindSmartBack(el, fallback = "/index.html") {
+  // Settings-only: return to the saved page (e.g. group Insights). Never use
+  // history.back() — that traps people between group tabs / settings.
+  if (!el || el.dataset.smartBackBound === "1") return;
+  el.dataset.smartBackBound = "1";
+  el.addEventListener("click", (e) => {
+    e.preventDefault();
+    const stored = consumeReturnPath();
+    const here = currentAppPath();
+    if (stored && stored !== here && !/\/settings(?:\.html)?(?:$|[?#])/.test(stored)) {
+      location.href = stored;
       return;
     }
-    const file = new File([blob], "receipt.jpg", { type: "image/jpeg" });
-    if (typeof opts.onCapture === "function") opts.onCapture(file);
+    location.href = el.getAttribute("href") || fallback;
   });
+}
+
+function initSmartNavigation() {
+  // Remember the current screen when opening Settings / Account.
+  document.querySelectorAll('a[href="/settings.html"], a[href="/settings"]').forEach((link) => {
+    if (link.dataset.returnNavBound === "1") return;
+    link.dataset.returnNavBound = "1";
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      navigateWithReturn("/settings.html");
+    });
+  });
+  // Smart back applies ONLY on the Settings page. Group / Personal / Friends
+  // / Quick-split back arrows keep their plain href (Groups list, Friends, …).
+  if (!/\/settings(?:\.html)?$/.test(location.pathname)) return;
+  const back = document.getElementById("backLink");
+  if (back) {
+    const fallback = back.getAttribute("href") || "/index.html";
+    bindSmartBack(back, fallback);
+  }
 }
 
 const CATEGORIES = [
@@ -891,7 +1308,7 @@ function renderCategoryPieChart(categoryRows, totalSpent, currency) {
         <span class="category-pie-swatch ${categoryClass(name)}" style="background:${color}"></span>
         <span class="truncate">${escapeHtml(name)}</span>
       </span>
-      <strong>${formatMoney(amount, currency)} <span class="category-chart-share">${share}%</span></strong>
+      <strong class="category-pie-legend-metrics" dir="ltr">${formatMoney(amount, currency)}<span class="category-chart-share">${share}%</span></strong>
     </div>`;
   }).join("");
 
@@ -1141,14 +1558,6 @@ document.addEventListener("focusin", (event) => {
   if (/^0(?:\.0+)?$/.test(field.value.trim())) field.value = "";
   else if (field.value) field.select();
 });
-if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", renderDemoBanner, { once: true });
-else renderDemoBanner();
-try {
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-    if (getThemePreference() === "system") applyTheme("system");
-  });
-} catch (_) {}
-
 window.ShareSquad = {
   $,
   $$,
@@ -1156,6 +1565,12 @@ window.ShareSquad = {
   getToken,
   setToken,
   removeToken,
+  beginDemoSession,
+  exitDemoSession,
+  leaveDemoToLanding,
+  isDemoSandboxSession,
+  hasPreDemoSession,
+  handleDemoAuthFailure,
   renderDemoBanner,
   getStoredGroupId,
   setStoredGroupId,
@@ -1173,6 +1588,17 @@ window.ShareSquad = {
   uploadReceipt,
   setAuthImage,
   bindReceiptCamera,
+  rememberReturnPath,
+  consumeReturnPath,
+  navigateWithReturn,
+  bindSmartBack,
+  initSmartNavigation,
+  isLoginPath,
+  isBackForwardNavigation,
+  safeAppRedirect,
+  goToLogin,
+  allowLoginOnce,
+  initLoginHistoryGuard,
   formatMoney,
   formatMoneyText,
   formatDate,
@@ -1212,3 +1638,17 @@ window.ShareSquad = {
   applyTheme,
   resolveTheme,
 };
+
+function bootSharedUi() {
+  renderDemoBanner();
+  initLoginHistoryGuard();
+  initSmartNavigation();
+}
+// Assign ShareSquad before boot so login/inline pages never see a partial client.
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bootSharedUi, { once: true });
+else bootSharedUi();
+try {
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (getThemePreference() === "system") applyTheme("system");
+  });
+} catch (_) {}

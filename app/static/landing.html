@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -16,7 +16,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="/styles.css?v=20261010moneyGlyphs">
+  <link rel="stylesheet" href="/styles.css?v=20261027demoReset1">
 </head>
 <body class="bb-bg text-ink min-h-screen">
   <header class="page-header border-b-2 border-ink/10 bb-bg backdrop-blur sticky top-0 z-30 landing-header">
@@ -49,7 +49,7 @@
 
     <section id="how-it-works" class="max-w-5xl mx-auto px-4 sm:px-5 py-14"><p class="landing-kicker">HOW IT WORKS</p><h2 class="landing-heading mt-3">From setup to settlement in four steps.</h2><div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-8"><div class="landing-step"><b>1</b><h3>Choose a space</h3><p>Use Personal for yourself, Friends for one person, or create a shared group for several people.</p></div><div class="landing-step"><b>2</b><h3>Invite when sharing</h3><p>New groups begin as drafts. Invite and activate at least one other member before shared bills can be added.</p></div><div class="landing-step"><b>3</b><h3>Add and split</h3><p>Enter a bill manually or scan a receipt, then select who paid and who shares it. Bills count for the month you save them.</p></div><div class="landing-step"><b>4</b><h3>Settle on Friends</h3><p>Open Friends to record a full or partial payment. Who pays whom in the group updates right away, with history you can reopen later.</p></div></div></section>
 
-    <section class="border-y border-ink/10 landing-on-dark"><div class="max-w-5xl mx-auto px-4 sm:px-5 py-14 grid lg:grid-cols-[1fr_1.2fr] gap-8"><div><p class="landing-kicker landing-kicker-on-dark">RECEIPT SCANNING</p><h2 class="landing-heading mt-3">Local receipt reading first. Extra AI help only when needed.</h2></div><div class="text-sm leading-6"><p>ShareSquad first reads receipts on the server, including cleanup for shadows, creases, and uneven text. If a receipt is still unclear, you can optionally connect your own supported vision-provider API key.</p><ol class="landing-list mt-4"><li>Open <strong>Settings ? Receipt scanning</strong>.</li><li>Turn on <strong>Use my own AI API key</strong>.</li><li>Choose a provider and model.</li><li>Paste an API key from that provider and save.</li></ol><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" class="inline-flex mt-4 font-semibold text-brand underline underline-offset-2">Get a Google AI Studio API key (free tier) ?</a><p class="landing-note mt-4 text-xs">Your key is used only when receipt fields need help. Receipt details are always shown for you to review before saving.</p></div></div></section>
+    <section class="border-y border-ink/10 landing-on-dark"><div class="max-w-5xl mx-auto px-4 sm:px-5 py-14 grid lg:grid-cols-[1fr_1.2fr] gap-8"><div><p class="landing-kicker landing-kicker-on-dark">RECEIPT SCANNING</p><h2 class="landing-heading mt-3">Local receipt reading first. Extra AI help only when needed.</h2></div><div class="text-sm leading-6"><p>ShareSquad first reads receipts on the server, including cleanup for shadows, creases, and uneven text. If a receipt is still unclear, you can optionally connect your own supported vision-provider API key.</p><ol class="landing-list mt-4"><li>Open <strong>Settings → Receipt scanning</strong>.</li><li>Turn on <strong>Use my own AI API key</strong>.</li><li>Choose a provider and model.</li><li>Paste an API key from that provider and save.</li></ol><a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" class="inline-flex mt-4 font-semibold text-brand underline underline-offset-2">Get a Google AI Studio API key (free tier) →</a><p class="landing-note mt-4 text-xs">Your key is used only when receipt fields need help. Receipt details are always shown for you to review before saving.</p></div></div></section>
 
     <section id="faq" class="max-w-4xl mx-auto px-4 sm:px-5 py-14"><p class="landing-kicker">FAQ</p><h2 class="landing-heading mt-3">Questions people usually ask.</h2><div class="mt-7 space-y-3"><details class="landing-faq"><summary>Does everyone need an account?</summary><p>Yes — everyone needs a ShareSquad account to use the app. You can still invite people to a group before they have one. They need an account to open the group, add expenses (when allowed), and see their own balances. Guests without an account cannot use the group dashboard.</p></details><details class="landing-faq"><summary>Can I add an expense without a receipt?</summary><p>Yes. Choose manual entry, enter the details, select the payer and participants, then save. A receipt is optional.</p></details><details class="landing-faq"><summary>Which month does an expense belong to?</summary><p>The calendar month you <strong>save</strong> it. The receipt date is still shown on the bill. If you save a September receipt in October, it counts toward October balances and appears under <strong>Added late</strong> in that month’s digest.</p></details><details class="landing-faq"><summary>How does ShareSquad decide who owes whom?</summary><p>Each expense records who paid and each participant’s share. Balances use every expense saved in that month. Open <strong>Friends</strong> to record a payment — Who pays whom in the group updates immediately.</p></details><details class="landing-faq"><summary>Can different currencies be used?</summary><p>Yes. Expenses can be recorded in supported currencies. From <strong>PDF Reports</strong> you can change settlement currency for converted reports. Balances never silently mix currencies.</p></details><details class="landing-faq"><summary>Does the month lock at month end?</summary><p>No. Month-end digests are snapshots only. Generating a PDF does not lock the month. You can keep adding and editing expenses.</p></details><details class="landing-faq"><summary>Is the demo the same as a real account?</summary><p>Yes. <strong>Try the full demo</strong> opens a private sandbox of the current ShareSquad build with sample data. It expires after two hours; sign up to keep your own groups permanently.</p></details><details class="landing-faq"><summary>Will an expense appear for everyone?</summary><p>Group members viewing the same group receive live updates after a saved change. A fallback refresh check also keeps pages current.</p></details><details class="landing-faq"><summary>Is receipt scanning automatic?</summary><p>ShareSquad suggests details from a receipt, but you confirm or correct the information before the expense is saved.</p></details><details class="landing-faq"><summary>How are passwords and API keys stored?</summary><p>Passwords are never stored in plain text. They are saved as a one-way bcrypt hash, so ShareSquad can check a sign-in without being able to recover the original password. Optional AI receipt-scanning API keys are encrypted at rest on the server and are not shown again in Settings after you save them. New passwords must include at least 8 characters, 1 uppercase letter, 2 numbers, and 1 special character. More detail is in the <a href="/privacy.html">Privacy Policy</a>.</p></details></div></section>
 
@@ -57,7 +57,7 @@
   </main>
 
   <footer class="border-t border-ink/10"><div class="max-w-5xl mx-auto px-4 sm:px-5 py-8 flex flex-col sm:flex-row justify-between gap-4 text-xs text-ink/60"><div><strong class="text-brand">ShareSquad</strong><p class="mt-1">Simple shared expense tracking by Tanish Sheth.</p></div><nav class="flex flex-wrap gap-x-4 gap-y-2"><a href="/about.html">About</a><a href="/help.html">Help</a><a href="/contact.html">Contact</a><a href="/privacy.html">Privacy</a><a href="/terms.html">Terms</a></nav></div></footer>
-  <script src="/api.js?v=20261007demoTemplateLen"></script><script>
+  <script src="/api.js?v=20261027demoReset1"></script><script>
     document.querySelector('#tryDemoBtn')?.addEventListener('click', async (event) => {
       const button = event.currentTarget;
       button.disabled = true;
@@ -66,10 +66,9 @@
         const response = await fetch('/api/demo/sandbox', { method: 'POST' });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || 'Could not start the demo');
-        ShareSquad.setToken(data.access_token);
-        localStorage.setItem('sharesquad_demo_sandbox', '1');
-        ShareSquad.setStoredGroupId(data.group_id);
-        window.location.href = `/group?group=${encodeURIComponent(data.group_id)}&tab=balances&demo=1`;
+        // Stash any signed-in account so Exit demo can restore it.
+        ShareSquad.beginDemoSession(data.access_token, data.group_id);
+        window.location.href = '/app?view=groups&demo=1';
       } catch (error) {
         ShareSquad.showToast(error.message || 'Could not start the demo', 'error');
         button.disabled = false;
@@ -77,6 +76,6 @@
       }
     });
   </script>
-<script src="/public-auth.js?v=20261007wave3"></script>
+<script src="/public-auth.js?v=20261027demoReset1"></script>
 </body>
 </html>

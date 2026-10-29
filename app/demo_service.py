@@ -19,7 +19,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from . import models
-from .auth import create_access_token, hash_password
+from .auth import create_access_token_for_account, hash_password
 from .config import APP_VERSION
 from .split_logic import calculate_splits
 
@@ -107,7 +107,13 @@ def _ensure_period(db: Session, group_id: int, period_key: str) -> models.Monthl
 
 
 def _seed_apartment_template(db: Session, accounts: list[models.Account], members: list[models.GroupMember], group: models.Group) -> None:
-    """Main roommate group with expenses saved across three calendar months."""
+    """Main roommate group with expenses saved across three calendar months.
+
+    Scenes covered for demos / QA: everyone splits, subset splits, late receipt
+    (prior month bill_date saved this month), multi-currency INR, utilities,
+    groceries, food, travel, home, fun — dense previous-month ledger for
+    month filters and Overall balances.
+    """
     today = date.today()
     current = _shift_month(today, 0)
     prev = _shift_month(today, -1)
@@ -118,24 +124,46 @@ def _seed_apartment_template(db: Session, accounts: list[models.Account], member
     period_prev = _ensure_period(db, group.id, _month_key(prev))
     period_older = _ensure_period(db, group.id, _month_key(older))
 
+    # (store, total, category, payer_index, participants, bill_date, currency, fx)
     current_expenses = (
         ("Costco run", 418.70, "Groceries", 4, (0, 1, 2, 3, 4), _clamp_day(current.year, current.month, min(today.day, 28)), "USD", 1.0),
         ("Uber to airport", 54.00, "Travel", 0, (0, 1, 2), _clamp_day(prev.year, prev.month, 12), "USD", 1.0),  # late bill
         ("Dinner at Olive Garden", 96.30, "Food", 3, (0, 2, 3), _clamp_day(current.year, current.month, max(1, today.day - 2)), "USD", 1.0),
         ("Internet bill", 80.00, "Utilities", 1, (0, 1, 2, 4), _clamp_day(current.year, current.month, max(1, today.day - 5)), "USD", 1.0),
         ("Movie tickets", 32.00, "Fun", 2, (2, 3), _clamp_day(current.year, current.month, max(1, today.day - 1)), "USD", 1.0),
-        ("Delhi street food", 2400.00, "Food", 0, (0, 1), _clamp_day(older.year, older.month, 18), "INR", 0.012),
+        ("Delhi street food", 2400.00, "Food", 0, (0, 1), _clamp_day(older.year, older.month, 18), "INR", 0.012),  # late + FX
+        ("Trader Joe's", 87.45, "Groceries", 1, (0, 1, 3), _clamp_day(current.year, current.month, max(1, today.day - 4)), "USD", 1.0),
+        ("Water bill", 38.00, "Utilities", 0, (0, 1, 2, 3, 4), _clamp_day(current.year, current.month, max(1, today.day - 6)), "USD", 1.0),
+        ("Sushi night", 124.80, "Food", 2, (0, 1, 2, 3), _clamp_day(current.year, current.month, max(1, today.day - 3)), "USD", 1.0),
+        ("Pharmacy run", 27.60, "Health", 3, (3, 4), _clamp_day(current.year, current.month, max(1, today.day - 1)), "USD", 1.0),
+        ("Parking downtown", 18.00, "Travel", 4, (0, 4), _clamp_day(current.year, current.month, min(today.day, 27)), "USD", 1.0),
+        ("Board game cafe", 46.00, "Fun", 1, (1, 2, 3), _clamp_day(current.year, current.month, max(1, today.day - 7)), "USD", 1.0),
     )
+    # Dense previous month — month filter, Overall, and Friends group lines.
     prev_expenses = (
         ("Rent share top-up", 240.00, "Home", 0, (0, 1, 2, 3, 4), _clamp_day(prev.year, prev.month, 3), "USD", 1.0),
         ("HEB groceries", 186.40, "Groceries", 1, (0, 1, 2), _clamp_day(prev.year, prev.month, 14), "USD", 1.0),
         ("Electric bill", 112.00, "Utilities", 2, (0, 1, 2, 3, 4), _clamp_day(prev.year, prev.month, 20), "USD", 1.0),
         ("Thai takeout", 68.50, "Food", 0, (0, 1), _clamp_day(prev.year, prev.month, 22), "USD", 1.0),
+        ("Target household", 93.25, "Home", 3, (0, 1, 2, 3), _clamp_day(prev.year, prev.month, 7), "USD", 1.0),
+        ("Gas fill-up (carpool)", 61.00, "Travel", 1, (0, 1, 2, 4), _clamp_day(prev.year, prev.month, 9), "USD", 1.0),
+        ("Pizza Friday", 54.75, "Food", 4, (0, 1, 2, 3, 4), _clamp_day(prev.year, prev.month, 11), "USD", 1.0),
+        ("Laundry quarters", 24.00, "Home", 2, (2, 3), _clamp_day(prev.year, prev.month, 15), "USD", 1.0),
+        ("Spotify family", 16.99, "Fun", 0, (0, 1, 2, 3, 4), _clamp_day(prev.year, prev.month, 1), "USD", 1.0),
+        ("Vet visit (shared pet)", 180.00, "Health", 1, (0, 1), _clamp_day(prev.year, prev.month, 18), "USD", 1.0),
+        ("Brunch at Josephine", 78.40, "Food", 3, (1, 2, 3), _clamp_day(prev.year, prev.month, 24), "USD", 1.0),
+        ("Cleaning supplies", 41.20, "Home", 4, (0, 1, 2, 3, 4), _clamp_day(prev.year, prev.month, 27), "USD", 1.0),
+        ("Mumbai snacks kit", 1850.00, "Food", 2, (0, 2, 4), _clamp_day(prev.year, prev.month, 16), "INR", 0.012),
+        ("Airport parking", 48.00, "Travel", 0, (0, 1, 3), _clamp_day(prev.year, prev.month, 28), "USD", 1.0),
     )
     older_expenses = (
         ("IKEA shelf", 149.00, "Home", 0, (0, 1), _clamp_day(older.year, older.month, 8), "USD", 1.0),
         ("Gas fill-up", 52.00, "Travel", 1, (0, 1, 2), _clamp_day(older.year, older.month, 16), "USD", 1.0),
         ("Streaming bundle", 45.00, "Fun", 3, (0, 1, 2, 3, 4), _clamp_day(older.year, older.month, 25), "USD", 1.0),
+        ("Welcome dinner", 112.00, "Food", 0, (0, 1, 2, 3, 4), _clamp_day(older.year, older.month, 4), "USD", 1.0),
+        ("Key copies + locks", 36.50, "Home", 2, (0, 1, 2), _clamp_day(older.year, older.month, 12), "USD", 1.0),
+        ("Water park day", 95.00, "Fun", 4, (0, 2, 3, 4), _clamp_day(older.year, older.month, 21), "USD", 1.0),
+        ("Phone chargers pack", 29.99, "Home", 1, (1, 3), _clamp_day(older.year, older.month, 27), "USD", 1.0),
     )
 
     for index, (store, total, category, payer_index, participant_indexes, bill_date, currency, fx) in enumerate(current_expenses):
@@ -166,6 +194,7 @@ def _seed_apartment_template(db: Session, accounts: list[models.Account], member
         event_type="expense_added", summary="Alex added Costco run",
         entity_type="expense",
     ))
+
 
 
 def ensure_template(db: Session) -> models.DemoTemplate:
@@ -258,12 +287,14 @@ def _seed_sandbox_extras(
     period_map: dict[int, models.MonthlyPeriod],
     source_group: models.Group,
 ) -> None:
-    """Direct splits, second group, and partial payments for the demo visitor."""
+    """Direct splits, second group, and partial / exact / overpay payment scenes."""
     today = date.today()
     prev = _shift_month(today, -1)
     older = _shift_month(today, -2)
     jordan = cloned_accounts[1]
     casey = cloned_accounts[2] if len(cloned_accounts) > 2 else None
+    morgan = cloned_accounts[3] if len(cloned_accounts) > 3 else None
+    riley = cloned_accounts[4] if len(cloned_accounts) > 4 else None
 
     # Friend everyone with the demo owner so the Friends list is useful.
     for other in cloned_accounts[1:]:
@@ -272,19 +303,55 @@ def _seed_sandbox_extras(
         if not existing:
             db.add(models.FriendConnection(account_one_id=one, account_two_id=two, status="ACTIVE"))
 
-    # --- Direct private bills across months (Jordan) ---
+    def _pair_pay(
+        *,
+        friend: models.Account,
+        amount: Decimal,
+        month_key: str,
+        payment_kind: str,
+        quick_split_id: int | None = None,
+        days_ago: int = 1,
+        status: str = "CONFIRMED",
+        extra_allocations: list[dict] | None = None,
+    ) -> None:
+        one_id, two_id = sorted((owner.id, friend.id))
+        allocations = extra_allocations or [{
+            "kind": "DIRECT",
+            "amount": float(amount),
+            "month_key": month_key,
+            "payment_kind": payment_kind,
+            **({"quick_split_id": quick_split_id} if quick_split_id else {}),
+        }]
+        # These fixtures already store paid_amount on their participant rows.
+        # Mark those allocations applied so the balance does not deduct twice.
+        for allocation in allocations:
+            if status == "CONFIRMED" and allocation.get("kind") == "DIRECT" and allocation.get("quick_split_id"):
+                allocation["private_applied"] = True
+        db.add(models.PairPayment(
+            account_one_id=one_id, account_two_id=two_id,
+            payer_account_id=friend.id, recipient_account_id=owner.id,
+            amount=amount, currency="USD", status=status,
+            reported_by_account_id=owner.id if status == "CONFIRMED" else friend.id,
+            allocations_json=json.dumps(allocations),
+            confirmed_at=(datetime.utcnow() - timedelta(days=days_ago)) if status == "CONFIRMED" else None,
+            created_at=datetime.utcnow() - timedelta(days=days_ago),
+        ))
+
+    # --- Direct private bills (Friends) — unpaid / partial / exact / overpay ---
+    # PARTIAL scenes (confirmed cash < share; remaining still owed)
     coffee = _add_direct_split(
         db, owner=owner, friend=jordan, title="Coffee and pastries",
         total=Decimal("18.40"), bill_date=today, category="Food",
         paid_amount=Decimal("5.00"), payment_status="PARTIAL",
         created_at=datetime.utcnow() - timedelta(days=1),
     )
-    walmart = _add_direct_split(
-        db, owner=owner, friend=jordan, title="Walmart run",
-        total=Decimal("75.02"),
-        bill_date=_clamp_day(prev.year, prev.month, 26),
-        category="Groceries",
-        created_at=datetime.utcnow() - timedelta(days=25),
+    jordan_prev_dinner = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Birthday dinner",
+        total=Decimal("88.00"),
+        bill_date=_clamp_day(prev.year, prev.month, 8),
+        category="Food",
+        paid_amount=Decimal("20.00"), payment_status="PARTIAL",
+        created_at=datetime.utcnow() - timedelta(days=32),
     )
     lyft = _add_direct_split(
         db, owner=owner, friend=jordan, title="Lyft from airport",
@@ -294,43 +361,241 @@ def _seed_sandbox_extras(
         paid_amount=Decimal("10.00"), payment_status="PARTIAL",
         created_at=datetime.utcnow() - timedelta(days=55),
     )
+
+    # EXACT / FULL scenes (friend share paid in full → settled private bill)
+    bookstore = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Bookstore haul (paid in full)",
+        total=Decimal("31.20"),
+        bill_date=_clamp_day(older.year, older.month, 22),
+        category="Fun",
+        paid_amount=Decimal("15.60"), payment_status="CONFIRMED",
+        created_at=datetime.utcnow() - timedelta(days=48),
+    )
+    exact_prev = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Parking reimbursement (exact)",
+        total=Decimal("24.00"),
+        bill_date=_clamp_day(prev.year, prev.month, 12),
+        category="Travel",
+        paid_amount=Decimal("12.00"), payment_status="CONFIRMED",
+        created_at=datetime.utcnow() - timedelta(days=26),
+    )
+    exact_today = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Bagels (exact settle)",
+        total=Decimal("16.00"),
+        bill_date=_clamp_day(today.year, today.month, max(1, today.day - 3)),
+        category="Food",
+        paid_amount=Decimal("8.00"), payment_status="CONFIRMED",
+        created_at=datetime.utcnow() - timedelta(days=3),
+    )
+
+    # OVERPAY scene — friend paid more than share; Extra pay / CREDIT remains
+    overpay_bill = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Farmers market (overpaid)",
+        total=Decimal("40.00"),
+        bill_date=_clamp_day(prev.year, prev.month, 21),
+        category="Groceries",
+        paid_amount=Decimal("20.00"), payment_status="CONFIRMED",
+        created_at=datetime.utcnow() - timedelta(days=20),
+    )
+
+    # Still-open unpaid bills (practice Mark partial / Record full / Overpay)
+    lunch = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Work lunch (unpaid)",
+        total=Decimal("34.60"), bill_date=_clamp_day(today.year, today.month, max(1, today.day - 2)),
+        category="Food",
+        created_at=datetime.utcnow() - timedelta(days=2),
+    )
+    walmart = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Walmart run (unpaid)",
+        total=Decimal("75.02"),
+        bill_date=_clamp_day(prev.year, prev.month, 26),
+        category="Groceries",
+        created_at=datetime.utcnow() - timedelta(days=25),
+    )
+    jordan_prev_tools = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Hardware store (shared tools)",
+        total=Decimal("56.40"),
+        bill_date=_clamp_day(prev.year, prev.month, 19),
+        category="Home",
+        created_at=datetime.utcnow() - timedelta(days=21),
+    )
+    jordan_prev_uber = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Uber to game night",
+        total=Decimal("22.50"),
+        bill_date=_clamp_day(prev.year, prev.month, 14),
+        category="Travel",
+        created_at=datetime.utcnow() - timedelta(days=27),
+    )
+    # Debtor-marked PENDING (not yet confirmed by lender) — F03 confirm scene
+    pending_mark = _add_direct_split(
+        db, owner=owner, friend=jordan, title="Smoothie (awaiting confirm)",
+        total=Decimal("14.00"),
+        bill_date=_clamp_day(today.year, today.month, max(1, today.day - 1)),
+        category="Food",
+        paid_amount=Decimal("0.00"), payment_status="PENDING",
+        created_at=datetime.utcnow() - timedelta(hours=10),
+    )
+
     if casey:
         _add_direct_split(
-            db, owner=owner, friend=casey, title="Concert tickets",
+            db, owner=owner, friend=casey, title="Concert tickets (unpaid)",
             total=Decimal("96.00"),
             bill_date=_clamp_day(prev.year, prev.month, 11),
             category="Fun",
             created_at=datetime.utcnow() - timedelta(days=28),
         )
+        casey_partial = _add_direct_split(
+            db, owner=owner, friend=casey, title="Museum tickets",
+            total=Decimal("40.00"),
+            bill_date=_clamp_day(prev.year, prev.month, 5),
+            category="Fun",
+            paid_amount=Decimal("10.00"), payment_status="PARTIAL",
+            created_at=datetime.utcnow() - timedelta(days=35),
+        )
+        casey_exact = _add_direct_split(
+            db, owner=owner, friend=casey, title="Shared cab (exact)",
+            total=Decimal("30.00"),
+            bill_date=_clamp_day(prev.year, prev.month, 17),
+            category="Travel",
+            paid_amount=Decimal("15.00"), payment_status="CONFIRMED",
+            created_at=datetime.utcnow() - timedelta(days=22),
+        )
+        _add_direct_split(
+            db, owner=owner, friend=casey, title="Brunch catch-up (unpaid)",
+            total=Decimal("52.80"),
+            bill_date=_clamp_day(today.year, today.month, max(1, today.day - 5)),
+            category="Food",
+            created_at=datetime.utcnow() - timedelta(days=5),
+        )
+        _add_direct_split(
+            db, owner=owner, friend=casey, title="Gift wrap supplies",
+            total=Decimal("19.75"),
+            bill_date=_clamp_day(older.year, older.month, 14),
+            category="Home",
+            created_at=datetime.utcnow() - timedelta(days=52),
+        )
+        _pair_pay(
+            friend=casey, amount=Decimal("10.00"), month_key=_month_key(prev),
+            payment_kind="PARTIAL", quick_split_id=casey_partial.id, days_ago=34,
+        )
+        _pair_pay(
+            friend=casey, amount=Decimal("15.00"), month_key=_month_key(prev),
+            payment_kind="FULL", quick_split_id=casey_exact.id, days_ago=21,
+        )
 
-    one, two = sorted((owner.id, jordan.id))
-    # Partial direct payments — leave remaining Direct balance across months.
-    db.add(models.PairPayment(
-        account_one_id=one, account_two_id=two,
-        payer_account_id=jordan.id, recipient_account_id=owner.id,
-        amount=Decimal("5.00"), currency="USD", status="CONFIRMED",
-        reported_by_account_id=owner.id,
-        allocations_json=json.dumps([{
-            "kind": "DIRECT", "amount": 5.0, "month_key": _month_key(today),
-            "payment_kind": "PARTIAL", "quick_split_id": coffee.id,
-        }]),
-        confirmed_at=datetime.utcnow() - timedelta(days=1),
-        created_at=datetime.utcnow() - timedelta(days=1),
-    ))
-    db.add(models.PairPayment(
-        account_one_id=one, account_two_id=two,
-        payer_account_id=jordan.id, recipient_account_id=owner.id,
-        amount=Decimal("10.00"), currency="USD", status="CONFIRMED",
-        reported_by_account_id=owner.id,
-        allocations_json=json.dumps([{
-            "kind": "DIRECT", "amount": 10.0, "month_key": _month_key(older),
-            "payment_kind": "PARTIAL", "quick_split_id": lyft.id,
-        }]),
-        confirmed_at=datetime.utcnow() - timedelta(days=40),
-        created_at=datetime.utcnow() - timedelta(days=40),
-    ))
-    # Unpaid Walmart remains fully open in the previous month.
-    _ = walmart
+    if morgan:
+        _add_direct_split(
+            db, owner=owner, friend=morgan, title="Gym guest pass (unpaid)",
+            total=Decimal("28.00"),
+            bill_date=_clamp_day(prev.year, prev.month, 16),
+            category="Health",
+            created_at=datetime.utcnow() - timedelta(days=24),
+        )
+        morgan_partial = _add_direct_split(
+            db, owner=owner, friend=morgan, title="Taxi after late shift",
+            total=Decimal("37.00"),
+            bill_date=_clamp_day(prev.year, prev.month, 23),
+            category="Travel",
+            paid_amount=Decimal("12.00"), payment_status="PARTIAL",
+            created_at=datetime.utcnow() - timedelta(days=18),
+        )
+        morgan_over = _add_direct_split(
+            db, owner=owner, friend=morgan, title="Snack box (overpaid)",
+            total=Decimal("20.00"),
+            bill_date=_clamp_day(prev.year, prev.month, 6),
+            category="Food",
+            paid_amount=Decimal("10.00"), payment_status="CONFIRMED",
+            created_at=datetime.utcnow() - timedelta(days=33),
+        )
+        _add_direct_split(
+            db, owner=owner, friend=morgan, title="Ice cream run (unpaid)",
+            total=Decimal("14.50"),
+            bill_date=today - timedelta(days=1),
+            category="Food",
+            created_at=datetime.utcnow() - timedelta(hours=20),
+        )
+        _pair_pay(
+            friend=morgan, amount=Decimal("12.00"), month_key=_month_key(prev),
+            payment_kind="PARTIAL", quick_split_id=morgan_partial.id, days_ago=17,
+        )
+        # Exact share ($10) + $5 Extra pay credit
+        _pair_pay(
+            friend=morgan, amount=Decimal("15.00"), month_key=_month_key(prev),
+            payment_kind="OVERPAYMENT", quick_split_id=morgan_over.id, days_ago=32,
+            extra_allocations=[
+                {
+                    "kind": "DIRECT", "amount": 10.0, "month_key": _month_key(prev),
+                    "payment_kind": "FULL", "quick_split_id": morgan_over.id,
+                },
+                {"kind": "CREDIT", "amount": 5.0, "month_key": None, "payment_kind": "OVERPAYMENT"},
+            ],
+        )
+
+    if riley:
+        _add_direct_split(
+            db, owner=owner, friend=riley, title="Printer ink (unpaid)",
+            total=Decimal("44.00"),
+            bill_date=_clamp_day(prev.year, prev.month, 10),
+            category="Home",
+            created_at=datetime.utcnow() - timedelta(days=30),
+        )
+        riley_exact = _add_direct_split(
+            db, owner=owner, friend=riley, title="Arcade tokens (exact)",
+            total=Decimal("25.00"),
+            bill_date=_clamp_day(today.year, today.month, max(1, today.day - 6)),
+            category="Fun",
+            paid_amount=Decimal("12.50"), payment_status="CONFIRMED",
+            created_at=datetime.utcnow() - timedelta(days=6),
+        )
+        _pair_pay(
+            friend=riley, amount=Decimal("12.50"), month_key=_month_key(today),
+            payment_kind="FULL", quick_split_id=riley_exact.id, days_ago=5,
+        )
+
+    # Jordan pair ledger: partial + exact + overpay + pending confirm
+    _pair_pay(
+        friend=jordan, amount=Decimal("5.00"), month_key=_month_key(today),
+        payment_kind="PARTIAL", quick_split_id=coffee.id, days_ago=1,
+    )
+    _pair_pay(
+        friend=jordan, amount=Decimal("10.00"), month_key=_month_key(older),
+        payment_kind="PARTIAL", quick_split_id=lyft.id, days_ago=40,
+    )
+    _pair_pay(
+        friend=jordan, amount=Decimal("20.00"), month_key=_month_key(prev),
+        payment_kind="PARTIAL", quick_split_id=jordan_prev_dinner.id, days_ago=30,
+    )
+    _pair_pay(
+        friend=jordan, amount=Decimal("15.60"), month_key=_month_key(older),
+        payment_kind="FULL", quick_split_id=bookstore.id, days_ago=47,
+    )
+    _pair_pay(
+        friend=jordan, amount=Decimal("12.00"), month_key=_month_key(prev),
+        payment_kind="FULL", quick_split_id=exact_prev.id, days_ago=25,
+    )
+    _pair_pay(
+        friend=jordan, amount=Decimal("8.00"), month_key=_month_key(today),
+        payment_kind="FULL", quick_split_id=exact_today.id, days_ago=3,
+    )
+    # Overpay: $20 clears the $20 share, +$8 Extra pay credit
+    _pair_pay(
+        friend=jordan, amount=Decimal("28.00"), month_key=_month_key(prev),
+        payment_kind="OVERPAYMENT", quick_split_id=overpay_bill.id, days_ago=19,
+        extra_allocations=[
+            {
+                "kind": "DIRECT", "amount": 20.0, "month_key": _month_key(prev),
+                "payment_kind": "FULL", "quick_split_id": overpay_bill.id,
+            },
+            {"kind": "CREDIT", "amount": 8.0, "month_key": None, "payment_kind": "OVERPAYMENT"},
+        ],
+    )
+    # PENDING debtor mark ($7 of $7 share) — lender must Confirm on Friends
+    _pair_pay(
+        friend=jordan, amount=Decimal("7.00"), month_key=_month_key(today),
+        payment_kind="PARTIAL", quick_split_id=pending_mark.id, days_ago=0,
+        status="PENDING",
+    )
+    _ = (walmart, lunch, jordan_prev_tools, jordan_prev_uber)
 
     # --- Second shared group (weekend trip) with two months of bills ---
     trip = models.Group(name="Weekend Trip · Demo", currency="USD", created_by_id=owner.id)
@@ -366,11 +631,41 @@ def _seed_sandbox_extras(
         created_at=datetime.utcnow() - timedelta(days=1),
     )
     _add_expense(
+        db, trip_current, trip_members,
+        store="National park day pass", total=45.00, category="Travel",
+        payer_index=0, participant_indexes=tuple(range(len(trip_members))),
+        bill_date=_clamp_day(today.year, today.month, max(1, today.day - 2)),
+        created_at=datetime.utcnow() - timedelta(days=2, hours=4),
+    )
+    # Previous-month trip ledger (dense for month filter + Friends group line)
+    _add_expense(
         db, trip_prev, trip_members,
         store="Gas for road trip", total=64.00, category="Travel",
         payer_index=0, participant_indexes=tuple(range(len(trip_members))),
         bill_date=_clamp_day(prev.year, prev.month, 18),
         created_at=datetime.utcnow() - timedelta(days=22),
+    )
+    _add_expense(
+        db, trip_prev, trip_members,
+        store="Cabin groceries", total=92.30, category="Groceries",
+        payer_index=1, participant_indexes=tuple(range(len(trip_members))),
+        bill_date=_clamp_day(prev.year, prev.month, 16),
+        created_at=datetime.utcnow() - timedelta(days=24),
+    )
+    _add_expense(
+        db, trip_prev, trip_members,
+        store="BBQ takeout", total=58.00, category="Food",
+        payer_index=0, participant_indexes=(0, 1),
+        bill_date=_clamp_day(prev.year, prev.month, 17),
+        created_at=datetime.utcnow() - timedelta(days=23),
+    )
+    _add_expense(
+        db, trip_prev, trip_members,
+        store="Kayak rental", total=75.00, category="Fun",
+        payer_index=1 if len(trip_members) > 1 else 0,
+        participant_indexes=tuple(range(len(trip_members))),
+        bill_date=_clamp_day(prev.year, prev.month, 19),
+        created_at=datetime.utcnow() - timedelta(days=21),
     )
     db.add(models.GroupActivity(
         group_id=trip.id, actor_account_id=owner.id,
@@ -430,9 +725,15 @@ def _seed_sandbox_extras(
 
     db.add(models.Notification(
         account_id=owner.id, group_id=primary_group.id,
-        message="Demo tip: open Friends → Jordan to see one combined Direct total + one line per group across months. Group Balances shows Overall.",
+        message="Demo tip: Friends → Jordan shows unpaid, partial, exact-paid, and overpay (Extra pay) private bills — plus a pending payment waiting for your confirm.",
         link="/friends.html",
     ))
+    db.add(models.Notification(
+        account_id=owner.id, group_id=primary_group.id,
+        message="Demo tip: open Austin Apartment → Expenses and switch to last month for a dense roommate ledger; Weekend Trip has prior-month trip bills too.",
+        link=f"/group.html?group={primary_group.id}&tab=expenses",
+    ))
+
 
 
 def _copy_template_group(db: Session, template: models.DemoTemplate, sandbox_id: str) -> tuple[models.Account, models.Group, list[models.Account]]:
@@ -540,7 +841,7 @@ def create_sandbox(db: Session) -> dict:
     db.commit()
     return {
         "sandbox_id": sandbox.id,
-        "access_token": create_access_token(owner.id),
+        "access_token": create_access_token_for_account(owner),
         "group_id": group.id,
         "expires_at": sandbox.expires_at,
     }

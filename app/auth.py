@@ -53,10 +53,25 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
-def create_access_token(account_id: int) -> str:
+def bump_session_version(account: models.Account) -> int:
+    """Invalidate outstanding JWTs for this account."""
+    current = int(getattr(account, "session_version", 1) or 1)
+    account.session_version = current + 1
+    return account.session_version
+
+
+def create_access_token(account_id: int, session_version: int = 1) -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
-    payload = {"sub": str(account_id), "exp": expire}
+    payload = {
+        "sub": str(account_id),
+        "sv": int(session_version or 1),
+        "exp": expire,
+    }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_access_token_for_account(account: models.Account) -> str:
+    return create_access_token(account.id, getattr(account, "session_version", 1) or 1)
 
 
 def get_current_account(
@@ -69,18 +84,26 @@ def get_current_account(
     try:
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
         account_id = int(payload.get("sub", 0))
-    except (JWTError, ValueError, Exception):
+        token_sv = payload.get("sv")
+        if token_sv is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
+        token_sv = int(token_sv)
+    except HTTPException:
+        raise
+    except (JWTError, ValueError, TypeError, Exception):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
     account = db.query(models.Account).get(account_id)
     if not account:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account not found")
+    current_sv = int(getattr(account, "session_version", 1) or 1)
+    if token_sv != current_sv:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
     if account.deletion_requested_at or account.deletion_completed_at:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This account is not active")
     sandbox = db.query(models.DemoSandbox).filter_by(account_id=account.id).first()
     if sandbox and sandbox.expires_at <= datetime.utcnow():
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This demo sandbox has expired. Start a new demo to continue.")
-    # Sliding session: any authenticated activity resets the 30-day idle clock.
-    request.state.refresh_access_token = create_access_token(account.id)
+    # Absolute expiry only — do not slide/refresh the JWT on each request.
     return account
 
 

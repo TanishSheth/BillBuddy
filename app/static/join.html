@@ -1,9 +1,9 @@
-<!DOCTYPE html>
+ï»¿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Join group · ShareSquad</title>
+  <title>Join group â€” ShareSquad</title>
   <script>
     (function () {
       try {
@@ -13,16 +13,16 @@
       } catch (e) {}
     })();
   </script>
-  <link rel="stylesheet" href="/styles.css?v=20261010moneyGlyphs" />
+  <link rel="stylesheet" href="/styles.css?v=20261027demoReset1" />
 </head>
 <body class="bb-bg text-ink min-h-screen flex items-center justify-center px-4">
   <div class="bb-card max-w-md w-full text-center p-6">
     <h1 class="font-mono font-bold text-xl text-brand mb-2">Join group</h1>
-    <p id="statusMsg" class="font-mono text-sm text-ink/60 mb-4">Checking your invite…</p>
+    <p id="statusMsg" class="font-mono text-sm text-ink/60 mb-4">Checking your inviteâ€¦</p>
     <a id="signInLink" href="/login.html" class="bb-btn-primary hidden">Sign in to join</a>
   </div>
 
-  <script src="/api.js?v=20261007scaleHardening"></script>
+  <script src="/api.js?v=20261027demoReset1"></script>
   <script>
     const PENDING_INVITE_KEY = "sharesquad_pending_invite";
     const code = new URLSearchParams(window.location.search).get("code");
@@ -50,7 +50,7 @@
             if (!ok) throw new Error(data.detail || "Could not join the group");
             localStorage.removeItem(PENDING_INVITE_KEY);
             ShareSquad.setStoredGroupId(data.id);
-            msg.textContent = `Joined “${data.name}”. Opening the group…`;
+            msg.textContent = `Joined â€œ${data.name}â€. Opening the groupâ€¦`;
             msg.className = "font-mono text-sm balance-positive mb-4";
             setTimeout(() => { window.location.href = `/group?group=${encodeURIComponent(data.id)}`; }, 700);
           })
