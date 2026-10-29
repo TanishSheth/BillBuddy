@@ -2268,16 +2268,23 @@ def _assign_shared_payment(split: models.QuickSplit, payer_paid_amount: Optional
 
 
 def _viewer_direct_effect(split: models.QuickSplit, participant: models.QuickSplitParticipant, account_id: int) -> Decimal:
-    """Positive means the other person owes this account for one private bill."""
+    """Positive means the other person still owes this account for one bill."""
+    friend_share = Decimal(str(participant.share_amount or 0)).quantize(Decimal("0.01"))
+    friend_paid = Decimal(str(participant.paid_amount or 0)).quantize(Decimal("0.01"))
+    # Older confirmed rows stored status without a numeric paid amount. Treat
+    # that as settled; newer rows use the precise remaining paid calculation.
+    outstanding = (
+        Decimal("0.00")
+        if participant.payment_status == "CONFIRMED" and friend_paid <= 0
+        else max(Decimal("0.00"), friend_share - friend_paid).quantize(Decimal("0.01"))
+    )
+    if split.payer_account_id == account_id:
+        return outstanding
+    if participant.account_id == account_id:
+        return (-outstanding).quantize(Decimal("0.01"))
     total = Decimal(str(split.total_amount))
     payer_paid = Decimal(str(split.payer_paid_amount)) if split.payer_paid_amount is not None else total
-    if split.payer_account_id == account_id:
-        my_paid = payer_paid
-        my_share = Decimal(str(split.payer_share_amount or 0))
-    else:
-        my_paid = total - payer_paid
-        my_share = Decimal(str(participant.share_amount))
-    return (my_paid - my_share).quantize(Decimal("0.01"))
+    return (total - payer_paid - friend_share).quantize(Decimal("0.01"))
 
 
 def _apply_quick_split_values(split: models.QuickSplit, payer_value, participant_values: dict[int, object]) -> None:
@@ -3188,6 +3195,15 @@ def _consolidated_friend_sources(db: Session, account_id: int, friend_id: int, c
                 continue
             month_key = allocation.get("month_key")
             if not month_key:
+                continue
+            # A month that is already settled has its final cash represented by
+            # its settlement record. Re-adding historic transfers here creates
+            # a phantom private balance.
+            if monthly.get(month_key) and monthly[month_key].status == "SETTLED":
+                continue
+            # Bill-linked cash is already reflected in paid_amount/status by
+            # _viewer_direct_effect. Counting it again deducts it twice.
+            if allocation.get("private_applied") and allocation.get("quick_split_id"):
                 continue
             amount = Decimal(str(allocation.get("amount", 0)))
             signed = amount if payment.payer_account_id == account_id else -amount
